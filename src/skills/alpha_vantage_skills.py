@@ -4,9 +4,15 @@ This module provides functions to fetch company fundamentals, dividends,
 earnings, and financial statements from Alpha Vantage API using requests.
 """
 
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 from typing import Dict, Optional
 import pandas as pd
 import requests
+import time
 from src.utils import secrets, get_logger
 
 
@@ -18,11 +24,52 @@ BASE_URL = "https://www.alphavantage.co/query"
 
 # Get API key from secrets
 API_KEY = secrets.get("alpha_vantage.api_key")
-logger.info("Alpha Vantage client initialized")
+
+# Rate limiting: 1 request per 1.5 seconds
+MIN_REQUEST_INTERVAL = 1.5  # seconds
+_last_request_time = 0.0
+
+logger.info("Alpha Vantage client initialized with rate limiting (1 request per 1.5s)")
+
+
+def _clean_value(value):
+    """Clean API values by converting 'None' strings and None to actual None.
+
+    Args:
+        value: Value from API response
+
+    Returns:
+        None if value is None or 'None' string, otherwise the original value
+    """
+    if value is None or value == "None" or value == "":
+        return None
+    return value
+
+
+def _to_float(value, default=None):
+    """Safely convert value to float, handling None/'None' strings.
+
+    Args:
+        value: Value to convert
+        default: Default value if conversion fails
+
+    Returns:
+        Float value or default
+    """
+    value = _clean_value(value)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return default
 
 
 def _make_request(params: dict) -> dict:
-    """Make HTTP request to Alpha Vantage API.
+    """Make HTTP request to Alpha Vantage API with rate limiting.
+
+    Enforces a minimum delay of 1.5 seconds between requests to comply with
+    Alpha Vantage free tier rate limits (1 request per second).
 
     Args:
         params: Query parameters for the API request
@@ -33,13 +80,24 @@ def _make_request(params: dict) -> dict:
     Raises:
         Exception: If API request fails
     """
+    global _last_request_time
+
     params["apikey"] = API_KEY
     function = params.get("function", "UNKNOWN")
     symbol = params.get("symbol", "UNKNOWN")
 
+    # Rate limiting: ensure minimum interval between requests
+    current_time = time.time()
+    time_since_last_request = current_time - _last_request_time
+
+    if time_since_last_request < MIN_REQUEST_INTERVAL:
+        sleep_time = MIN_REQUEST_INTERVAL - time_since_last_request
+        logger.debug(f"Rate limiting: sleeping for {sleep_time:.2f}s before request")
+        time.sleep(sleep_time)
+
     logger.debug(f"Making Alpha Vantage API request: function={function}, symbol={symbol}")
 
-    response = requests.get(BASE_URL, params=params, timeout=30)
+    response = requests.get(BASE_URL, params=params, timeout=180)
     response.raise_for_status()
 
     data = response.json()
@@ -49,10 +107,20 @@ def _make_request(params: dict) -> dict:
         error_msg = f"API Error: {data['Error Message']}"
         logger.error(error_msg)
         raise Exception(error_msg)
+
+    # Check for rate limit messages (Note or Information keys)
     if "Note" in data:
         error_msg = f"API Rate Limit: {data['Note']}"
         logger.warning(error_msg)
         raise Exception(error_msg)
+
+    if "Information" in data:
+        error_msg = f"API Rate Limit: {data['Information']}"
+        logger.warning(error_msg)
+        raise Exception(error_msg)
+
+    # Update last request time after successful request
+    _last_request_time = time.time()
 
     logger.debug(f"Successfully received data from Alpha Vantage: function={function}")
     return data
@@ -97,11 +165,28 @@ def fetch_dividend_history(symbol: str) -> pd.DataFrame:
         symbol: Stock ticker symbol (e.g., "AAPL")
 
     Returns:
-        DataFrame with columns: date, dividend_amount
+        DataFrame with columns: symbol, ex_dividend_date, declaration_date,
+        record_date, payment_date, amount
+
+        Schema matches Alpha Vantage DIVIDENDS response:
+        {
+          "symbol": str,
+          "data": [
+            {
+              "ex_dividend_date": str,
+              "declaration_date": str,
+              "record_date": str,
+              "payment_date": str,
+              "amount": str
+            }
+          ]
+        }
 
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching dividend history for {symbol}")
+
     try:
         params = {
             "function": "DIVIDENDS",
@@ -112,38 +197,79 @@ def fetch_dividend_history(symbol: str) -> pd.DataFrame:
         # Extract dividend data from response
         dividend_data = data.get("data", [])
 
+        # Convert to DataFrame with all schema fields
         dividends = []
         for record in dividend_data:
             dividends.append({
-                "date": record.get("ex_dividend_date"),
-                "dividend_amount": float(record.get("amount", 0)),
-                "payment_date": record.get("payment_date"),
+                "symbol": symbol,
+                "ex_dividend_date": _clean_value(record.get("ex_dividend_date")),
+                "declaration_date": _clean_value(record.get("declaration_date")),
+                "record_date": _clean_value(record.get("record_date")),
+                "payment_date": _clean_value(record.get("payment_date")),
+                "amount": _to_float(record.get("amount")),
             })
 
         df = pd.DataFrame(dividends)
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date', ascending=False)
+            # Convert date columns to datetime, coerce errors to NaT
+            df['ex_dividend_date'] = pd.to_datetime(df['ex_dividend_date'], errors='coerce')
+            df['declaration_date'] = pd.to_datetime(df['declaration_date'], errors='coerce')
+            df['record_date'] = pd.to_datetime(df['record_date'], errors='coerce')
+            df['payment_date'] = pd.to_datetime(df['payment_date'], errors='coerce')
+            df = df.sort_values('ex_dividend_date', ascending=False)
 
+        logger.info(f"Successfully fetched {len(df)} dividend records for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch dividend history for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch dividend history for {symbol}: {str(e)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
 
-def fetch_earnings_history(symbol: str) -> pd.DataFrame:
+def fetch_earnings_history(symbol: str, quarterly: bool = True) -> pd.DataFrame:
     """Fetch quarterly and annual earnings data.
 
     Args:
         symbol: Stock ticker symbol (e.g., "AAPL")
+        quarterly: If True, return quarterly earnings; otherwise annual
 
     Returns:
-        DataFrame with earnings data including:
-        - fiscalDateEnding, reportedEPS, estimatedEPS, surprise, surprisePercentage
+        DataFrame with earnings data.
+
+        For quarterly earnings:
+        - symbol, fiscalDateEnding, reportedDate, reportedEPS, estimatedEPS,
+          surprise, surprisePercentage
+
+        For annual earnings:
+        - symbol, fiscalDateEnding, reportedEPS
+
+        Schema matches Alpha Vantage EARNINGS response:
+        {
+          "symbol": str,
+          "annualEarnings": [
+            {
+              "fiscalDateEnding": str,
+              "reportedEPS": str
+            }
+          ],
+          "quarterlyEarnings": [
+            {
+              "fiscalDateEnding": str,
+              "reportedDate": str,
+              "reportedEPS": str,
+              "estimatedEPS": str,
+              "surprise": str,
+              "surprisePercentage": str
+            }
+          ]
+        }
 
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching earnings history for {symbol} (quarterly={quarterly})")
+
     try:
         params = {
             "function": "EARNINGS",
@@ -151,18 +277,41 @@ def fetch_earnings_history(symbol: str) -> pd.DataFrame:
         }
         data = _make_request(params)
 
-        # Extract quarterly earnings
-        quarterly_earnings = data.get("quarterlyEarnings", [])
-        df = pd.DataFrame(quarterly_earnings)
+        # Choose quarterly or annual earnings
+        key = "quarterlyEarnings" if quarterly else "annualEarnings"
+        earnings_data = data.get(key, [])
+
+        df = pd.DataFrame(earnings_data)
 
         if not df.empty:
-            df['fiscalDateEnding'] = pd.to_datetime(df['fiscalDateEnding'])
+            # Add symbol column
+            df.insert(0, 'symbol', symbol)
+
+            # Clean None/"None" values in all string columns
+            for col in df.columns:
+                if df[col].dtype == 'object':
+                    df[col] = df[col].apply(lambda x: _clean_value(x) if isinstance(x, str) else x)
+
+            # Convert date columns
+            df['fiscalDateEnding'] = pd.to_datetime(df['fiscalDateEnding'], errors='coerce')
+            if quarterly and 'reportedDate' in df.columns:
+                df['reportedDate'] = pd.to_datetime(df['reportedDate'], errors='coerce')
+
+            # Convert numeric columns
+            numeric_cols = ['reportedEPS', 'estimatedEPS', 'surprise', 'surprisePercentage']
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
             df = df.sort_values('fiscalDateEnding', ascending=False)
 
+        logger.info(f"Successfully fetched {len(df)} earnings records for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch earnings history for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch earnings history for {symbol}: {str(e)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
 
 def fetch_income_statement(symbol: str, quarterly: bool = False) -> pd.DataFrame:
@@ -174,11 +323,19 @@ def fetch_income_statement(symbol: str, quarterly: bool = False) -> pd.DataFrame
 
     Returns:
         DataFrame with income statement data including:
-        - fiscalDateEnding, totalRevenue, grossProfit, netIncome, EPS, etc.
+        - symbol, fiscal_date_ending, total_revenue, gross_profit,
+          operating_income, net_income, eps, full_data (JSON)
+
+        Schema matches Alpha Vantage INCOME_STATEMENT response.
+        Key fields extracted for SQL insertion:
+        - Numeric fields converted to appropriate types
+        - Full JSON stored in full_data column
 
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching income statement for {symbol} (quarterly={quarterly})")
+
     try:
         params = {
             "function": "INCOME_STATEMENT",
@@ -189,16 +346,36 @@ def fetch_income_statement(symbol: str, quarterly: bool = False) -> pd.DataFrame
         # Choose quarterly or annual reports
         key = "quarterlyReports" if quarterly else "annualReports"
         reports = data.get(key, [])
-        df = pd.DataFrame(reports)
+
+        # Extract key fields for SQL insertion
+        income_data = []
+        for report in reports:
+            income_data.append({
+                "symbol": symbol,
+                "fiscal_date_ending": _clean_value(report.get("fiscalDateEnding")),
+                "total_revenue": _to_float(report.get("totalRevenue")),
+                "gross_profit": _to_float(report.get("grossProfit")),
+                "operating_income": _to_float(report.get("operatingIncome")),
+                "net_income": _to_float(report.get("netIncome")),
+                "eps": _to_float(report.get("eps")),
+                "full_data": report  # Store complete JSON
+            })
+
+        df = pd.DataFrame(income_data)
 
         if not df.empty:
-            df['fiscalDateEnding'] = pd.to_datetime(df['fiscalDateEnding'])
-            df = df.sort_values('fiscalDateEnding', ascending=False)
+            # Convert date columns
+            df['fiscal_date_ending'] = pd.to_datetime(df['fiscal_date_ending'], errors='coerce')
 
+            df = df.sort_values('fiscal_date_ending', ascending=False)
+
+        logger.info(f"Successfully fetched {len(df)} income statement records for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch income statement for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch income statement for {symbol}: {str(e)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
 
 def fetch_balance_sheet(symbol: str, quarterly: bool = False) -> pd.DataFrame:
@@ -210,11 +387,19 @@ def fetch_balance_sheet(symbol: str, quarterly: bool = False) -> pd.DataFrame:
 
     Returns:
         DataFrame with balance sheet data including:
-        - fiscalDateEnding, totalAssets, totalLiabilities, totalShareholderEquity
+        - symbol, fiscal_date_ending, total_assets, total_liabilities,
+          total_shareholder_equity, full_data (JSON)
+
+        Schema matches Alpha Vantage BALANCE_SHEET response.
+        Key fields extracted for SQL insertion:
+        - Numeric fields converted to appropriate types
+        - Full JSON stored in full_data column
 
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching balance sheet for {symbol} (quarterly={quarterly})")
+
     try:
         params = {
             "function": "BALANCE_SHEET",
@@ -225,16 +410,34 @@ def fetch_balance_sheet(symbol: str, quarterly: bool = False) -> pd.DataFrame:
         # Choose quarterly or annual reports
         key = "quarterlyReports" if quarterly else "annualReports"
         reports = data.get(key, [])
-        df = pd.DataFrame(reports)
+
+        # Extract key fields for SQL insertion
+        balance_data = []
+        for report in reports:
+            balance_data.append({
+                "symbol": symbol,
+                "fiscal_date_ending": _clean_value(report.get("fiscalDateEnding")),
+                "total_assets": _to_float(report.get("totalAssets")),
+                "total_liabilities": _to_float(report.get("totalLiabilities")),
+                "total_shareholder_equity": _to_float(report.get("totalShareholderEquity")),
+                "full_data": report  # Store complete JSON
+            })
+
+        df = pd.DataFrame(balance_data)
 
         if not df.empty:
-            df['fiscalDateEnding'] = pd.to_datetime(df['fiscalDateEnding'])
-            df = df.sort_values('fiscalDateEnding', ascending=False)
+            # Convert date columns
+            df['fiscal_date_ending'] = pd.to_datetime(df['fiscal_date_ending'], errors='coerce')
 
+            df = df.sort_values('fiscal_date_ending', ascending=False)
+
+        logger.info(f"Successfully fetched {len(df)} balance sheet records for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch balance sheet for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch balance sheet for {symbol}: {str(e)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
 
 def fetch_cash_flow(symbol: str, quarterly: bool = False) -> pd.DataFrame:
@@ -246,11 +449,19 @@ def fetch_cash_flow(symbol: str, quarterly: bool = False) -> pd.DataFrame:
 
     Returns:
         DataFrame with cash flow data including:
-        - fiscalDateEnding, operatingCashflow, capitalExpenditures, freeCashflow
+        - symbol, fiscal_date_ending, operating_cashflow, capital_expenditures,
+          free_cashflow, full_data (JSON)
+
+        Schema matches Alpha Vantage CASH_FLOW response.
+        Key fields extracted for SQL insertion:
+        - Numeric fields converted to appropriate types
+        - Full JSON stored in full_data column
 
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching cash flow for {symbol} (quarterly={quarterly})")
+
     try:
         params = {
             "function": "CASH_FLOW",
@@ -261,16 +472,34 @@ def fetch_cash_flow(symbol: str, quarterly: bool = False) -> pd.DataFrame:
         # Choose quarterly or annual reports
         key = "quarterlyReports" if quarterly else "annualReports"
         reports = data.get(key, [])
-        df = pd.DataFrame(reports)
+
+        # Extract key fields for SQL insertion
+        cashflow_data = []
+        for report in reports:
+            cashflow_data.append({
+                "symbol": symbol,
+                "fiscal_date_ending": _clean_value(report.get("fiscalDateEnding")),
+                "operating_cashflow": _to_float(report.get("operatingCashflow")),
+                "capital_expenditures": _to_float(report.get("capitalExpenditures")),
+                "free_cashflow": _to_float(report.get("freeCashflow")),
+                "full_data": report  # Store complete JSON
+            })
+
+        df = pd.DataFrame(cashflow_data)
 
         if not df.empty:
-            df['fiscalDateEnding'] = pd.to_datetime(df['fiscalDateEnding'])
-            df = df.sort_values('fiscalDateEnding', ascending=False)
+            # Convert date columns
+            df['fiscal_date_ending'] = pd.to_datetime(df['fiscal_date_ending'], errors='coerce')
 
+            df = df.sort_values('fiscal_date_ending', ascending=False)
+
+        logger.info(f"Successfully fetched {len(df)} cash flow records for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch cash flow for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch cash flow for {symbol}: {str(e)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
 
 def fetch_all(symbol: str, quarterly: bool = False) -> Dict:

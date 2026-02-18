@@ -63,13 +63,17 @@ class TestAlphaVantageSkills:
             "data": [
                 {
                     "ex_dividend_date": "2024-02-09",
-                    "amount": "0.24",
-                    "payment_date": "2024-02-16"
+                    "declaration_date": "2024-02-01",
+                    "record_date": "2024-02-08",
+                    "payment_date": "2024-02-16",
+                    "amount": "0.24"
                 },
                 {
                     "ex_dividend_date": "2023-11-10",
-                    "amount": "0.24",
-                    "payment_date": "2023-11-16"
+                    "declaration_date": "2023-11-01",
+                    "record_date": "2023-11-09",
+                    "payment_date": "2023-11-16",
+                    "amount": "0.24"
                 }
             ]
         }
@@ -80,9 +84,14 @@ class TestAlphaVantageSkills:
         # Assert
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 2
-        assert "date" in result.columns
-        assert "dividend_amount" in result.columns
-        assert result.iloc[0]["dividend_amount"] == 0.24
+        assert "symbol" in result.columns
+        assert "ex_dividend_date" in result.columns
+        assert "declaration_date" in result.columns
+        assert "record_date" in result.columns
+        assert "payment_date" in result.columns
+        assert "amount" in result.columns
+        assert result.iloc[0]["amount"] == 0.24
+        assert result.iloc[0]["symbol"] == "AAPL"
 
     @patch("src.skills.alpha_vantage_skills._make_request")
     def test_fetch_dividend_history_empty(self, mock_request):
@@ -133,7 +142,9 @@ class TestAlphaVantageSkills:
                     "fiscalDateEnding": "2023-12-31",
                     "totalRevenue": "383000000000",
                     "grossProfit": "170000000000",
-                    "netIncome": "97000000000"
+                    "operatingIncome": "114000000000",
+                    "netIncome": "97000000000",
+                    "eps": "6.13"
                 }
             ]
         }
@@ -144,7 +155,16 @@ class TestAlphaVantageSkills:
         # Assert
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
-        assert "totalRevenue" in result.columns
+        assert "symbol" in result.columns
+        assert "fiscal_date_ending" in result.columns
+        assert "total_revenue" in result.columns
+        assert "gross_profit" in result.columns
+        assert "operating_income" in result.columns
+        assert "net_income" in result.columns
+        assert "eps" in result.columns
+        assert "full_data" in result.columns
+        assert result.iloc[0]["symbol"] == "AAPL"
+        assert result.iloc[0]["total_revenue"] == 383000000000
 
     @patch("src.skills.alpha_vantage_skills._make_request")
     def test_fetch_income_statement_quarterly(self, mock_request):
@@ -188,7 +208,14 @@ class TestAlphaVantageSkills:
         # Assert
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
-        assert "totalAssets" in result.columns
+        assert "symbol" in result.columns
+        assert "fiscal_date_ending" in result.columns
+        assert "total_assets" in result.columns
+        assert "total_liabilities" in result.columns
+        assert "total_shareholder_equity" in result.columns
+        assert "full_data" in result.columns
+        assert result.iloc[0]["symbol"] == "AAPL"
+        assert result.iloc[0]["total_assets"] == 350000000000
 
     @patch("src.skills.alpha_vantage_skills._make_request")
     def test_fetch_cash_flow(self, mock_request):
@@ -199,7 +226,8 @@ class TestAlphaVantageSkills:
                 {
                     "fiscalDateEnding": "2023-12-31",
                     "operatingCashflow": "110000000000",
-                    "capitalExpenditures": "-11000000000"
+                    "capitalExpenditures": "-11000000000",
+                    "freeCashflow": "99000000000"
                 }
             ]
         }
@@ -210,7 +238,14 @@ class TestAlphaVantageSkills:
         # Assert
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
-        assert "operatingCashflow" in result.columns
+        assert "symbol" in result.columns
+        assert "fiscal_date_ending" in result.columns
+        assert "operating_cashflow" in result.columns
+        assert "capital_expenditures" in result.columns
+        assert "free_cashflow" in result.columns
+        assert "full_data" in result.columns
+        assert result.iloc[0]["symbol"] == "AAPL"
+        assert result.iloc[0]["operating_cashflow"] == 110000000000
 
     @patch("src.skills.alpha_vantage_skills.fetch_company_overview")
     @patch("src.skills.alpha_vantage_skills.fetch_dividend_history")
@@ -228,13 +263,29 @@ class TestAlphaVantageSkills:
         mock_overview
     ):
         """Test fetch_all returns all data."""
-        # Setup mocks
+        # Setup mocks with new schema
         mock_overview.return_value = {"Symbol": "AAPL", "Name": "Apple Inc"}
-        mock_dividends.return_value = pd.DataFrame([{"date": "2024-01-01", "dividend_amount": 0.24}])
-        mock_earnings.return_value = pd.DataFrame([{"fiscalDateEnding": "2024-03-31"}])
-        mock_income.return_value = pd.DataFrame([{"totalRevenue": "90B"}])
-        mock_balance_sheet.return_value = pd.DataFrame([{"totalAssets": "350B"}])
-        mock_cash_flow.return_value = pd.DataFrame([{"operatingCashflow": "110B"}])
+        mock_dividends.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "ex_dividend_date": "2024-01-01",
+            "amount": 0.24
+        }])
+        mock_earnings.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "fiscalDateEnding": "2024-03-31"
+        }])
+        mock_income.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "total_revenue": 90000000000
+        }])
+        mock_balance_sheet.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "total_assets": 350000000000
+        }])
+        mock_cash_flow.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "operating_cashflow": 110000000000
+        }])
 
         # Execute
         result = alpha_vantage_skills.fetch_all("AAPL")
@@ -265,13 +316,22 @@ class TestAlphaVantageSkills:
         mock_overview
     ):
         """Test fetch_all handles partial failures gracefully."""
-        # Setup mocks with some failures
+        # Setup mocks with some failures and new schema
         mock_overview.return_value = {"Symbol": "AAPL"}
         mock_dividends.side_effect = Exception("Dividend API failed")
-        mock_earnings.return_value = pd.DataFrame([{"fiscalDateEnding": "2024-03-31"}])
+        mock_earnings.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "fiscalDateEnding": "2024-03-31"
+        }])
         mock_income.side_effect = Exception("Income API failed")
-        mock_balance_sheet.return_value = pd.DataFrame([{"totalAssets": "350B"}])
-        mock_cash_flow.return_value = pd.DataFrame([{"operatingCashflow": "110B"}])
+        mock_balance_sheet.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "total_assets": 350000000000
+        }])
+        mock_cash_flow.return_value = pd.DataFrame([{
+            "symbol": "AAPL",
+            "operating_cashflow": 110000000000
+        }])
 
         # Execute
         result = alpha_vantage_skills.fetch_all("AAPL")
@@ -335,6 +395,21 @@ class TestMakeRequest:
         with pytest.raises(Exception, match="API Rate Limit"):
             alpha_vantage_skills._make_request({"function": "OVERVIEW", "symbol": "AAPL"})
 
+    @patch("src.skills.alpha_vantage_skills.requests.get")
+    def test_make_request_rate_limit_information(self, mock_get):
+        """Test API rate limit response with Information key."""
+        # Mock rate limit response with Information key
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "Information": "Thank you for using Alpha Vantage! Please consider spreading out your free API requests more sparingly (1 request per second)."
+        }
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        # Execute and assert
+        with pytest.raises(Exception, match="API Rate Limit"):
+            alpha_vantage_skills._make_request({"function": "OVERVIEW", "symbol": "AAPL"})
+
 
 def run_standalone_tests():
     """Run tests without pytest for standalone execution."""
@@ -360,6 +435,7 @@ def run_standalone_tests():
         ("Make Request - Success", request_tests.test_make_request_success),
         ("Make Request - API Error", request_tests.test_make_request_api_error),
         ("Make Request - Rate Limit", request_tests.test_make_request_rate_limit),
+        ("Make Request - Rate Limit (Information)", request_tests.test_make_request_rate_limit_information),
     ]
 
     passed = 0

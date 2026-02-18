@@ -18,5 +18,10 @@
     "level": "INFO",
     "path": "logs"
   },
+  "database": {
+    "path": "data/portfolio.duckdb",
+    "alpha_vantage_schema": "config/schema/alpha_vantage_schema.sql",
+    "alpaca_schema": "config/schema/alpaca_schema.sql"
+  },
   "sandbox_mode": true
 }

@@ -4,6 +4,11 @@ This module provides functions to interact with Alpaca's REST API and WebSocket 
 for historical and real-time market data.
 """
 
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
+
 from datetime import datetime
 from typing import Optional
 import pandas as pd
@@ -24,6 +29,38 @@ BASE_URL = secrets.get("alpaca.base_url")
 # Initialize historical data client
 historical_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 logger.info("Alpaca historical client initialized")
+
+
+def _clean_value(value):
+    """Clean API values by converting 'None' strings and None to actual None.
+
+    Args:
+        value: Value from API response
+
+    Returns:
+        None if value is None or 'None' string, otherwise the original value
+    """
+    if value is None or value == "None" or value == "":
+        return None
+    return value
+
+
+def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean DataFrame by converting 'None' strings to actual None/NaN.
+
+    Args:
+        df: DataFrame to clean
+
+    Returns:
+        Cleaned DataFrame
+    """
+    if df.empty:
+        return df
+
+    # Replace "None" strings with actual None
+    df = df.replace({"None": None, "": None})
+
+    return df
 
 
 def fetch_historical_bars(
@@ -77,6 +114,9 @@ def fetch_historical_bars(
         # Reset index to make symbol and timestamp columns
         df = df.reset_index()
 
+        # Clean None/"None" values
+        df = _clean_dataframe(df)
+
         logger.info(f"Successfully fetched {len(df)} bars for {symbol}")
         return df
 
@@ -121,6 +161,9 @@ def fetch_historical_trades(
 
         # Reset index to make symbol and timestamp columns
         df = df.reset_index()
+
+        # Clean None/"None" values
+        df = _clean_dataframe(df)
 
         logger.info(f"Successfully fetched {len(df)} trades for {symbol}")
         return df
