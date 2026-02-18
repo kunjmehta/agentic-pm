@@ -162,57 +162,6 @@ class TestFetchHistoricalTrades:
             )
 
 
-class TestSubscribeToBars:
-    """Test subscribe_to_bars WebSocket function."""
-
-    @pytest.mark.asyncio
-    @patch("src.skills.alpaca_skills.StockDataStream")
-    async def test_subscribe_success(self, mock_stream_class):
-        """Test successful WebSocket subscription."""
-        from src.skills.alpaca_skills import subscribe_to_bars
-
-        # Mock stream instance
-        mock_stream = AsyncMock()
-        mock_stream_class.return_value = mock_stream
-        mock_stream.run = AsyncMock()
-
-        # Callback function
-        received_data = []
-
-        def callback(data):
-            received_data.append(data)
-
-        # Execute (cancel after a short delay to avoid hanging)
-        import asyncio
-        task = asyncio.create_task(
-            subscribe_to_bars("AAPL", callback)
-        )
-        await asyncio.sleep(0.1)  # Let it start
-        task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass  # Expected
-
-        # Assert
-        mock_stream.subscribe_bars.assert_called_once()
-
-    @pytest.mark.asyncio
-    @patch("src.skills.alpaca_skills.StockDataStream")
-    async def test_subscribe_error(self, mock_stream_class):
-        """Test error handling in WebSocket subscription."""
-        from src.skills.alpaca_skills import subscribe_to_bars
-
-        mock_stream_class.side_effect = Exception("Connection failed")
-
-        def callback(data):
-            pass
-
-        with pytest.raises(Exception, match="Failed to subscribe to bars"):
-            await subscribe_to_bars("AAPL", callback)
-
-
 if __name__ == "__main__":
     """Run tests with pytest."""
     import sys

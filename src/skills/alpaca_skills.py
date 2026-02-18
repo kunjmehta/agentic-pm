@@ -132,49 +132,6 @@ def fetch_historical_trades(
         raise Exception(f"Failed to fetch historical trades for {symbol}: {str(e)}")
 
 
-async def subscribe_to_bars(
-    symbol: str,
-    callback: Callable[[dict], None],
-    timeframe: str = "1Min"
-) -> None:
-    """Subscribe to real-time bar data via Alpaca WebSocket.
-
-    Args:
-        symbol: Stock ticker symbol (e.g., "AAPL")
-        callback: Function to call when new bar data arrives
-        timeframe: Currently only "1Min" supported by Alpaca WebSocket
-
-    Raises:
-        Exception: If WebSocket connection fails
-    """
-    try:
-        # Initialize WebSocket stream
-        stream = StockDataStream(API_KEY, SECRET_KEY)
-
-        # Define bar handler
-        async def bar_handler(data):
-            """Process incoming bar data and call user callback."""
-            bar_dict = {
-                "symbol": data.symbol,
-                "timestamp": data.timestamp,
-                "open": data.open,
-                "high": data.high,
-                "low": data.low,
-                "close": data.close,
-                "volume": data.volume,
-            }
-            callback(bar_dict)
-
-        # Subscribe to bars
-        stream.subscribe_bars(bar_handler, symbol)
-
-        # Run the stream
-        await stream.run()
-
-    except Exception as e:
-        raise Exception(f"Failed to subscribe to bars for {symbol}: {str(e)}")
-
-
 def fetch_all(
     symbol: str,
     start: str,
@@ -262,24 +219,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"   ✗ Error: {e}")
 
-    # Test 3: WebSocket subscription (optional, comment out if not needed)
-    print(f"\n3. Testing WebSocket subscription (will run for 10 seconds)...")
-    print("   (Uncomment to test live streaming)")
-
-    # Uncomment below to test WebSocket
-    def on_bar(bar_data):
-        print(f"   Bar received: {bar_data}")
-    
-    async def test_websocket():
-        try:
-            task = asyncio.create_task(subscribe_to_bars(test_symbol, on_bar))
-            await asyncio.sleep(10)  # Run for 10 seconds
-            task.cancel()
-            print("   ✓ WebSocket test completed")
-        except Exception as e:
-            print(f"   ✗ Error: {e}")
-    
-    asyncio.run(test_websocket())
 
     print("\n" + "=" * 60)
     print("Alpaca API Tests Complete")

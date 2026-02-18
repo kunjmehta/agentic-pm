@@ -8,7 +8,6 @@ This package contains API integration functions for:
 from .alpaca_skills import (
     fetch_historical_bars,
     fetch_historical_trades,
-    subscribe_to_bars,
     fetch_all as fetch_all_alpaca,
 )
 
@@ -26,7 +25,6 @@ __all__ = [
     # Alpaca functions
     "fetch_historical_bars",
     "fetch_historical_trades",
-    "subscribe_to_bars",
     "fetch_all_alpaca",
     # Alpha Vantage functions
     "fetch_company_overview",
