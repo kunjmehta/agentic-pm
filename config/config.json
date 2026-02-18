@@ -1,0 +1,18 @@
+{
+  "watchlist": ["AAPL"],
+  "risk_management": {
+    "max_position_size": 1000,
+    "max_daily_trades": 10,
+    "position_limit_percent": 0.1
+  },
+  "market_hours": {
+    "open": "09:30",
+    "close": "16:00",
+    "timezone": "America/New_York"
+  },
+  "intervals": {
+    "quant_analysis_minutes": 30,
+    "data_gathering_seconds": 60
+  },
+  "sandbox_mode": true
+}
