@@ -4,39 +4,26 @@ This module provides functions to interact with Alpaca's REST API and WebSocket 
 for historical and real-time market data.
 """
 
-import json
-from pathlib import Path
 from datetime import datetime
-from typing import Optional, Callable
+from typing import Optional
 import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockTradesRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.data.live import StockDataStream
+from src.utils import secrets, get_logger
 
 
-# Load secrets from secret.json
-def _load_secrets():
-    """Load API credentials from secret.json file."""
-    secret_path = Path(__file__).parent.parent.parent / "config" / "secret.json"
-    if not secret_path.exists():
-        raise FileNotFoundError(
-            f"secret.json not found at {secret_path}. "
-            "Please create it from secret.json.example"
-        )
-    with open(secret_path, "r") as f:
-        return json.load(f)
+# Initialize logger
+logger = get_logger(__name__)
 
-
-secrets = _load_secrets()
-
-# Initialize Alpaca client
-API_KEY = secrets["alpaca"]["api_key"]
-SECRET_KEY = secrets["alpaca"]["secret_key"]
-BASE_URL = secrets["alpaca"]["base_url"]
+# Initialize Alpaca client with credentials from secrets
+API_KEY = secrets.get("alpaca.api_key")
+SECRET_KEY = secrets.get("alpaca.secret_key")
+BASE_URL = secrets.get("alpaca.base_url")
 
 # Initialize historical data client
 historical_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+logger.info("Alpaca historical client initialized")
 
 
 def fetch_historical_bars(
@@ -70,7 +57,11 @@ def fetch_historical_bars(
     }
 
     if timeframe not in timeframe_map:
-        raise ValueError(f"Invalid timeframe: {timeframe}. Must be one of {list(timeframe_map.keys())}")
+        error_msg = f"Invalid timeframe: {timeframe}. Must be one of {list(timeframe_map.keys())}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+    logger.info(f"Fetching historical bars for {symbol}: {start} to {end}, timeframe={timeframe}")
 
     try:
         request_params = StockBarsRequest(
@@ -86,10 +77,13 @@ def fetch_historical_bars(
         # Reset index to make symbol and timestamp columns
         df = df.reset_index()
 
+        logger.info(f"Successfully fetched {len(df)} bars for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch historical bars for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch historical bars for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
 
 
 def fetch_historical_trades(
@@ -112,6 +106,8 @@ def fetch_historical_trades(
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching historical trades for {symbol}: {start} to {end}, limit={limit}")
+
     try:
         request_params = StockTradesRequest(
             symbol_or_symbols=symbol,
@@ -126,10 +122,13 @@ def fetch_historical_trades(
         # Reset index to make symbol and timestamp columns
         df = df.reset_index()
 
+        logger.info(f"Successfully fetched {len(df)} trades for {symbol}")
         return df
 
     except Exception as e:
-        raise Exception(f"Failed to fetch historical trades for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch historical trades for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
 
 
 def fetch_all(
@@ -162,6 +161,8 @@ def fetch_all(
     Raises:
         Exception: If critical data fetch fails
     """
+    logger.info(f"Fetching all Alpaca data for {symbol}: {start} to {end}")
+
     results = {
         "symbol": symbol,
         "start_date": start,
@@ -177,6 +178,7 @@ def fetch_all(
         results["bars"] = fetch_historical_bars(symbol, start, end, timeframe)
     except Exception as e:
         results["errors"]["bars"] = str(e)
+        logger.warning(f"Failed to fetch bars for {symbol}: {e}")
 
     # Fetch historical trades
     if include_trades:
@@ -184,7 +186,9 @@ def fetch_all(
             results["trades"] = fetch_historical_trades(symbol, start, end, trades_limit)
         except Exception as e:
             results["errors"]["trades"] = str(e)
+            logger.warning(f"Failed to fetch trades for {symbol}: {e}")
 
+    logger.info(f"Completed fetching data for {symbol}: {len(results['errors'])} errors")
     return results
 
 

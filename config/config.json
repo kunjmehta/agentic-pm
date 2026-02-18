@@ -14,5 +14,9 @@
     "quant_analysis_minutes": 30,
     "data_gathering_seconds": 60
   },
+  "logging": {
+    "level": "INFO",
+    "path": "logs"
+  },
   "sandbox_mode": true
 }

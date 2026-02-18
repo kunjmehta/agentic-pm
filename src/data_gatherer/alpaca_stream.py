@@ -7,13 +7,16 @@ and graceful shutdown.
 Based on: https://alpaca.markets/sdks/python/api_reference/data/stock/live.html
 """
 
-import json
 import signal
 import time
-from pathlib import Path
 from typing import Optional, Callable
 from alpaca.data.live.stock import StockDataStream
 from alpaca.data.enums import DataFeed
+from src.utils import secrets, get_logger
+
+
+# Initialize logger
+logger = get_logger(__name__)
 
 
 class AlpacaDataStreamer:
@@ -52,9 +55,8 @@ class AlpacaDataStreamer:
         """
         # Load credentials
         if api_key is None or secret_key is None:
-            secrets = self._load_secrets()
-            self.api_key = secrets["alpaca"]["api_key"]
-            self.secret_key = secrets["alpaca"]["secret_key"]
+            self.api_key = secrets.get("alpaca.api_key")
+            self.secret_key = secrets.get("alpaca.secret_key")
         else:
             self.api_key = api_key
             self.secret_key = secret_key
@@ -85,18 +87,6 @@ class AlpacaDataStreamer:
             feed=self.feed
         )
 
-    @staticmethod
-    def _load_secrets() -> dict:
-        """Load API credentials from config/secret.json."""
-        secret_path = Path(__file__).parent.parent.parent / "config" / "secret.json"
-        if not secret_path.exists():
-            raise FileNotFoundError(
-                f"secret.json not found at {secret_path}. "
-                "Please create it from secret.json.example"
-            )
-        with open(secret_path, "r") as f:
-            return json.load(f)
-
     def subscribe_trades(self, handler: Callable) -> None:
         """Subscribe to trade data for the configured symbol.
 
@@ -107,7 +97,7 @@ class AlpacaDataStreamer:
         """
         self._trade_handler = handler
         self.stream.subscribe_trades(handler, self.symbol)
-        print(f"Subscribed to trades for {self.symbol}")
+        logger.info(f"Subscribed to trades for {self.symbol}")
 
     def subscribe_bars(self, handler: Callable) -> None:
         """Subscribe to bar data for the configured symbol.
@@ -119,7 +109,7 @@ class AlpacaDataStreamer:
         """
         self._bar_handler = handler
         self.stream.subscribe_bars(handler, self.symbol)
-        print(f"Subscribed to bars for {self.symbol}")
+        logger.info(f"Subscribed to bars for {self.symbol}")
 
     def subscribe_statuses(self, handler: Callable) -> None:
         """Subscribe to trading status updates for the configured symbol.
@@ -131,30 +121,30 @@ class AlpacaDataStreamer:
         """
         self._status_handler = handler
         self.stream.subscribe_trading_statuses(handler, self.symbol)
-        print(f"Subscribed to trade statuses for {self.symbol}")
+        logger.info(f"Subscribed to trade statuses for {self.symbol}")
 
     def unsubscribe_trades(self) -> None:
         """Unsubscribe from trade data."""
         self.stream.unsubscribe_trades(self.symbol)
         self._trade_handler = None
-        print(f"Unsubscribed from trades for {self.symbol}")
+        logger.info(f"Unsubscribed from trades for {self.symbol}")
 
     def unsubscribe_bars(self) -> None:
         """Unsubscribe from bar data."""
         self.stream.unsubscribe_bars(self.symbol)
         self._bar_handler = None
-        print(f"Unsubscribed from bars for {self.symbol}")
+        logger.info(f"Unsubscribed from bars for {self.symbol}")
 
     def unsubscribe_statuses(self) -> None:
         """Unsubscribe from status updates."""
         self.stream.unsubscribe_trading_statuses(self.symbol)
         self._status_handler = None
-        print(f"Unsubscribed from trade statuses for {self.symbol}")
+        logger.info(f"Unsubscribed from trade statuses for {self.symbol}")
 
     def _setup_signal_handlers(self) -> None:
         """Setup signal handlers for graceful shutdown."""
         def signal_handler(signum, frame):
-            print(f"\nReceived signal {signum}. Initiating graceful shutdown...")
+            logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
             self._shutdown_requested = True
             self.stop()
 
@@ -178,12 +168,12 @@ class AlpacaDataStreamer:
         retry_count = 0
         while retry_count < self.max_retries and not self._shutdown_requested:
             try:
-                print(f"\n{'='*60}")
-                print(f"Starting Alpaca stream for {self.symbol} (feed: {self.feed.value})")
-                print(f"{'='*60}")
+                logger.info("="*60)
+                logger.info(f"Starting Alpaca stream for {self.symbol} (feed: {self.feed.value})")
+                logger.info("="*60)
 
                 if retry_count > 0:
-                    print(f"Retry attempt {retry_count}/{self.max_retries}")
+                    logger.info(f"Retry attempt {retry_count}/{self.max_retries}")
                     # Recreate stream on retry
                     self._create_stream()
                     # Re-subscribe to channels
@@ -203,41 +193,41 @@ class AlpacaDataStreamer:
                 break
 
             except KeyboardInterrupt:
-                print("\nKeyboard interrupt received")
+                logger.info("Keyboard interrupt received")
                 self._shutdown_requested = True
                 break
 
             except Exception as e:
                 retry_count += 1
-                print(f"\nStream error: {e}")
+                logger.error(f"Stream error: {e}", exc_info=True)
 
                 if retry_count < self.max_retries and not self._shutdown_requested:
-                    print(f"Retrying in {self.retry_delay} seconds...")
+                    logger.info(f"Retrying in {self.retry_delay} seconds...")
                     time.sleep(self.retry_delay)
                 elif retry_count >= self.max_retries:
-                    print(f"Max retries ({self.max_retries}) reached. Exiting.")
+                    logger.error(f"Max retries ({self.max_retries}) reached. Exiting.")
                     raise
 
             finally:
                 self.stop()
 
-        print("\n" + "="*60)
-        print("Stream stopped")
-        print("="*60)
+        logger.info("="*60)
+        logger.info("Stream stopped")
+        logger.info("="*60)
 
     def stop(self) -> None:
         """Stop the stream gracefully."""
         if self.running:
-            print("Stopping stream...")
+            logger.info("Stopping stream...")
             self.running = False
 
             try:
                 # Stop the WebSocket (this is synchronous)
                 self.stream.stop()
-                print("Stream stopped successfully")
+                logger.info("Stream stopped successfully")
 
             except Exception as e:
-                print(f"Error during shutdown: {e}")
+                logger.error(f"Error during shutdown: {e}", exc_info=True)
 
 
 # Default handlers for demonstration

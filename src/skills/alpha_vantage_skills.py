@@ -4,32 +4,21 @@ This module provides functions to fetch company fundamentals, dividends,
 earnings, and financial statements from Alpha Vantage API using requests.
 """
 
-import json
-from pathlib import Path
 from typing import Dict, Optional
 import pandas as pd
 import requests
+from src.utils import secrets, get_logger
 
+
+# Initialize logger
+logger = get_logger(__name__)
 
 # Alpha Vantage API base URL
 BASE_URL = "https://www.alphavantage.co/query"
 
-
-# Load secrets from secret.json
-def _load_secrets():
-    """Load API credentials from secret.json file."""
-    secret_path = Path(__file__).parent.parent.parent / "config" / "secret.json"
-    if not secret_path.exists():
-        raise FileNotFoundError(
-            f"secret.json not found at {secret_path}. "
-            "Please create it from secret.json.example"
-        )
-    with open(secret_path, "r") as f:
-        return json.load(f)
-
-
-secrets = _load_secrets()
-API_KEY = secrets["alpha_vantage"]["api_key"]
+# Get API key from secrets
+API_KEY = secrets.get("alpha_vantage.api_key")
+logger.info("Alpha Vantage client initialized")
 
 
 def _make_request(params: dict) -> dict:
@@ -45,6 +34,11 @@ def _make_request(params: dict) -> dict:
         Exception: If API request fails
     """
     params["apikey"] = API_KEY
+    function = params.get("function", "UNKNOWN")
+    symbol = params.get("symbol", "UNKNOWN")
+
+    logger.debug(f"Making Alpha Vantage API request: function={function}, symbol={symbol}")
+
     response = requests.get(BASE_URL, params=params, timeout=30)
     response.raise_for_status()
 
@@ -52,10 +46,15 @@ def _make_request(params: dict) -> dict:
 
     # Check for API error messages
     if "Error Message" in data:
-        raise Exception(f"API Error: {data['Error Message']}")
+        error_msg = f"API Error: {data['Error Message']}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
     if "Note" in data:
-        raise Exception(f"API Rate Limit: {data['Note']}")
+        error_msg = f"API Rate Limit: {data['Note']}"
+        logger.warning(error_msg)
+        raise Exception(error_msg)
 
+    logger.debug(f"Successfully received data from Alpha Vantage: function={function}")
     return data
 
 
@@ -74,16 +73,21 @@ def fetch_company_overview(symbol: str) -> Dict[str, str]:
     Raises:
         Exception: If API request fails
     """
+    logger.info(f"Fetching company overview for {symbol}")
+
     try:
         params = {
             "function": "OVERVIEW",
             "symbol": symbol
         }
         data = _make_request(params)
+        logger.info(f"Successfully fetched company overview for {symbol}")
         return data
 
     except Exception as e:
-        raise Exception(f"Failed to fetch company overview for {symbol}: {str(e)}")
+        error_msg = f"Failed to fetch company overview for {symbol}: {str(e)}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
 
 def fetch_dividend_history(symbol: str) -> pd.DataFrame:
