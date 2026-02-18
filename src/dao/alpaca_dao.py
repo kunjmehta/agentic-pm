@@ -280,7 +280,7 @@ class AlpacaDAO(BaseDAO):
 
         try:
             # Ensure required columns exist
-            required_cols = ['symbol', 'timestamp', 'trade_id', 'price', 'size']
+            required_cols = ['symbol', 'timestamp', 'price', 'size']
             missing_cols = [col for col in required_cols if col not in df.columns]
             if missing_cols:
                 raise ValueError(f"Missing required columns: {missing_cols}")
@@ -300,7 +300,7 @@ class AlpacaDAO(BaseDAO):
             df = df[[col for col in table_cols if col in df.columns]]
 
             rows = self.upsert_df('historical_trades', df,
-                                 key_columns=['symbol', 'timestamp', 'trade_id'])
+                                 key_columns=['symbol', 'timestamp'])
             logger.info(f"Successfully saved {rows} trades")
             return rows
 
@@ -359,35 +359,6 @@ class AlpacaDAO(BaseDAO):
         """
         result = self.fetch_one(query, (symbol, start, end))
         return result['count'] if result else 0
-
-    # ========================================================================
-    # Aggregate Operations
-    # ========================================================================
-
-    def get_daily_summary(self, symbol: str, date: date) -> Optional[dict]:
-        """Get daily trading summary for a symbol.
-
-        Args:
-            symbol: Stock ticker symbol
-            date: Trading date
-
-        Returns:
-            Dictionary with daily summary stats
-        """
-        query = """
-            SELECT
-                symbol,
-                date,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                vwap
-            FROM daily_bars_agg
-            WHERE symbol = ? AND date = ?
-        """
-        return self.fetch_one(query, (symbol, date))
 
     def calculate_intraday_stats(self, symbol: str, date: date) -> dict:
         """Calculate intraday statistics from 1-minute bars.

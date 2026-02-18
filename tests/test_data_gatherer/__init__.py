@@ -1,1 +1,1 @@
-"""Tests for data gatherer module."""
+"""Tests for data gatherer modules."""

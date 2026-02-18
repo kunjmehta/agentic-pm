@@ -21,7 +21,9 @@
   "database": {
     "path": "data/portfolio.duckdb",
     "alpha_vantage_schema": "config/schema/alpha_vantage_schema.sql",
-    "alpaca_schema": "config/schema/alpaca_schema.sql"
+    "alpaca_schema": "config/schema/alpaca_schema.sql",
+    "auto_persist_stream": true,
+    "auto_persist_skills": true
   },
   "sandbox_mode": true
 }

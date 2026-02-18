@@ -14,6 +14,7 @@ import pandas as pd
 import requests
 import time
 from src.utils import secrets, get_logger
+from src.dao import AlphaVantageDAO
 
 
 # Initialize logger
@@ -150,6 +151,15 @@ def fetch_company_overview(symbol: str) -> Dict[str, str]:
         }
         data = _make_request(params)
         logger.info(f"Successfully fetched company overview for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlphaVantageDAO()
+            dao.save_company_overview(symbol, data)
+            logger.info(f"Saved company overview for {symbol} to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save company overview to database: {db_error}")
+
         return data
 
     except Exception as e:
@@ -219,6 +229,15 @@ def fetch_dividend_history(symbol: str) -> pd.DataFrame:
             df = df.sort_values('ex_dividend_date', ascending=False)
 
         logger.info(f"Successfully fetched {len(df)} dividend records for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlphaVantageDAO()
+            rows = dao.save_dividends(symbol, df)
+            logger.info(f"Saved {rows} dividend records to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save dividends to database: {db_error}")
+
         return df
 
     except Exception as e:
@@ -306,6 +325,15 @@ def fetch_earnings_history(symbol: str, quarterly: bool = True) -> pd.DataFrame:
             df = df.sort_values('fiscalDateEnding', ascending=False)
 
         logger.info(f"Successfully fetched {len(df)} earnings records for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlphaVantageDAO()
+            rows = dao.save_earnings(symbol, df, quarterly=quarterly)
+            logger.info(f"Saved {rows} earnings records to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save earnings to database: {db_error}")
+
         return df
 
     except Exception as e:
@@ -370,6 +398,15 @@ def fetch_income_statement(symbol: str, quarterly: bool = False) -> pd.DataFrame
             df = df.sort_values('fiscal_date_ending', ascending=False)
 
         logger.info(f"Successfully fetched {len(df)} income statement records for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlphaVantageDAO()
+            rows = dao.save_income_statement(symbol, df, quarterly=quarterly)
+            logger.info(f"Saved {rows} income statement records to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save income statement to database: {db_error}")
+
         return df
 
     except Exception as e:
@@ -432,6 +469,15 @@ def fetch_balance_sheet(symbol: str, quarterly: bool = False) -> pd.DataFrame:
             df = df.sort_values('fiscal_date_ending', ascending=False)
 
         logger.info(f"Successfully fetched {len(df)} balance sheet records for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlphaVantageDAO()
+            rows = dao.save_balance_sheet(symbol, df, quarterly=quarterly)
+            logger.info(f"Saved {rows} balance sheet records to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save balance sheet to database: {db_error}")
+
         return df
 
     except Exception as e:
@@ -494,6 +540,15 @@ def fetch_cash_flow(symbol: str, quarterly: bool = False) -> pd.DataFrame:
             df = df.sort_values('fiscal_date_ending', ascending=False)
 
         logger.info(f"Successfully fetched {len(df)} cash flow records for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlphaVantageDAO()
+            rows = dao.save_cash_flow(symbol, df, quarterly=quarterly)
+            logger.info(f"Saved {rows} cash flow records to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save cash flow to database: {db_error}")
+
         return df
 
     except Exception as e:

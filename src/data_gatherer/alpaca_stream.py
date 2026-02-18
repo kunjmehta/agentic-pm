@@ -14,10 +14,15 @@ sys.path.insert(0, str(project_root))
 
 import signal
 import time
+import threading
 from typing import Optional, Callable
 from alpaca.data.live.stock import StockDataStream
 from alpaca.data.enums import DataFeed
 from src.utils import secrets, get_logger
+from src.data_gatherer.db_stream_handlers import (
+    combined_trade_handler,
+    combined_bar_handler
+)
 
 
 # Initialize logger
@@ -147,7 +152,17 @@ class AlpacaDataStreamer:
         logger.info(f"Unsubscribed from trade statuses for {self.symbol}")
 
     def _setup_signal_handlers(self) -> None:
-        """Setup signal handlers for graceful shutdown."""
+        """Setup signal handlers for graceful shutdown.
+
+        Note: Signal handlers can only be set up in the main thread.
+        When running in a background thread (e.g., via asyncio.to_thread),
+        this method will skip signal handler setup.
+        """
+        # Check if we're in the main thread
+        if threading.current_thread() is not threading.main_thread():
+            logger.debug("Skipping signal handler setup (not in main thread)")
+            return
+
         def signal_handler(signum, frame):
             logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
             self._shutdown_requested = True
@@ -235,18 +250,15 @@ class AlpacaDataStreamer:
                 logger.error(f"Error during shutdown: {e}", exc_info=True)
 
 
-# Default handlers for demonstration
+# Default handlers for demonstration (now with DB persistence)
 async def default_trade_handler(trade):
-    """Default handler that prints trade data."""
-    print(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
-          f"Exchange: {trade.exchange} | {trade.timestamp}")
+    """Default handler that prints AND saves trade data to DB."""
+    await combined_trade_handler(trade)
 
 
 async def default_bar_handler(bar):
-    """Default handler that prints bar data."""
-    print(f"[BAR] {bar.symbol} | O: ${bar.open:.2f} H: ${bar.high:.2f} "
-          f"L: ${bar.low:.2f} C: ${bar.close:.2f} | "
-          f"Vol: {bar.volume:,} | {bar.timestamp}")
+    """Default handler that prints AND saves bar data to DB."""
+    await combined_bar_handler(bar, timeframe='1Min')
 
 
 async def default_status_handler(status):

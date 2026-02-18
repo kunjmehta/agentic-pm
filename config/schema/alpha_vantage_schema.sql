@@ -126,57 +126,6 @@ CREATE TABLE IF NOT EXISTS cash_flows (
 CREATE INDEX IF NOT EXISTS idx_cash_flows_symbol_date
     ON cash_flows(symbol, fiscal_date_ending DESC);
 
--- ============================================================================
--- Views for Common Queries
--- ============================================================================
-
--- Latest fundamentals for all symbols
-CREATE OR REPLACE VIEW latest_fundamentals AS
-SELECT
-    symbol,
-    name,
-    sector,
-    industry,
-    market_cap,
-    pe_ratio,
-    dividend_yield,
-    eps,
-    beta,
-    updated_at
-FROM fundamentals
-ORDER BY updated_at DESC;
-
--- Recent dividends (last 2 years)
-CREATE OR REPLACE VIEW recent_dividends AS
-SELECT
-    symbol,
-    ex_dividend_date,
-    payment_date,
-    amount,
-    YEAR(ex_dividend_date) as year,
-    QUARTER(ex_dividend_date) as quarter
-FROM dividend_history
-WHERE ex_dividend_date >= CURRENT_DATE - INTERVAL '2 years'
-ORDER BY symbol, ex_dividend_date DESC;
-
--- Quarterly earnings summary
-CREATE OR REPLACE VIEW quarterly_earnings_summary AS
-SELECT
-    symbol,
-    fiscal_date_ending,
-    reported_eps,
-    estimated_eps,
-    surprise,
-    surprise_percentage,
-    CASE
-        WHEN surprise > 0 THEN 'Beat'
-        WHEN surprise < 0 THEN 'Miss'
-        ELSE 'Met'
-    END as earnings_result
-FROM earnings_history
-WHERE is_quarterly = TRUE
-ORDER BY symbol, fiscal_date_ending DESC;
-
 -- Financial health snapshot (latest annual data)
 CREATE OR REPLACE VIEW financial_health_snapshot AS
 SELECT

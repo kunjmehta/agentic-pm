@@ -16,6 +16,7 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockTradesRequest
 from alpaca.data.timeframe import TimeFrame
 from src.utils import secrets, get_logger
+from src.dao import AlpacaDAO
 
 
 # Initialize logger
@@ -118,6 +119,15 @@ def fetch_historical_bars(
         df = _clean_dataframe(df)
 
         logger.info(f"Successfully fetched {len(df)} bars for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlpacaDAO()
+            rows = dao.save_bars(df, timeframe=timeframe)
+            logger.info(f"Saved {rows} bars to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save bars to database: {db_error}")
+
         return df
 
     except Exception as e:
@@ -166,6 +176,15 @@ def fetch_historical_trades(
         df = _clean_dataframe(df)
 
         logger.info(f"Successfully fetched {len(df)} trades for {symbol}")
+
+        # Automatically save to database
+        try:
+            dao = AlpacaDAO()
+            rows = dao.save_trades(df)
+            logger.info(f"Saved {rows} trades to database")
+        except Exception as db_error:
+            logger.warning(f"Failed to save trades to database: {db_error}")
+
         return df
 
     except Exception as e:
