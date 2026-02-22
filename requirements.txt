@@ -5,6 +5,7 @@ duckdb>=1.4.4
 langchain>=1.2.10
 langchain-openai==0.0.5
 openai>=2.21.0
+deepagents>=0.1.0  # Phase 2: DeepAgent framework for Quant Analyst
 
 # Trading APIs
 alpaca-py>=0.43.0
@@ -17,6 +18,7 @@ aiohttp>=3.13.0
 # Data & Analytics
 pandas==2.2.0
 numpy>=2.4.2
+pandas-ta>=0.3.14b0  # Phase 2: Technical indicators library
 
 # Testing & Quality
 pytest
@@ -27,3 +29,8 @@ pytest-cov==4.1.0
 schedule==1.2.0
 python-json-logger==2.0.7
 pytz>=2024.1
+
+# Phase 2: Quant Analyst API & UI
+fastapi>=0.109.0  # API server for Portfolio Manager integration
+uvicorn>=0.27.0  # ASGI server for FastAPI
+rich>=13.7.0  # Beautiful terminal output for agent streaming
