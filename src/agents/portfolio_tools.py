@@ -1,10 +1,17 @@
 """
-Portfolio Manager Tools (Initial - Lightweight)
-Module 2: Interface-first implementation with direct API calls
+Portfolio Manager Tools (Enhanced)
+Module 5: Refactored to use Skills + DAO layers
 
-This module will be refactored in Module 5 to use proper Skills + DAO layers.
-Current implementation: Direct Alpaca API calls with caching and graceful degradation.
+Uses:
+- src.skills.alpaca_portfolio_skills for API calls
+- src.dao.portfolio_dao for observability and risk parameters
+- Maintains caching and graceful degradation from Module 2
 """
+
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 import json
 import time
@@ -12,7 +19,14 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 from langchain_core.tools import tool
 
-from src.utils import get_logger, secrets, config
+from src.utils import get_logger
+from src.skills.alpaca_portfolio_skills import (
+    fetch_account_info,
+    fetch_positions,
+    fetch_orders,
+    fetch_portfolio_history
+)
+from src.dao import PortfolioDAO
 
 logger = get_logger(__name__)
 
@@ -58,6 +72,7 @@ def get_portfolio_status() -> str:
 
     Returns account equity, cash, buying power, and position counts.
     Results are cached for 5 minutes to reduce API calls.
+    Saves snapshot to PortfolioDAO for historical tracking.
 
     Returns:
         JSON string with portfolio status including:
@@ -79,31 +94,24 @@ def get_portfolio_status() -> str:
         result["cache_age_seconds"] = int((datetime.now() - _cache_ttl[cache_key] + timedelta(minutes=CACHE_TTL_MINUTES)).total_seconds())
         return json.dumps(result)
 
-    # Direct API call (will refactor to skills layer in Module 5)
+    # Use Skills layer instead of direct API calls
     try:
-        from alpaca.trading.client import TradingClient
-
-        api_key = secrets.get("alpaca.api_key")
-        secret_key = secrets.get("alpaca.secret_key")
-
-        client = TradingClient(api_key, secret_key)
-
-        # Fetch account info
-        account = client.get_account()
+        # Fetch account info using alpaca_portfolio_skills
+        account_data = fetch_account_info()
 
         # Fetch positions to count long/short
-        positions = client.get_all_positions()
-        long_count = sum(1 for p in positions if float(p.qty) > 0)
-        short_count = sum(1 for p in positions if float(p.qty) < 0)
+        positions_data = fetch_positions()
+        long_count = sum(1 for p in positions_data if p["side"] == "long")
+        short_count = sum(1 for p in positions_data if p["side"] == "short")
 
         result = {
-            "equity": float(account.equity),
-            "cash": float(account.cash),
-            "buying_power": float(account.buying_power),
+            "equity": account_data["equity"],
+            "cash": account_data["cash"],
+            "buying_power": account_data["buying_power"],
             "long_positions": long_count,
             "short_positions": short_count,
-            "portfolio_value": float(account.portfolio_value),
-            "last_equity": float(account.last_equity),
+            "portfolio_value": account_data["portfolio_value"],
+            "last_equity": account_data["last_equity"],
             "timestamp": datetime.now().isoformat(),
             "cached": False
         }
@@ -115,6 +123,22 @@ def get_portfolio_status() -> str:
 
         duration_ms = int((time.time() - start_time) * 1000)
         logger.info(f"Portfolio status fetched in {duration_ms}ms")
+
+        # Save snapshot to DAO for historical tracking
+        try:
+            dao = PortfolioDAO()
+            dao.save_snapshot(
+                timestamp=datetime.now(),
+                equity=result["equity"],
+                cash=result["cash"],
+                buying_power=result["buying_power"],
+                long_positions=long_count,
+                short_positions=short_count,
+                snapshot_source="alpaca"
+            )
+            dao.close()
+        except Exception as dao_error:
+            logger.warning(f"Failed to save snapshot to DAO: {dao_error}")
 
         return result_json
 
@@ -148,6 +172,7 @@ def get_positions_summary() -> str:
 
     Returns detailed position information including unrealized P&L,
     cost basis, and current market value for each position.
+    Uses Skills layer for API calls.
 
     Returns:
         JSON string with positions array and summary statistics
@@ -161,37 +186,20 @@ def get_positions_summary() -> str:
         return cached_result
 
     try:
-        from alpaca.trading.client import TradingClient
+        # Use Skills layer instead of direct API call
+        positions_data = fetch_positions()
 
-        api_key = secrets.get("alpaca.api_key")
-        secret_key = secrets.get("alpaca.secret_key")
-
-        client = TradingClient(api_key, secret_key)
-        positions = client.get_all_positions()
-
-        positions_list = []
         total_market_value = 0.0
         total_unrealized_pl = 0.0
 
-        for pos in positions:
-            position_data = {
-                "symbol": pos.symbol,
-                "qty": float(pos.qty),
-                "side": "long" if float(pos.qty) > 0 else "short",
-                "market_value": float(pos.market_value),
-                "cost_basis": float(pos.cost_basis),
-                "unrealized_pl": float(pos.unrealized_pl),
-                "unrealized_plpc": float(pos.unrealized_plpc),
-                "current_price": float(pos.current_price),
-                "avg_entry_price": float(pos.avg_entry_price)
-            }
-            positions_list.append(position_data)
-            total_market_value += float(pos.market_value)
-            total_unrealized_pl += float(pos.unrealized_pl)
+        # Calculate totals
+        for pos in positions_data:
+            total_market_value += pos["market_value"]
+            total_unrealized_pl += pos["unrealized_pl"]
 
         result = {
-            "positions": positions_list,
-            "count": len(positions_list),
+            "positions": positions_data,
+            "count": len(positions_data),
             "total_market_value": total_market_value,
             "total_unrealized_pl": total_unrealized_pl,
             "timestamp": datetime.now().isoformat()
@@ -230,7 +238,8 @@ def check_portfolio_health() -> str:
     """Check portfolio health against risk parameters.
 
     Validates current portfolio state against configured risk limits
-    from config.json (position limits, concentration, etc.).
+    from PortfolioDAO (position limits, concentration, daily loss, etc.).
+    Uses risk parameters stored in portfolio_parameters table.
 
     Returns:
         JSON string with health status and any violations
@@ -246,10 +255,15 @@ def check_portfolio_health() -> str:
                 "details": portfolio_status.get("details")
             })
 
-        # Get risk parameters from config
-        risk_params = config.get("risk_management", {})
-        max_daily_trades = risk_params.get("max_daily_trades", 10)
-        position_limit_percent = risk_params.get("position_limit_percent", 0.1)
+        # Get risk parameters from DAO instead of config
+        dao = PortfolioDAO()
+        risk_params = dao.get_risk_parameters()
+        dao.close()
+
+        # Extract limits with defaults
+        position_limit_percent = risk_params.get("position_limit_percent", {}).get("value", 0.1)
+        daily_loss_limit = risk_params.get("daily_loss_limit", {}).get("value", 0.05)
+        max_position_size = risk_params.get("max_position_size", {}).get("value", 1000)
 
         # Get positions
         positions_data = json.loads(get_positions_summary.invoke({}))
@@ -269,6 +283,16 @@ def check_portfolio_health() -> str:
                         "current": position_percent,
                         "limit": position_limit_percent,
                         "message": f"{pos['symbol']} represents {position_percent*100:.1f}% of portfolio (limit: {position_limit_percent*100:.1f}%)"
+                    })
+
+                # Check position size
+                if abs(pos["qty"]) > max_position_size:
+                    warnings.append({
+                        "rule": "max_position_size",
+                        "symbol": pos["symbol"],
+                        "current": abs(pos["qty"]),
+                        "limit": max_position_size,
+                        "message": f"{pos['symbol']} position size {abs(pos['qty'])} exceeds limit {max_position_size}"
                     })
 
         # Check if we have cash
@@ -294,8 +318,14 @@ def check_portfolio_health() -> str:
             "warnings": warnings,
             "checks_performed": [
                 "position_concentration",
+                "position_size",
                 "cash_reserves"
             ],
+            "risk_parameters_used": {
+                "position_limit_percent": position_limit_percent,
+                "max_position_size": max_position_size,
+                "daily_loss_limit": daily_loss_limit
+            },
             "timestamp": datetime.now().isoformat()
         }
 
