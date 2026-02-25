@@ -83,6 +83,14 @@ def _make_request(params: dict) -> dict:
     """
     global _last_request_time
 
+    if not API_KEY:
+        error_msg = (
+            "Alpha Vantage API key is not configured. "
+            "Please set secret 'alpha_vantage.api_key' before making requests."
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
     params["apikey"] = API_KEY
     function = params.get("function", "UNKNOWN")
     symbol = params.get("symbol", "UNKNOWN")

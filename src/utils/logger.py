@@ -8,7 +8,7 @@ This module provides a structured logging setup with:
 - Structured format with timestamps
 
 Usage:
-    from src.core.logger import get_logger
+    from src.utils.logger import get_logger
 
     # Get logger for a module
     logger = get_logger(__name__)

@@ -27,10 +27,20 @@ API_KEY = secrets.get("alpaca.api_key")
 SECRET_KEY = secrets.get("alpaca.secret_key")
 BASE_URL = secrets.get("alpaca.base_url")
 
-# Initialize historical data client
-historical_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
-logger.info("Alpaca historical client initialized")
-
+# Initialize historical data client with clear error handling
+try:
+    historical_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+except Exception as exc:
+    error_msg = (
+        "Failed to initialize Alpaca historical client. "
+        "Verify that config/secret.json exists and that "
+        '"alpaca.api_key" and "alpaca.secret_key" are correctly set. '
+        f"Underlying error: {exc}"
+    )
+    logger.error(error_msg, exc_info=True)
+    raise RuntimeError(error_msg) from exc
+else:
+    logger.info("Alpaca historical client initialized")
 
 def _clean_value(value):
     """Clean API values by converting 'None' strings and None to actual None.

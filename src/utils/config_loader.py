@@ -5,7 +5,7 @@ configuration and secrets. It uses singleton pattern to ensure configs
 are loaded only once.
 
 Usage:
-    from src.core.config_loader import config, secrets
+    from src.utils.config_loader import config, secrets
 
     # Access config values
     watchlist = config.get("watchlist")
