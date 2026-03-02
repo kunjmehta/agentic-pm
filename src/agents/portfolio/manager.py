@@ -28,7 +28,8 @@ from src.agents.portfolio_tools import (
     get_portfolio_status,
     get_positions_summary,
     check_portfolio_health,
-    delegate_to_quant_analyst
+    delegate_to_quant_analyst,
+    delegate_to_backtester
 )
 from src.core.middleware import create_middleware_stack, ToolTracingCallback
 
@@ -70,7 +71,8 @@ class PortfolioManager:
             get_portfolio_status,
             get_positions_summary,
             check_portfolio_health,
-            delegate_to_quant_analyst
+            delegate_to_quant_analyst,
+            delegate_to_backtester
         ]
 
     def _get_agent(self):

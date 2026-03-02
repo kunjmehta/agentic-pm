@@ -36,20 +36,25 @@ class BaseDAO:
 
         Args:
             db_path: Path to DuckDB database file. If None, uses path from config.
+                     Special value ":memory:" creates in-memory database.
         """
         if db_path is None:
             db_path = config.get("database.path", default="data/portfolio.duckdb")
 
-        # Ensure path is absolute
-        if not Path(db_path).is_absolute():
-            db_path = str(project_root / db_path)
+        # Handle in-memory database as special case
+        if db_path == ":memory:":
+            self.db_path = db_path
+        else:
+            # Ensure path is absolute
+            if not Path(db_path).is_absolute():
+                db_path = str(project_root / db_path)
 
-        self.db_path = db_path
+            self.db_path = db_path
+
+            # Ensure database directory exists (not needed for in-memory)
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
-
-        # Ensure database directory exists
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-
         logger.info(f"DAO initialized with database: {self.db_path}")
 
     def connect(self) -> duckdb.DuckDBPyConnection:

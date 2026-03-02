@@ -113,13 +113,13 @@ class QuantAnalyst:
 
     def __init__(
         self,
-        model: str = "openai:gpt-4",
+        model: str = "gpt-4o-mini",
         backtest_mode: bool = False,
     ):
         """Initialize Quant Analyst agent.
 
         Args:
-            model: LLM model to use (format "provider:model", default "openai:gpt-4")
+            model: LLM model to use (format "provider:model", default "openai:gpt-4o-mini")
             backtest_mode: If True, bypass market hours checks for testing
         """
         self.model = model

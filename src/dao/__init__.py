@@ -7,9 +7,10 @@ This module provides DAO classes for database operations:
 - AnalystDAO: Quant Analyst EOD summaries (Phase 2)
 - StrategyDAO: Trading strategy results and signals (Phase 2)
 - PortfolioDAO: Portfolio snapshots, agent interactions, risk parameters (Phase 3)
+- BacktestDAO: Backtest simulation runs, trades, performance (Phase 4)
 
 Usage:
-    from src.dao import AlphaVantageDAO, AlpacaDAO, AnalystDAO, StrategyDAO, PortfolioDAO
+    from src.dao import AlphaVantageDAO, AlpacaDAO, AnalystDAO, StrategyDAO, PortfolioDAO, BacktestDAO
 
     # Alpha Vantage fundamentals
     av_dao = AlphaVantageDAO()
@@ -28,6 +29,11 @@ Usage:
     # Strategy results
     strategy_dao = StrategyDAO()
     strategy_dao.save_strategy_result('AAPL', 'mean-reversion', price, stats, ...)
+
+    # Backtest simulations
+    backtest_dao = BacktestDAO()
+    run_id = backtest_dao.create_run('mean-reversion', start_date, end_date, 100000.0)
+    backtest_dao.save_trade(run_id, 'AAPL', entry_date, entry_time, 150.0, 100, 'long', {...})
 """
 
 from .base_dao import BaseDAO
@@ -36,6 +42,7 @@ from .alpaca_dao import AlpacaDAO
 from .analyst_dao import AnalystDAO
 from .strategy_dao import StrategyDAO
 from .portfolio_dao import PortfolioDAO
+from .backtest_dao import BacktestDAO
 
 __all__ = [
     'BaseDAO',
@@ -44,4 +51,5 @@ __all__ = [
     'AnalystDAO',
     'StrategyDAO',
     'PortfolioDAO',
+    'BacktestDAO',
 ]
