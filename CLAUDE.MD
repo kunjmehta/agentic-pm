@@ -36,6 +36,10 @@
 
     Testing Strategy: Unit tests via pytest. Functional verification via the main block in the working file.
 
+    ## Async Python Patterns
+    
+    - When writing async code, always ensure: coroutines are awaited, signal handlers are registered on the main thread only, and event loop cleanup is handled gracefully with `asyncio.run()` or equivalent.
+
 
 🧠 MEMORY MANAGEMENT
 

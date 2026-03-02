@@ -190,10 +190,6 @@ if __name__ == "__main__":
     print(f"  Sandbox mode: {config.get('sandbox_mode')}")
     print(f"  Non-existent (default): {config.get('nonexistent', default='N/A')}")
 
-    print("\nSecret.json values:")
-    print(f"  Alpaca API key: {secrets.get('alpaca.api_key', 'NOT_FOUND')[:10]}...")
-    print(f"  Alpha Vantage key: {secrets.get('alpha_vantage.api_key', 'NOT_FOUND')[:10]}...")
-
     print("\nAll config keys:")
     for key in config.get_all().keys():
         print(f"  - {key}")

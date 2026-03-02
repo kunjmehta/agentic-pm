@@ -37,3 +37,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test Configuration
+tests/conftest.py
