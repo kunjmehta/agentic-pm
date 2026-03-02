@@ -103,8 +103,8 @@ async def combined_trade_handler(trade):
     Args:
         trade: Alpaca trade object
     """
-    # Print for visibility
-    print(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
+    # Log for visibility
+    logger.info(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
           f"Exchange: {trade.exchange} | {trade.timestamp}")
 
     # Save to database

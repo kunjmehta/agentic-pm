@@ -25,9 +25,13 @@ logger = get_logger(__name__)
 class StrategyDAO(BaseDAO):
     """DAO for trading strategy results."""
 
-    def __init__(self):
-        """Initialize StrategyDAO and create schema."""
-        super().__init__()
+    def __init__(self, db_path: Optional[str] = None):
+        """Initialize StrategyDAO and create schema.
+        
+        Args:
+            db_path: Optional path to DuckDB database file. If None, uses default from config.
+        """
+        super().__init__(db_path=db_path)
         self._initialize_schema()
         logger.info("Strategy schema initialized")
 
@@ -154,11 +158,12 @@ class StrategyDAO(BaseDAO):
         result = self.fetch_one(query, (symbol, strategy_name))
 
         if result:
-            # Parse JSON fields
-            result['statistics'] = json.loads(result.get('statistics', '{}'))
-            result['indicators'] = json.loads(result.get('indicators', '{}'))
-            result['signals'] = json.loads(result.get('signals', '{}'))
-            result['parameters'] = json.loads(result.get('parameters', '{}')) if result.get('parameters') else None
+            # Parse JSON fields, guarding against NULL/None values  
+            result['statistics'] = json.loads(result.get('statistics') or '{}')  
+            result['indicators'] = json.loads(result.get('indicators') or '{}')  
+            result['signals'] = json.loads(result.get('signals') or '{}')  
+            raw_parameters = result.get('parameters')  
+            result['parameters'] = json.loads(raw_parameters) if raw_parameters else None 
 
         return result
 

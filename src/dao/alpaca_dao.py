@@ -7,7 +7,6 @@ Alpaca market data including historical bars (OHLCV) and trades.
 import sys
 from pathlib import Path
 
-from sympy import limit
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -346,6 +345,8 @@ class AlpacaDAO(BaseDAO):
             # Only apply LIMIT for positive integers; for zero/negative, behave like no limit.  
             if limit_int > 0:  
                 query += f" LIMIT {limit_int}"  
+
+        return self.fetch_df(query, (symbol, start, end))  
 
 
     def get_trade_count(self, symbol: str, start: datetime, end: datetime) -> int:

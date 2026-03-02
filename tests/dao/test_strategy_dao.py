@@ -11,9 +11,17 @@ from src.dao.strategy_dao import StrategyDAO
 
 
 @pytest.fixture
-def strategy_dao():
-    """Create StrategyDAO instance for testing."""
-    dao = StrategyDAO()
+def strategy_dao(tmp_path):
+    """Create StrategyDAO instance with temporary database for testing.
+    
+    Args:
+        tmp_path: Pytest fixture providing temporary directory path.
+        
+    Yields:
+        StrategyDAO instance using isolated temporary database.
+    """
+    test_db_path = tmp_path / "test_strategy.duckdb"
+    dao = StrategyDAO(db_path=str(test_db_path))
     yield dao
     dao.close()
 

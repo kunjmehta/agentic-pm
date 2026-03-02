@@ -14,10 +14,10 @@ from unittest.mock import patch, MagicMock
 from src.dao import AlpacaDAO, AlphaVantageDAO
 
 
-@pytest.fixture(scope="module")
-def test_db_path():
+@pytest.fixture(scope="function")
+def test_db_path(tmp_path):
     """Provide test database path for integration tests."""
-    return "data/test_integration.duckdb"
+    return str(tmp_path / "test_integration.duckdb")
 
 
 @pytest.fixture(scope="function")
@@ -50,16 +50,11 @@ def av_dao(test_db_path):
     dao.close()
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="function", autouse=True)
 def cleanup_test_db(test_db_path):
-    """Clean up test database after all tests."""
+    """Clean up test database after each test."""
     yield
-    # Cleanup after all tests
-    if os.path.exists(test_db_path):
-        try:
-            os.remove(test_db_path)
-        except Exception:
-            pass  # File may be locked
+    # Cleanup handled by tmp_path fixture automatically
 
 
 class TestAlpacaSkillsIntegration:
@@ -264,6 +259,8 @@ class TestStreamHandlersIntegration:
         trades = alpaca_dao.get_trades("TEST", start, end)
         bars = alpaca_dao.get_bars("TEST", start, end, timeframe='1Min')
 
+        assert trades is not None, "get_trades returned None"
+        assert bars is not None, "get_bars returned None"
         assert len(trades) >= 1
         assert len(bars) >= 1
 

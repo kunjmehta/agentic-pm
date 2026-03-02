@@ -34,7 +34,7 @@ class AnalystDAO(BaseDAO):
 
     def _initialize_schema(self):
         """Initialize analyst_summaries table from schema file."""
-        schema_path = Path("config/schema/analyst_schema.sql")
+        schema_path = project_root / "config" / "schema" / "analyst_schema.sql"
         if schema_path.exists():
             schema = schema_path.read_text()
             self.execute(schema)

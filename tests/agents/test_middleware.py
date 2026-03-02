@@ -30,19 +30,22 @@ class TestMarketHoursGuardMiddleware:
         # Should return None (continue execution) regardless of time
         assert result is None
 
-    def test_market_closed_raises_error(self):
+    def test_market_closed_raises_error(self, monkeypatch):
         """Test that execution is blocked when market is closed."""
+        # Simulate a time when the market is definitely closed
+        closed_dt = datetime(2024, 1, 1, 3, 0)  # 3:00 AM
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return closed_dt
+                return closed_dt.astimezone(tz)
+        # Monkeypatch datetime in the middleware module
+        monkeypatch.setattr("src.agents.middleware.datetime", FixedDateTime)
         guard = MarketHoursGuardMiddleware(backtest_mode=False)
-
-        # Note: This will only pass if run outside market hours
-        # During market hours, we expect it to pass
-        try:
-            result = guard.before_agent({}, None)
-            # If we get here, market is open
-            assert result is None
-        except RuntimeError as e:
-            # Market is closed
-            assert "Market is CLOSED" in str(e)
+        with pytest.raises(RuntimeError) as excinfo:
+            guard.before_agent({}, None)
+        assert "Market is CLOSED" in str(excinfo.value)
 
 
 class TestTracingMiddleware:
