@@ -448,6 +448,7 @@ def delegate_to_backtester(query: str, thread_id: str = "default") -> str:
         })
 
 
+<<<<<<< HEAD
 # =============================================================================
 # Historical Data Fetching Tool
 # =============================================================================
@@ -635,6 +636,8 @@ def check_data_availability(symbol: str, start_date: str, end_date: str, timefra
         })
 
 
+=======
+>>>>>>> feat: Phase 4 - Backtester Agent Implementation
 # =============================================================================
 # Utility Functions
 # =============================================================================

@@ -163,7 +163,10 @@ def fetch_historical_bars_for_backtest(
     Returns:
         JSON string with OHLCV bars array, or error message.
     """
+<<<<<<< HEAD
     logger.info(f"🔧 [TOOL CALLED] fetch_historical_bars_for_backtest({symbol}, {start_date}, {end_date}, {timeframe})")
+=======
+>>>>>>> feat: Phase 4 - Backtester Agent Implementation
     try:
         dao = AlpacaDAO()
 

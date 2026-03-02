@@ -347,8 +347,7 @@ class AlpacaDAO(BaseDAO):
             if limit_int > 0:
                 query += f" LIMIT {limit_int}"
 
-        return self.fetch_df(query, (symbol, start, end))  
-
+        return self.fetch_df(query, (symbol, start, end))
 
     def get_trade_count(self, symbol: str, start: datetime, end: datetime) -> int:
         """Get count of trades for a symbol in a time range.

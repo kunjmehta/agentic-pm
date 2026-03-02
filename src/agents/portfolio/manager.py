@@ -29,9 +29,13 @@ from src.agents.portfolio_tools import (
     get_positions_summary,
     check_portfolio_health,
     delegate_to_quant_analyst,
+<<<<<<< HEAD
     delegate_to_backtester,
     fetch_historical_data,
     check_data_availability
+=======
+    delegate_to_backtester
+>>>>>>> feat: Phase 4 - Backtester Agent Implementation
 )
 from src.core.middleware import create_middleware_stack, ToolTracingCallback
 
@@ -73,8 +77,11 @@ class PortfolioManager:
             get_portfolio_status,
             get_positions_summary,
             check_portfolio_health,
+<<<<<<< HEAD
             check_data_availability,
             fetch_historical_data,
+=======
+>>>>>>> feat: Phase 4 - Backtester Agent Implementation
             delegate_to_quant_analyst,
             delegate_to_backtester
         ]
