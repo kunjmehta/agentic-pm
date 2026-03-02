@@ -40,17 +40,18 @@ class AlphaVantageDAO(BaseDAO):
         """Initialize AlphaVantageDAO.
 
         Args:
-            db_path: Path to DuckDB database. If None, uses config default.
+            db_path: Path to DuckDB database. If None, uses market_data.duckdb.
         """
-        super().__init__(db_path)
+        super().__init__(db_path=db_path, db_type='market')
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
         """Ensure Alpha Vantage schema exists in database."""
         schema_file = "config/schema/alpha_vantage_schema.sql"
         try:
-            self.execute_schema_file(schema_file)
-            logger.info("Alpha Vantage schema initialized")
+            # Only execute if company_overview table doesn't exist
+            self.execute_schema_file(schema_file, check_table="company_overview")
+            logger.debug("Alpha Vantage schema check completed")
         except Exception as e:
             logger.warning(f"Schema initialization skipped: {str(e)}")
 

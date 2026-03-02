@@ -38,7 +38,8 @@ class StrategyDAO(BaseDAO):
     def _initialize_schema(self):
         """Create strategy_results table if it doesn't exist."""
         schema_file = Path(__file__).parent.parent.parent / "config" / "schema" / "strategy_schema.sql"
-        self.execute_schema_file(str(schema_file))
+        # Only execute if strategy_results table doesn't exist
+        self.execute_schema_file(str(schema_file), check_table="strategy_results")
 
     def save_strategy_result(
         self,

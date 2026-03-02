@@ -41,13 +41,18 @@ class MockBar:
 
 
 @pytest.fixture
-def test_db(tmp_path):
+def test_db():
     """Provide test database path and cleanup."""
-    db_path = tmp_path / "test_stream_handlers.duckdb"
+    db_path = "data/test_stream_handlers.duckdb"
 
-    yield str(db_path)
+    yield db_path
 
-    # Cleanup handled by tmp_path fixture
+    # Cleanup
+    if os.path.exists(db_path):
+        try:
+            os.remove(db_path)
+        except Exception:
+            pass  # File may be locked
 
 
 @pytest.fixture
@@ -59,11 +64,16 @@ def mock_dao(test_db):
     # Create test DAO
     dao = AlpacaDAO(db_path=test_db)
 
-    # Patch the module-level DAO getter using unittest.mock
-    with patch.object(handlers, 'get_dao', return_value=dao):
-        with patch.object(handlers, '_dao', dao):
-            yield dao
+    # Patch the module-level DAO getter
+    original_get_dao = handlers.get_dao
+    handlers._dao = dao
+    handlers.get_dao = lambda: dao
 
+    yield dao
+
+    # Restore
+    handlers.get_dao = original_get_dao
+    handlers._dao = None
     dao.close()
 
 
@@ -81,131 +91,82 @@ async def test_get_dao():
 
 
 @pytest.mark.asyncio
-async def test_save_trade_to_db(test_db):
+async def test_save_trade_to_db(mock_dao):
     """Test saving trade to database."""
     from src.data_gatherer.db_stream_handlers import save_trade_to_db
-    import src.data_gatherer.db_stream_handlers as handlers
 
     mock_trade = MockTrade()
 
-    # Create DAO for the handler to use
-    save_dao = AlpacaDAO(db_path=test_db)
-    
-    # Patch the handler to use our test DAO
-    with patch.object(handlers, 'get_dao', return_value=save_dao):
-        # Save trade
-        await save_trade_to_db(mock_trade)
-    
-    save_dao.close()
+    # Save trade
+    await save_trade_to_db(mock_trade)
 
-    # Verify it was saved by creating a NEW DAO instance to read from the DB
-    verify_dao = AlpacaDAO(db_path=test_db)
+    # Verify it was saved
     start = mock_trade.timestamp.replace(hour=0, minute=0, second=0)
     end = mock_trade.timestamp.replace(hour=23, minute=59, second=59)
-    trades = verify_dao.get_trades("TEST", start=start, end=end)
-    verify_dao.close()
+    trades = mock_dao.get_trades("TEST", start=start, end=end)
 
     assert len(trades) >= 1
     assert trades.iloc[0]['trade_id'] == mock_trade.id
 
 
 @pytest.mark.asyncio
-async def test_save_bar_to_db(test_db):
+async def test_save_bar_to_db(mock_dao):
     """Test saving bar to database."""
     from src.data_gatherer.db_stream_handlers import save_bar_to_db
-    import src.data_gatherer.db_stream_handlers as handlers
 
     mock_bar = MockBar()
 
-    # Create DAO for the handler to use
-    save_dao = AlpacaDAO(db_path=test_db)
-    
-    # Patch the handler to use our test DAO
-    with patch.object(handlers, 'get_dao', return_value=save_dao):
-        # Save bar
-        await save_bar_to_db(mock_bar, timeframe='1Min')
-    
-    save_dao.close()
+    # Save bar
+    await save_bar_to_db(mock_bar, timeframe='1Min')
 
-    # Verify it was saved by creating a NEW DAO instance to read from the DB
-    verify_dao = AlpacaDAO(db_path=test_db)
+    # Verify it was saved
     start = mock_bar.timestamp.replace(hour=0, minute=0, second=0)
     end = mock_bar.timestamp.replace(hour=23, minute=59, second=59)
-    bars = verify_dao.get_bars("TEST", start=start, end=end, timeframe='1Min')
-    verify_dao.close()
+    bars = mock_dao.get_bars("TEST", start=start, end=end, timeframe='1Min')
 
     assert len(bars) >= 1
     assert bars.iloc[0]['open'] == mock_bar.open
 
 
 @pytest.mark.asyncio
-async def test_combined_trade_handler(test_db, caplog):
+async def test_combined_trade_handler(mock_dao, capsys):
     """Test combined trade handler (print + save)."""
     from src.data_gatherer.db_stream_handlers import combined_trade_handler
-    import src.data_gatherer.db_stream_handlers as handlers
-    import logging
-
-    # Set log level to capture INFO messages
-    caplog.set_level(logging.INFO)
 
     mock_trade = MockTrade()
 
-    # Create DAO for the handler to use
-    save_dao = AlpacaDAO(db_path=test_db)
-    
-    # Patch the handler to use our test DAO
-    with patch.object(handlers, 'get_dao', return_value=save_dao):
-        # Call combined handler
-        await combined_trade_handler(mock_trade)
-    
-    save_dao.close()
+    # Call combined handler
+    await combined_trade_handler(mock_trade)
 
-    # Check output was logged
-    assert "[TRADE]" in caplog.text
-    assert "TEST" in caplog.text
+    # Check output was printed
+    captured = capsys.readouterr()
+    assert "[TRADE]" in captured.out
+    assert "TEST" in captured.out
 
-    # Verify it was saved by creating a NEW DAO instance
-    verify_dao = AlpacaDAO(db_path=test_db)
+    # Verify it was saved to DB
     start = mock_trade.timestamp.replace(hour=0, minute=0, second=0)
     end = mock_trade.timestamp.replace(hour=23, minute=59, second=59)
-    trades = verify_dao.get_trades("TEST", start=start, end=end)
-    verify_dao.close()
-    
-    assert trades is not None, "get_trades returned None"
+    trades = mock_dao.get_trades("TEST", start=start, end=end)
     assert len(trades) >= 1
 
 
 @pytest.mark.asyncio
-async def test_combined_bar_handler(test_db, caplog):
+async def test_combined_bar_handler(mock_dao, capsys):
     """Test combined bar handler (print + save)."""
     from src.data_gatherer.db_stream_handlers import combined_bar_handler
-    import src.data_gatherer.db_stream_handlers as handlers
-    import logging
-
-    # Set log level to capture INFO messages
-    caplog.set_level(logging.INFO)
 
     mock_bar = MockBar()
 
-    # Create DAO for the handler to use
-    save_dao = AlpacaDAO(db_path=test_db)
-    
-    # Patch the handler to use our test DAO
-    with patch.object(handlers, 'get_dao', return_value=save_dao):
-        # Call combined handler
-        await combined_bar_handler(mock_bar, timeframe='1Min')
-    
-    save_dao.close()
+    # Call combined handler
+    await combined_bar_handler(mock_bar, timeframe='1Min')
 
-    # Check output was logged
-    assert "[BAR]" in caplog.text
-    assert "TEST" in caplog.text
+    # Check output was printed
+    captured = capsys.readouterr()
+    assert "[BAR]" in captured.out
+    assert "TEST" in captured.out
 
-    # Verify it was saved by creating a NEW DAO instance
-    verify_dao = AlpacaDAO(db_path=test_db)
+    # Verify it was saved to DB
     start = mock_bar.timestamp.replace(hour=0, minute=0, second=0)
     end = mock_bar.timestamp.replace(hour=23, minute=59, second=59)
-    bars = verify_dao.get_bars("TEST", start=start, end=end, timeframe='1Min')
-    verify_dao.close()
-    
+    bars = mock_dao.get_bars("TEST", start=start, end=end, timeframe='1Min')
     assert len(bars) >= 1

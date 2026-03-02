@@ -17,6 +17,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -24,17 +26,204 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from src.agents.portfolio import PortfolioManager
-from src.utils import get_logger
+from src.utils import get_logger, config
 
 logger = get_logger(__name__)
 
-# Create FastAPI app
+# Global background tasks
+background_tasks = {
+    'data_stream': None,
+    'cache_flush': None
+}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle - startup and shutdown."""
+    # ═══════════════════════════════════════════════════════════════
+    # STARTUP
+    # ═══════════════════════════════════════════════════════════════
+    logger.info("="*70)
+    logger.info("🚀 Starting Agentic Portfolio Manager...")
+    logger.info("="*70)
+
+    # 1. Sync watchlist from Alpaca to database
+    logger.info("📋 Syncing watchlist from Alpaca...")
+    try:
+        from src.skills.alpaca_portfolio_skills import get_all_watchlist_symbols
+        from src.dao import AlpacaDAO
+
+        # Fetch symbols from Alpaca watchlists
+        alpaca_symbols = get_all_watchlist_symbols()
+
+        # Fallback to config if Alpaca has no watchlists
+        if not alpaca_symbols:
+            logger.warning("⚠️ No watchlists in Alpaca, using config fallback")
+            alpaca_symbols = config.get("watchlist", default=["AAPL"])
+            logger.info(f"   Fallback watchlist: {alpaca_symbols}")
+
+        if alpaca_symbols:
+            # Sync to database
+            dao = AlpacaDAO()
+
+            # Get current DB watchlist
+            db_symbols = set(dao.get_watchlist())
+            alpaca_symbols_set = set(alpaca_symbols)
+
+            # Add new symbols
+            symbols_to_add = alpaca_symbols_set - db_symbols
+            for symbol in symbols_to_add:
+                dao.add_to_watchlist(symbol)
+                logger.info(f"   Added {symbol} to watchlist")
+
+            # Optionally remove symbols not in Alpaca (commented out for safety)
+            # symbols_to_remove = db_symbols - alpaca_symbols_set
+            # for symbol in symbols_to_remove:
+            #     dao.remove_from_watchlist(symbol)
+            #     logger.info(f"   Removed {symbol} from watchlist")
+
+            dao.close()
+            logger.info(f"✅ Watchlist synced: {len(alpaca_symbols)} symbols ({len(symbols_to_add)} added)")
+        else:
+            logger.warning("⚠️ No watchlist configured")
+
+    except Exception as e:
+        logger.error(f"❌ Watchlist sync failed: {e}")
+        logger.warning("   Will use existing database watchlist")
+
+    # 2. Start cache flush background task
+    logger.info("📦 Starting cache flush task...")
+    from src.data_gatherer.db_stream_handlers import start_background_flush_task
+    try:
+        background_tasks['cache_flush'] = start_background_flush_task()
+        logger.info("✅ Cache flush task started")
+    except Exception as e:
+        logger.error(f"❌ Cache flush task failed: {e}")
+
+    # 3. Start data stream (optional - controlled by config)
+    if config.get("data_stream.enabled", default=False):
+        logger.info("📡 Starting real-time data stream...")
+        try:
+            from src.data_gatherer.alpaca_stream import AlpacaDataStreamer
+            from src.data_gatherer.db_stream_handlers import save_trade_to_cache, save_bar_to_db
+            from src.dao import AlpacaDAO
+
+            # Get watchlist symbols
+            dao = AlpacaDAO()
+            watchlist = dao.get_watchlist()
+            dao.close()
+
+            if watchlist:
+                symbol = watchlist[0]  # Start with first symbol
+                logger.info(f"📊 Streaming data for: {symbol}")
+
+                streamer = AlpacaDataStreamer(symbol=symbol)
+                streamer.subscribe_trades(save_trade_to_cache)
+                streamer.subscribe_bars(save_bar_to_db)
+
+                # Run stream in background
+                background_tasks['data_stream'] = asyncio.create_task(
+                    run_stream_async(streamer)
+                )
+                logger.info("✅ Data stream started")
+            else:
+                logger.warning("⚠️ No watchlist symbols found, data stream not started")
+        except Exception as e:
+            logger.error(f"❌ Data stream failed to start: {e}")
+    else:
+        logger.info("⏸️ Data stream disabled in config")
+
+    # 4. ETL auto-runs with bar streaming (no separate scheduler needed)
+    logger.info("⚙️ ETL configured to auto-run with bar ingestion")
+    logger.info(f"   - Indicators computed automatically when bars are saved")
+    logger.info(f"   - Lookback window: {config.get('etl.lookback_days', default=60)} days")
+    logger.info(f"   - Timeframes: {config.get('etl.timeframes', default=['1Min', '1Hour', '1Day'])}")
+
+    logger.info("="*70)
+    logger.info("✅ Application startup complete")
+    logger.info("🌐 API Server: http://localhost:8000")
+    logger.info("📚 Interactive Docs: http://localhost:8000/docs")
+    logger.info("="*70)
+
+    # ═══════════════════════════════════════════════════════════════
+    # APPLICATION RUNNING
+    # ═══════════════════════════════════════════════════════════════
+    yield  # FastAPI runs here
+
+    # ═══════════════════════════════════════════════════════════════
+    # SHUTDOWN
+    # ═══════════════════════════════════════════════════════════════
+    logger.info("="*70)
+    logger.info("🛑 Shutting down Agentic Portfolio Manager...")
+    logger.info("="*70)
+
+    # Step 1: Stop data stream first (stop new data from coming in)
+    if background_tasks['data_stream']:
+        logger.info("📡 Stopping data stream...")
+        background_tasks['data_stream'].cancel()
+        try:
+            await background_tasks['data_stream']
+        except asyncio.CancelledError:
+            logger.info("   Data stream cancelled")
+
+    # Step 2: Flush remaining cached trades to database
+    logger.info("📦 Flushing remaining cached trades...")
+    try:
+        from src.data_gatherer.db_stream_handlers import flush_cache_to_db, get_dao
+        from src.data_gatherer.trade_cache import get_cache
+
+        cache = get_cache()
+        cache_size = len(cache._cache) if hasattr(cache, '_cache') else 0
+
+        if cache_size > 0:
+            logger.info(f"   Flushing {cache_size} trades before shutdown...")
+            await flush_cache_to_db()
+            logger.info("   ✅ Cache flushed")
+        else:
+            logger.info("   Cache is empty")
+    except Exception as e:
+        logger.error(f"   Failed to flush cache: {e}", exc_info=True)
+
+    # Step 3: Stop background flush task
+    if background_tasks['cache_flush']:
+        logger.info("📦 Stopping cache flush task...")
+        try:
+            from src.data_gatherer.db_stream_handlers import stop_background_flush_task
+            await stop_background_flush_task()
+            logger.info("   ✅ Cache flush task stopped")
+        except Exception as e:
+            logger.error(f"   Failed to stop flush task: {e}")
+
+    # Step 4: Close database connections
+    logger.info("🗄️  Closing database connections...")
+    try:
+        from src.data_gatherer.db_stream_handlers import get_dao
+        dao = get_dao()
+        if dao:
+            dao.close()
+            logger.info("   ✅ Database connections closed")
+    except Exception as e:
+        logger.error(f"   Failed to close database: {e}")
+
+    logger.info("="*70)
+    logger.info("✅ Shutdown complete")
+    logger.info("="*70)
+
+
+async def run_stream_async(streamer):
+    """Run data stream in async context."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, streamer.run)
+
+
+# Create FastAPI app with lifespan
 app = FastAPI(
     title="Agentic Portfolio Manager API",
     description="Portfolio Manager Agent with Risk Management and Technical Analysis Delegation",
     version="2.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -144,6 +333,33 @@ class StatsResponse(BaseModel):
     database_path: str = Field(..., description="Path to database file")
     tables: Dict[str, Any] = Field(..., description="Row counts per table")
     timestamp: str = Field(..., description="ISO timestamp")
+
+
+class IngestionStatusResponse(BaseModel):
+    """Response model for ingestion pipeline status."""
+    data_stream: Dict[str, Any] = Field(..., description="Data stream status")
+    cache: Dict[str, Any] = Field(..., description="Trade cache status")
+    etl: Dict[str, Any] = Field(..., description="ETL scheduler status")
+    timestamp: str = Field(..., description="ISO timestamp")
+
+
+class ETLTriggerResponse(BaseModel):
+    """Response model for manual ETL trigger."""
+    status: str = Field(..., description="success | error")
+    message: str = Field(..., description="Status message")
+    total_rows: Optional[int] = Field(None, description="Total indicators computed")
+    symbols: Optional[List[str]] = Field(None, description="Symbols processed")
+    timestamp: str = Field(..., description="ISO timestamp")
+    error: Optional[str] = Field(None, description="Error message if failed")
+
+
+class CacheFlushResponse(BaseModel):
+    """Response model for manual cache flush."""
+    status: str = Field(..., description="success | error")
+    message: str = Field(..., description="Status message")
+    trades_flushed: Optional[int] = Field(None, description="Number of trades flushed")
+    timestamp: str = Field(..., description="ISO timestamp")
+    error: Optional[str] = Field(None, description="Error message if failed")
 
 
 # Routes
@@ -530,36 +746,125 @@ async def get_database_stats():
 
 @app.get("/tools", tags=["Info"])
 async def list_tools():
-    """List available tools for Portfolio Manager.
+    """List available tools for all agents.
 
     Returns:
-        Dict with tool information
+        Dict with tool information for Portfolio Manager, Quant Analyst, and Backtester
     """
     return {
         "portfolio_manager_tools": [
             {
                 "name": "get_portfolio_status",
                 "description": "Fetch current account equity, cash, buying power, positions",
-                "agent": "portfolio"
+                "returns": "JSON with equity, cash, buying_power, positions count",
+                "caching": "5 minutes"
             },
             {
                 "name": "get_positions_summary",
                 "description": "Get detailed position information with P&L breakdown",
-                "agent": "portfolio"
+                "returns": "JSON with positions, unrealized P&L, cost basis",
+                "caching": "5 minutes"
             },
             {
                 "name": "check_portfolio_health",
                 "description": "Validate portfolio against risk parameters",
-                "agent": "portfolio"
+                "returns": "JSON with health status, violations, warnings",
+                "caching": "None (always fresh)"
             },
             {
                 "name": "delegate_to_quant_analyst",
-                "description": "Delegate technical analysis to Quant Analyst",
-                "agent": "portfolio",
-                "note": "Quant Analyst tools accessed internally via delegation"
+                "description": "Delegate technical analysis queries to Quant Analyst",
+                "parameters": "query (str), symbol (optional)",
+                "note": "Internal delegation - Quant tools accessed automatically"
+            },
+            {
+                "name": "delegate_to_backtester",
+                "description": "Delegate backtesting queries to Backtester Agent",
+                "parameters": "query (str), strategy (optional)",
+                "note": "Internal delegation - Backtester tools accessed automatically"
+            },
+            {
+                "name": "fetch_historical_data",
+                "description": "Fetch historical market data for a symbol",
+                "parameters": "symbol (str), start (str), end (str), timeframe (str)",
+                "returns": "JSON with bars data"
+            },
+            {
+                "name": "check_data_availability",
+                "description": "Check if historical data exists for symbol and date range",
+                "parameters": "symbol (str), start (str), end (str), timeframe (str)",
+                "returns": "JSON with availability status, row count, date range"
             }
         ],
-        "note": "All queries should go through POST /query endpoint. Portfolio Manager handles delegation automatically."
+        "quant_analyst_tools": [
+            {
+                "name": "get_market_bars",
+                "description": "Fetch OHLCV market data for analysis",
+                "parameters": "symbol (str), start (str), end (str), timeframe (str)",
+                "returns": "JSON with bars data",
+                "note": "Accessed via delegate_to_quant_analyst"
+            },
+            {
+                "name": "get_company_fundamentals",
+                "description": "Fetch company fundamental data from Alpha Vantage",
+                "parameters": "symbol (str)",
+                "returns": "JSON with company overview, financials",
+                "note": "Accessed via delegate_to_quant_analyst"
+            },
+            {
+                "name": "save_eod_summary",
+                "description": "Save end-of-day analysis summary to database",
+                "parameters": "symbol (str), analysis_type (str), summary (str)",
+                "note": "Internal tool for analyst observability"
+            },
+            {
+                "name": "save_strategy_result_tool",
+                "description": "Save strategy analysis results to database",
+                "parameters": "symbol (str), strategy_name (str), result (str)",
+                "note": "Internal tool for strategy observability"
+            }
+        ],
+        "backtester_tools": [
+            {
+                "name": "fetch_backtest_run",
+                "description": "Retrieve backtest run metadata by run_id",
+                "parameters": "run_id (str)",
+                "returns": "JSON with run details",
+                "note": "Accessed via delegate_to_backtester"
+            },
+            {
+                "name": "fetch_backtest_trades",
+                "description": "Retrieve all trades for a backtest run",
+                "parameters": "run_id (str)",
+                "returns": "JSON with trade history",
+                "note": "Accessed via delegate_to_backtester"
+            },
+            {
+                "name": "fetch_backtest_performance_history",
+                "description": "Retrieve performance snapshots for a backtest run",
+                "parameters": "run_id (str)",
+                "returns": "JSON with equity curve, metrics over time",
+                "note": "Accessed via delegate_to_backtester"
+            },
+            {
+                "name": "fetch_historical_bars_for_backtest",
+                "description": "Fetch market data for backtesting simulation",
+                "parameters": "symbol (str), start (str), end (str), timeframe (str)",
+                "returns": "JSON with bars data",
+                "note": "Accessed via delegate_to_backtester"
+            },
+            {
+                "name": "save_backtest_run_to_db",
+                "description": "Save backtest run results to database",
+                "parameters": "run_id (str), metadata (dict)",
+                "note": "Internal tool for backtest observability"
+            }
+        ],
+        "architecture": {
+            "entry_point": "POST /query",
+            "delegation_flow": "Portfolio Manager → Quant Analyst / Backtester (as needed)",
+            "note": "All agent interactions go through Portfolio Manager. Delegation happens automatically based on query content."
+        }
     }
 
 
@@ -568,57 +873,296 @@ async def list_skills():
     """List available skills in the system.
 
     Returns:
-        Dict with skill information for both agents
+        Dict with skill information for Portfolio Manager, Quant Analyst, and Backtester
     """
     return {
         "portfolio_manager_skills": [
             {
                 "name": "portfolio-management",
-                "description": "Portfolio health analysis, historical performance, risk monitoring",
+                "description": "Portfolio health analysis, position tracking, risk monitoring, delegation to specialists",
                 "path": "src/agents/portfolio/skills/portfolio-management",
-                "functions": [
-                    "get_portfolio_status()",
-                    "get_positions_summary()",
-                    "check_portfolio_health()",
-                    "delegate_to_quant_analyst()"
+                "capabilities": [
+                    "Real-time portfolio status (equity, cash, buying power)",
+                    "Position summaries with P&L breakdown",
+                    "Risk compliance validation",
+                    "Historical data fetching",
+                    "Data availability checks",
+                    "Delegation to Quant Analyst for technical analysis",
+                    "Delegation to Backtester for strategy validation"
                 ]
             }
         ],
         "quant_analyst_skills": {
-            "note": "Accessed internally via Portfolio Manager delegation",
+            "note": "Accessed via Portfolio Manager delegation (delegate_to_quant_analyst)",
             "level_1_indicators": [
                 {
                     "name": "momentum-indicators",
-                    "description": "MACD, RSI, EMA calculations",
-                    "path": "src/agents/quant/skills/momentum-indicators"
+                    "description": "Trend-following indicators for market direction",
+                    "path": "src/agents/quant/skills/momentum-indicators",
+                    "indicators": [
+                        "MACD (Moving Average Convergence Divergence)",
+                        "RSI (Relative Strength Index)",
+                        "EMA (Exponential Moving Average)"
+                    ],
+                    "outputs": "MACD value/signal/histogram, RSI percentage, trend signals"
                 },
                 {
                     "name": "volatility-indicators",
-                    "description": "Bollinger Bands, ATR",
-                    "path": "src/agents/quant/skills/volatility-indicators"
+                    "description": "Market volatility and price range analysis",
+                    "path": "src/agents/quant/skills/volatility-indicators",
+                    "indicators": [
+                        "Bollinger Bands (upper/middle/lower)",
+                        "Bandwidth percentage",
+                        "Volatility classification (low/normal/high/extreme)"
+                    ],
+                    "outputs": "Band values, bandwidth %, volatility regime, squeeze/expansion signals"
                 },
                 {
                     "name": "volume-indicators",
-                    "description": "OBV, volume flow analysis",
-                    "path": "src/agents/quant/skills/volume-indicators"
+                    "description": "Trading volume and flow analysis",
+                    "path": "src/agents/quant/skills/volume-indicators",
+                    "indicators": [
+                        "OBV (On-Balance Volume)",
+                        "Volume trend analysis",
+                        "Current vs 10-day average volume"
+                    ],
+                    "outputs": "OBV value, volume trend (increasing/decreasing/stable), volume ratio"
                 },
                 {
                     "name": "candlestick-patterns",
-                    "description": "Pattern recognition (doji, hammer, etc.)",
-                    "path": "src/agents/quant/skills/candlestick-patterns"
+                    "description": "Price action pattern recognition",
+                    "path": "src/agents/quant/skills/candlestick-patterns",
+                    "patterns": [
+                        "Doji (indecision)",
+                        "Hammer (bullish reversal)",
+                        "Shooting Star (bearish reversal)",
+                        "Engulfing patterns"
+                    ],
+                    "outputs": "Pattern name, signal type (bullish/bearish/neutral), confidence"
                 }
             ],
             "level_2_strategies": [
                 {
                     "name": "mean-reversion-strategy",
-                    "description": "Complete mean reversion analysis with VWAP confirmation",
+                    "description": "Complete mean reversion trading strategy with multi-indicator confirmation",
                     "path": "src/agents/quant/skills/mean-reversion-strategy",
-                    "features": ["z-score", "moving averages", "Bollinger Bands", "VWAP confirmation"]
+                    "components": [
+                        "Z-score calculation (price deviation from mean)",
+                        "Moving average analysis (20/50 SMA)",
+                        "Bollinger Band positioning",
+                        "VWAP confirmation",
+                        "Combined signal generation"
+                    ],
+                    "signals": [
+                        "STRONG_BUY: Oversold with mean reversion setup",
+                        "BUY: Potential upside from mean",
+                        "HOLD: Near mean, no clear signal",
+                        "SELL: Potential downside to mean",
+                        "STRONG_SELL: Overbought with reversion pressure"
+                    ],
+                    "outputs": "Signal, z-score, percentile rank, VWAP comparison, confidence"
                 }
             ]
         },
-        "architecture": "Single entry point via Portfolio Manager (POST /query). Quant skills accessed via internal delegation."
+        "backtester_skills": {
+            "note": "Accessed via Portfolio Manager delegation (delegate_to_backtester)",
+            "skills": [
+                {
+                    "name": "backtest-orchestration",
+                    "description": "Strategy backtesting workflow coordination",
+                    "path": "src/agents/backtester/skills/backtest-orchestration",
+                    "capabilities": [
+                        "Data preparation and validation",
+                        "Strategy parameter configuration",
+                        "Simulation execution",
+                        "Result aggregation"
+                    ]
+                },
+                {
+                    "name": "performance-metrics",
+                    "description": "Trading strategy performance analysis",
+                    "path": "src/agents/backtester/skills/performance-metrics",
+                    "metrics": [
+                        "Total return %",
+                        "Sharpe ratio",
+                        "Maximum drawdown",
+                        "Win rate",
+                        "Profit factor",
+                        "Average win/loss ratio"
+                    ]
+                },
+                {
+                    "name": "simulation-engine",
+                    "description": "Historical trade simulation with realistic execution",
+                    "path": "src/agents/backtester/skills/simulation-engine",
+                    "features": [
+                        "Order execution simulation",
+                        "Position tracking",
+                        "Equity curve generation",
+                        "Trade log creation"
+                    ]
+                }
+            ]
+        },
+        "architecture": {
+            "entry_point": "POST /query",
+            "workflow": "User → Portfolio Manager → [Quant Analyst | Backtester] (auto delegation)",
+            "skill_hierarchy": {
+                "level_0": "Portfolio Manager (orchestration, risk management)",
+                "level_1": "Quant Analyst indicators (MACD, RSI, Bollinger Bands, etc.)",
+                "level_2": "Quant strategies (Mean Reversion, etc.)",
+                "level_3": "Backtester (strategy validation, performance analysis)"
+            },
+            "data_flow": "Market Data → ETL (computed indicators) → Agents → Analysis → Portfolio Manager → User"
+        }
     }
+
+
+@app.get("/ingestion/status", response_model=IngestionStatusResponse, tags=["Ingestion"])
+async def get_ingestion_status():
+    """Get real-time status of the ingestion pipeline.
+
+    Returns status of:
+    - Data stream (running/stopped, symbols)
+    - Trade cache (size, last flush)
+    - ETL scheduler (running/stopped, last run)
+
+    Returns:
+        IngestionStatusResponse with pipeline component statuses
+    """
+    try:
+        from src.data_gatherer.trade_cache import get_cache
+
+        # Data stream status
+        data_stream_status = {
+            "enabled": config.get("data_stream.enabled", default=False),
+            "running": background_tasks['data_stream'] is not None and not background_tasks['data_stream'].done(),
+            "auto_start": config.get("data_stream.auto_start", default=False),
+            "feed": config.get("data_stream.feed", default="iex")
+        }
+
+        # Cache status
+        cache = get_cache()
+        cache_size = len(cache._cache) if hasattr(cache, '_cache') else 0
+        cache_max_size = config.get("cache.max_size", default=100000)
+        cache_status = {
+            "enabled": config.get("cache.enabled", default=True),
+            "current_size": cache_size,
+            "max_size": cache_max_size,
+            "utilization_percent": round((cache_size / cache_max_size) * 100, 2) if cache_max_size > 0 else 0,
+            "batch_interval_minutes": config.get("cache.batch_interval_minutes", default=5),
+            "last_flush": getattr(cache, '_last_flush', None).isoformat() if hasattr(cache, '_last_flush') and cache._last_flush else None
+        }
+
+        # ETL status (auto-runs with bar ingestion)
+        etl_status = {
+            "enabled": config.get("etl.enabled", default=True),
+            "mode": "auto-run",
+            "description": "Indicators computed automatically when bars are saved",
+            "timeframes": config.get("etl.timeframes", default=["1Min", "1Hour", "1Day"]),
+            "lookback_days": config.get("etl.lookback_days", default=60)
+        }
+
+        return IngestionStatusResponse(
+            data_stream=data_stream_status,
+            cache=cache_status,
+            etl=etl_status,
+            timestamp=datetime.now().isoformat()
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to get ingestion status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ingestion/trigger-etl", response_model=ETLTriggerResponse, tags=["Ingestion"])
+async def trigger_etl():
+    """Manually trigger ETL pipeline to compute indicators.
+
+    Runs ETL for all watchlist symbols across configured timeframes.
+    This can take several minutes depending on data volume.
+
+    Returns:
+        ETLTriggerResponse with computation results
+    """
+    try:
+        from src.etl.pipeline import IndicatorsETL
+
+        logger.info("⚙️ Manually triggered ETL...")
+        etl = IndicatorsETL()
+        result = etl.run_for_watchlist()
+        etl.close()
+
+        logger.info(f"✅ ETL complete: {result['total_rows']} indicators computed")
+
+        return ETLTriggerResponse(
+            status="success",
+            message=f"ETL completed successfully for {len(result['symbols'])} symbols",
+            total_rows=result['total_rows'],
+            symbols=result['symbols'],
+            timestamp=datetime.now().isoformat(),
+            error=None
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Manual ETL failed: {e}", exc_info=True)
+        return ETLTriggerResponse(
+            status="error",
+            message="ETL execution failed",
+            total_rows=None,
+            symbols=None,
+            timestamp=datetime.now().isoformat(),
+            error=str(e)
+        )
+
+
+@app.post("/ingestion/flush-cache", response_model=CacheFlushResponse, tags=["Ingestion"])
+async def flush_cache():
+    """Manually flush the trade cache to database.
+
+    Forces immediate write of all cached trades to the database.
+    Normally cache flushes automatically based on time/size triggers.
+
+    Returns:
+        CacheFlushResponse with flush results
+    """
+    try:
+        from src.data_gatherer.trade_cache import get_cache
+        from src.data_gatherer.db_stream_handlers import flush_cache_to_db
+
+        # Get current cache size
+        cache = get_cache()
+        cache_size = len(cache._cache) if hasattr(cache, '_cache') else 0
+
+        if cache_size == 0:
+            return CacheFlushResponse(
+                status="success",
+                message="Cache is empty, nothing to flush",
+                trades_flushed=0,
+                timestamp=datetime.now().isoformat(),
+                error=None
+            )
+
+        logger.info(f"📦 Manually flushing cache ({cache_size} trades)...")
+        await flush_cache_to_db()
+
+        return CacheFlushResponse(
+            status="success",
+            message=f"Successfully flushed {cache_size} trades to database",
+            trades_flushed=cache_size,
+            timestamp=datetime.now().isoformat(),
+            error=None
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Cache flush failed: {e}", exc_info=True)
+        return CacheFlushResponse(
+            status="error",
+            message="Cache flush failed",
+            trades_flushed=None,
+            timestamp=datetime.now().isoformat(),
+            error=str(e)
+        )
 
 
 if __name__ == "__main__":
@@ -648,6 +1192,10 @@ if __name__ == "__main__":
     print("\nInfo Endpoints:")
     print("  GET  /tools                - List available tools")
     print("  GET  /skills               - List available skills")
+    print("\nIngestion Pipeline Endpoints:")
+    print("  GET  /ingestion/status     - Real-time pipeline status")
+    print("  POST /ingestion/trigger-etl- Manually trigger ETL")
+    print("  POST /ingestion/flush-cache- Manually flush trade cache")
     print("\nServer running at: http://localhost:8000")
     print("API docs at: http://localhost:8000/docs")
     print("ReDoc at: http://localhost:8000/redoc")
@@ -667,6 +1215,29 @@ if __name__ == "__main__":
         "src.api.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,  # Set to False in production
-        log_level="info"
+        reload=False,  # Set to False in production
+        log_level="info",
+        log_config={
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                    "datefmt": "%H:%M:%S"
+                }
+            },
+            "handlers": {
+                "default": {
+                    "formatter": "default",
+                    "class": "logging.StreamHandler",
+                    "stream": "ext://sys.stdout"
+                }
+            },
+            "loggers": {
+                "uvicorn": {"handlers": ["default"], "level": "INFO"},
+                "uvicorn.error": {"level": "INFO"},
+                "uvicorn.access": {"handlers": ["default"], "level": "INFO"},
+                "watchfiles": {"handlers": ["default"], "level": "WARNING"}  # Suppress watchfiles debug logs
+            }
+        }
     )

@@ -11,8 +11,10 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 import pandas as pd
+import asyncio
 from src.dao import AlpacaDAO
-from src.utils import get_logger
+from src.data_gatherer.trade_cache import get_cache
+from src.utils import get_logger, config
 
 
 # Initialize logger
@@ -20,6 +22,9 @@ logger = get_logger(__name__)
 
 # Module-level DAO instance (singleton)
 _dao = None
+
+# Background flush task handle
+_flush_task = None
 
 
 def get_dao() -> AlpacaDAO:
@@ -36,11 +41,13 @@ def get_dao() -> AlpacaDAO:
 
 
 async def save_trade_to_db(trade):
-    """Save trade data to database.
+    """Save trade data directly to database (no caching).
 
     Args:
         trade: Alpaca trade object with attributes: symbol, timestamp, price,
                size, exchange, conditions, id, tape
+
+    Note: This bypasses the cache. Use save_trade_to_cache() for batched writes.
     """
     try:
         dao = get_dao()
@@ -65,8 +72,171 @@ async def save_trade_to_db(trade):
         logger.error(f"Failed to save trade to DB: {e}", exc_info=True)
 
 
+async def save_trade_to_cache(trade):
+    """Save trade data to cache for batched database writes.
+
+    This is the recommended handler for live WebSocket streams as it reduces
+    database write frequency by batching trades in memory.
+
+    Args:
+        trade: Alpaca trade object with attributes: symbol, timestamp, price,
+               size, exchange, conditions, id, tape
+    """
+    try:
+        cache = get_cache()
+
+        # Convert trade object to dict
+        trade_data = {
+            'symbol': trade.symbol,
+            'timestamp': trade.timestamp,
+            'trade_id': trade.id,
+            'price': float(trade.price),
+            'size': int(trade.size),
+            'exchange': trade.exchange if hasattr(trade, 'exchange') else None,
+            'conditions': ','.join(trade.conditions) if hasattr(trade, 'conditions') and trade.conditions else '',
+            'tape': trade.tape if hasattr(trade, 'tape') else None
+        }
+
+        # Add to cache
+        should_flush = cache.add_trade(trade_data)
+
+        logger.debug(f"Added trade to cache: {trade.symbol} @ ${trade.price:.2f}")
+
+        # Flush if threshold met
+        if should_flush:
+            await flush_cache_to_db()
+
+    except Exception as e:
+        logger.error(f"Failed to save trade to cache: {e}", exc_info=True)
+
+
+async def handle_trade_correction(correction):
+    """Handle trade correction from Alpaca stream.
+
+    Reference: https://docs.alpaca.markets/docs/real-time-stock-pricing-data#trade-corrections
+
+    Args:
+        correction: Alpaca trade correction object with original and corrected data
+    """
+    try:
+        cache = get_cache()
+        dao = get_dao()
+
+        symbol = correction.symbol
+        trade_id = correction.id  # Original trade ID
+        corrected_price = float(correction.price)
+        corrected_size = int(correction.size)
+
+        # Build correction data
+        correction_data = {
+            'symbol': symbol,
+            'trade_id': trade_id,
+            'price': corrected_price,
+            'size': corrected_size,
+            'timestamp': correction.timestamp if hasattr(correction, 'timestamp') else None,
+            'exchange': correction.exchange if hasattr(correction, 'exchange') else None,
+            'conditions': ','.join(correction.conditions) if hasattr(correction, 'conditions') and correction.conditions else '',
+            'tape': correction.tape if hasattr(correction, 'tape') else None
+        }
+
+        # Try to update in cache first
+        updated_in_cache = cache.update_trade(correction_data)
+
+        if updated_in_cache:
+            logger.info(f"Trade correction applied in cache: {symbol} trade_id={trade_id}")
+        else:
+            # Trade not in cache - must be already flushed to DB
+            # Update directly in database
+            logger.info(f"Trade not in cache, updating in database: {symbol} trade_id={trade_id}")
+
+            # Create DataFrame for the correction
+            correction_df = pd.DataFrame([correction_data])
+
+            # Update in database (upsert)
+            dao.save_trades(correction_df)
+            logger.info(f"Trade correction applied in database: {symbol} trade_id={trade_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to handle trade correction: {e}", exc_info=True)
+
+
+async def handle_trade_cancellation(cancellation):
+    """Handle trade cancellation/error from Alpaca stream.
+
+    Reference: https://docs.alpaca.markets/docs/real-time-stock-pricing-data#trade-cancelserrors
+
+    Args:
+        cancellation: Alpaca trade cancellation object with trade ID to cancel
+    """
+    try:
+        cache = get_cache()
+        dao = get_dao()
+
+        symbol = cancellation.symbol
+        trade_id = cancellation.id  # Trade ID to cancel
+
+        # Try to cancel in cache first
+        cancelled_in_cache = cache.cancel_trade(symbol, trade_id)
+
+        if cancelled_in_cache:
+            logger.info(f"Trade cancelled in cache: {symbol} trade_id={trade_id}")
+        else:
+            # Trade not in cache - must be already flushed to DB
+            # Delete from database
+            logger.info(f"Trade not in cache, deleting from database: {symbol} trade_id={trade_id}")
+
+            # Execute DELETE query
+            query = """
+                DELETE FROM historical_trades
+                WHERE symbol = ? AND trade_id = ?
+            """
+            dao.execute(query, (symbol, trade_id))
+            dao.commit()
+            logger.info(f"Trade cancelled in database: {symbol} trade_id={trade_id}")
+
+    except Exception as e:
+        logger.error(f"Failed to handle trade cancellation: {e}", exc_info=True)
+
+
+async def flush_cache_to_db():
+    """Flush cached trades to live_trades table in database.
+
+    This function is called automatically when cache thresholds are met,
+    or can be called manually to force a flush.
+    """
+    try:
+        cache = get_cache()
+        dao = get_dao()
+
+        # Get all cached trades
+        df = cache.flush()
+
+        if df.empty:
+            logger.debug("No trades to flush from cache")
+            return
+
+        # Save to live_trades table (staging)
+        # Note: We'll need to add this method to AlpacaDAO
+        if hasattr(dao, 'save_live_trades'):
+            rows = dao.save_live_trades(df)
+        else:
+            # Fallback: save to historical_trades with source='stream'
+            rows = dao.save_trades(df)
+
+        logger.info(f"Flushed {len(df):,} trades to database ({rows} rows affected)")
+
+    except Exception as e:
+        logger.error(f"Failed to flush cache to DB: {e}", exc_info=True)
+
+
 async def save_bar_to_db(bar, timeframe: str = '1Min'):
-    """Save bar data to database.
+    """Save bar data to database and automatically compute indicators.
+
+    This function implements the auto-run ETL pipeline:
+    1. Save bar to database
+    2. Fetch recent bars (lookback window)
+    3. Compute indicators
+    4. Save computed indicators
 
     Args:
         bar: Alpaca bar object with attributes: symbol, timestamp, open, high,
@@ -89,19 +259,115 @@ async def save_bar_to_db(bar, timeframe: str = '1Min'):
             'vwap': float(bar.vwap) if hasattr(bar, 'vwap') else None
         }])
 
-        # Save to database
+        # Save bar to database
         dao.save_bars(bar_data, timeframe=timeframe)
         logger.debug(f"Saved bar to DB: {bar.symbol} @ {bar.timestamp}")
+
+        # Auto-compute indicators if enabled
+        if config.get("etl.enabled", default=True):
+            await _compute_and_save_indicators(bar.symbol, timeframe, dao)
 
     except Exception as e:
         logger.error(f"Failed to save bar to DB: {e}", exc_info=True)
 
 
+async def _compute_and_save_indicators(symbol: str, timeframe: str, dao: AlpacaDAO):
+    """Compute indicators for the most recent bar and save to database.
+
+    This runs automatically after each bar is saved, ensuring indicators
+    are always up-to-date without needing a separate scheduler.
+
+    Args:
+        symbol: Stock symbol
+        timeframe: Bar timeframe
+        dao: AlpacaDAO instance
+    """
+    try:
+        from src.etl.indicators_engine import IndicatorsEngine
+        from datetime import datetime, timedelta
+
+        # Get lookback period from config (default 60 days)
+        lookback_days = config.get("etl.lookback_days", default=60)
+
+        # Fetch recent bars (lookback window)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=lookback_days)
+
+        bars = dao.get_bars(
+            symbol=symbol,
+            start=start_date,
+            end=end_date,
+            timeframe=timeframe
+        )
+
+        if bars.empty or len(bars) < 60:
+            logger.debug(f"Insufficient data for {symbol} {timeframe} (need 60+ bars)")
+            return
+
+        # Compute indicators
+        engine = IndicatorsEngine()
+
+        # Calculate indicators for ALL rows (rolling window)
+        indicator_rows = []
+        for i in range(60, len(bars) + 1):  # Need minimum 60 bars for mean reversion
+            window_data = bars.iloc[:i].copy()
+            result = engine.calc_all(window_data)
+
+            # Get the timestamp for this row
+            timestamp = window_data.iloc[-1]['timestamp']
+
+            # Flatten result into a single row
+            row = {
+                'symbol': symbol,
+                'timestamp': timestamp,
+                'timeframe': timeframe,
+
+                # Momentum
+                'macd_value': result['momentum']['macd']['value'],
+                'macd_signal': result['momentum']['macd']['signal'],
+                'macd_histogram': result['momentum']['macd']['histogram'],
+                'rsi': result['momentum']['rsi'],
+
+                # Volatility
+                'bb_upper': result['volatility']['upper'],
+                'bb_middle': result['volatility']['middle'],
+                'bb_lower': result['volatility']['lower'],
+                'bb_bandwidth': result['volatility']['bandwidth'],
+
+                # Volume
+                'obv': result['volume']['obv'],
+                'volume_trend': result['volume']['trend'],
+                'avg_volume_10d': result['volume']['avg_volume_10d'],
+                'current_vs_avg': result['volume']['current_vs_avg'],
+
+                # Mean reversion
+                'z_score': result['mean_reversion']['z_score'],
+                'percentile': result['mean_reversion']['percentile'],
+                'vwap': result['mean_reversion']['vwap']
+            }
+            indicator_rows.append(row)
+
+        # Convert to DataFrame
+        indicators_df = pd.DataFrame(indicator_rows)
+
+        # Save to database (upsert to handle duplicates)
+        if hasattr(dao, 'save_computed_indicators'):
+            rows = dao.save_computed_indicators(indicators_df)
+            logger.debug(f"Saved {rows} computed indicators for {symbol} {timeframe}")
+        else:
+            logger.warning("AlpacaDAO.save_computed_indicators() not available")
+
+    except Exception as e:
+        logger.error(f"Failed to compute/save indicators for {symbol}: {e}", exc_info=True)
+
+
 async def combined_trade_handler(trade):
-    """Combined handler: print AND save to database.
+    """Combined handler: print AND save to database (direct, no cache).
 
     Args:
         trade: Alpaca trade object
+
+    Note: This bypasses cache. Use combined_trade_cache_handler() for batched writes.
     """
     # Log for visibility
     logger.info(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
@@ -109,6 +375,22 @@ async def combined_trade_handler(trade):
 
     # Save to database
     await save_trade_to_db(trade)
+
+
+async def combined_trade_cache_handler(trade):
+    """Combined handler: print AND save to cache for batched writes.
+
+    This is the recommended handler for live WebSocket streams.
+
+    Args:
+        trade: Alpaca trade object
+    """
+    # Print for visibility
+    print(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
+          f"Exchange: {trade.exchange} | {trade.timestamp}")
+
+    # Save to cache
+    await save_trade_to_cache(trade)
 
 
 async def combined_bar_handler(bar, timeframe: str = '1Min'):
@@ -125,6 +407,119 @@ async def combined_bar_handler(bar, timeframe: str = '1Min'):
 
     # Save to database
     await save_bar_to_db(bar, timeframe=timeframe)
+
+
+async def combined_trade_correction_handler(correction):
+    """Combined handler: print AND handle trade correction.
+
+    Args:
+        correction: Alpaca trade correction object
+    """
+    # Print for visibility
+    print(f"[CORRECTION] {correction.symbol} trade_id={correction.id} | "
+          f"New price: ${correction.price:.2f} | Size: {correction.size}")
+
+    # Handle correction (cache or database)
+    await handle_trade_correction(correction)
+
+
+async def combined_trade_cancellation_handler(cancellation):
+    """Combined handler: print AND handle trade cancellation.
+
+    Args:
+        cancellation: Alpaca trade cancellation object
+    """
+    # Print for visibility
+    print(f"[CANCEL] {cancellation.symbol} trade_id={cancellation.id} | Trade cancelled/error")
+
+    # Handle cancellation (cache or database)
+    await handle_trade_cancellation(cancellation)
+
+
+async def _background_flush_task():
+    """Background task that periodically flushes cache to database.
+
+    This task runs in the background and checks the cache every minute.
+    If the cache needs flushing (based on time or size thresholds),
+    it flushes to the database.
+
+    This task runs indefinitely until cancelled.
+    """
+    check_interval = 60  # Check every minute
+
+    logger.info("Background flush task started")
+
+    try:
+        while True:
+            await asyncio.sleep(check_interval)
+
+            cache = get_cache()
+            stats = cache.get_stats()
+
+            # Check if flush is needed
+            if stats['current_size'] > 0:
+                time_threshold = stats['batch_interval_seconds']
+                time_elapsed = stats['time_since_flush_seconds']
+
+                if time_elapsed >= time_threshold:
+                    logger.info(
+                        f"Background flush triggered: {stats['current_size']:,} trades, "
+                        f"{time_elapsed:.0f}s since last flush"
+                    )
+                    await flush_cache_to_db()
+
+    except asyncio.CancelledError:
+        logger.info("Background flush task cancelled")
+        # Flush remaining trades before exiting
+        await flush_cache_to_db()
+        raise
+    except Exception as e:
+        logger.error(f"Background flush task error: {e}", exc_info=True)
+
+
+def start_background_flush_task():
+    """Start the background flush task.
+
+    Returns:
+        asyncio.Task: The background task handle
+
+    Note: Call this once when starting the WebSocket stream.
+    """
+    global _flush_task
+
+    if _flush_task is not None and not _flush_task.done():
+        logger.warning("Background flush task already running")
+        return _flush_task
+
+    _flush_task = asyncio.create_task(_background_flush_task())
+    logger.info("Background flush task created")
+
+    return _flush_task
+
+
+async def stop_background_flush_task():
+    """Stop the background flush task gracefully.
+
+    This will cancel the task and flush any remaining cached trades.
+
+    Note: Call this when shutting down the WebSocket stream.
+    """
+    global _flush_task
+
+    if _flush_task is None:
+        logger.warning("No background flush task to stop")
+        return
+
+    if not _flush_task.done():
+        logger.info("Stopping background flush task...")
+        _flush_task.cancel()
+
+        try:
+            await _flush_task
+        except asyncio.CancelledError:
+            logger.info("Background flush task stopped")
+
+    _flush_task = None
 
 
 if __name__ == "__main__":

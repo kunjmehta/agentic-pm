@@ -40,3 +40,4 @@ Thumbs.db
 
 # Test Configuration
 tests/conftest.py
+docs/

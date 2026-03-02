@@ -78,6 +78,7 @@ class Backtester:
                 model=self.model,
                 temperature=0.1,
                 api_key=secrets.get("openai.api_key"),
+                verbose=True,
                 callbacks=[tool_callback]
             )
 
@@ -98,7 +99,7 @@ class Backtester:
                     "src/agents/backtester/skills/backtest-orchestration"
                 ],
                 tools=self.tools,
-                memory=["src/agents/backtester/AGENT.MD"],
+                memory=["src/agents/backtester/AGENTS.MD"],
                 checkpointer=checkpointer
             )
 

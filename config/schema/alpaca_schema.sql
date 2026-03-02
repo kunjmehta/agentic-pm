@@ -45,8 +45,29 @@ CREATE INDEX IF NOT EXISTS idx_market_bars_timeframe_time
 
 -- ============================================================================
 
--- 3. Historical Trades
--- Stores tick-level trade data
+-- 3. Live Trades (Staging Table)
+-- Stores real-time trade data from WebSocket stream before archival
+CREATE TABLE IF NOT EXISTS live_trades (
+    symbol VARCHAR NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    trade_id BIGINT NOT NULL,
+    price DOUBLE,
+    size INTEGER,
+    exchange VARCHAR(1),            -- Exchange code (P=Arca, Q=NASDAQ, V=IEX, etc.)
+    conditions VARCHAR,             -- Trade conditions (@=regular, T=extended, etc.)
+    tape VARCHAR(1),                -- SIP tape (A, B, or C)
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, timestamp, trade_id)
+);
+
+-- Index for archival queries (by ingestion time)
+CREATE INDEX IF NOT EXISTS idx_live_trades_ingested
+    ON live_trades(symbol, ingested_at DESC);
+
+-- ============================================================================
+
+-- 4. Historical Trades (Archival Table)
+-- Stores tick-level trade data (both API-fetched and archived from live_trades)
 CREATE TABLE IF NOT EXISTS historical_trades (
     symbol VARCHAR NOT NULL,
     timestamp TIMESTAMP NOT NULL,
@@ -56,7 +77,9 @@ CREATE TABLE IF NOT EXISTS historical_trades (
     exchange VARCHAR(1),            -- Exchange code (P=Arca, Q=NASDAQ, V=IEX, etc.)
     conditions VARCHAR,             -- Trade conditions (@=regular, T=extended, etc.)
     tape VARCHAR(1),                -- SIP tape (A, B, or C)
-    PRIMARY KEY (symbol, timestamp)
+    source VARCHAR(10) DEFAULT 'api',  -- 'api' (historical fetch) or 'stream' (WebSocket)
+    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, timestamp, trade_id)
 );
 
 -- Indexes for time-series queries
@@ -65,6 +88,46 @@ CREATE INDEX IF NOT EXISTS idx_trades_symbol_time
 
 CREATE INDEX IF NOT EXISTS idx_trades_size
     ON historical_trades(symbol, size DESC, timestamp DESC);
+
+-- ============================================================================
+
+-- 5. Computed Indicators
+-- Stores pre-computed technical indicators from ETL pipeline
+CREATE TABLE IF NOT EXISTS computed_indicators (
+    symbol VARCHAR NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    timeframe VARCHAR NOT NULL,     -- '1Min', '1Hour', '1Day'
+
+    -- Momentum indicators
+    macd_value DOUBLE,
+    macd_signal DOUBLE,
+    macd_histogram DOUBLE,
+    rsi DOUBLE,
+
+    -- Volatility indicators
+    bb_upper DOUBLE,               -- Bollinger Band upper
+    bb_middle DOUBLE,              -- Bollinger Band middle (SMA)
+    bb_lower DOUBLE,               -- Bollinger Band lower
+    bb_bandwidth DOUBLE,           -- Bandwidth percentage
+
+    -- Volume indicators
+    obv BIGINT,                    -- On-Balance Volume
+    volume_trend VARCHAR(20),      -- 'increasing' or 'decreasing'
+    avg_volume_10d BIGINT,         -- 10-period average volume
+    current_vs_avg DOUBLE,         -- Current volume / avg ratio
+
+    -- Mean reversion indicators
+    z_score DOUBLE,                -- Z-score for mean reversion
+    percentile DOUBLE,             -- Percentile ranking
+    vwap DOUBLE,                   -- Volume-Weighted Average Price
+
+    computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, timestamp, timeframe)
+);
+
+-- Indexes for time-series queries
+CREATE INDEX IF NOT EXISTS idx_computed_indicators_time
+    ON computed_indicators(symbol, timeframe, timestamp DESC);
 
 
 -- ============================================================================
@@ -129,6 +192,36 @@ SELECT
 FROM historical_trades
 WHERE size >= 10000
 ORDER BY timestamp DESC, size DESC;
+
+-- Recent trades (combines live + recent historical)
+CREATE OR REPLACE VIEW recent_trades AS
+SELECT
+    symbol,
+    timestamp,
+    trade_id,
+    price,
+    size,
+    exchange,
+    conditions,
+    tape,
+    'live' as source,
+    ingested_at as created_at
+FROM live_trades
+UNION ALL
+SELECT
+    symbol,
+    timestamp,
+    trade_id,
+    price,
+    size,
+    exchange,
+    conditions,
+    tape,
+    source,
+    archived_at as created_at
+FROM historical_trades
+WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '1 day'
+ORDER BY timestamp DESC;
 
 -- ============================================================================
 -- Notes
