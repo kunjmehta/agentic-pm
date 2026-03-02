@@ -254,7 +254,6 @@ class BaseDAO:
                 conn.execute(f"INSERT INTO {table} SELECT * FROM temp_df")
                 rows_inserted = len(df)
 
-            conn.unregister('temp_df')
             logger.info(f"Inserted {rows_inserted} rows into {table}")
             return rows_inserted
 
@@ -262,6 +261,12 @@ class BaseDAO:
             error_msg = f"Failed to insert DataFrame into {table}: {str(e)}"
             logger.error(error_msg)
             raise Exception(error_msg)
+        finally:
+            # Always unregister temp table to prevent resource leaks
+            try:
+                conn.unregister('temp_df')
+            except Exception:
+                pass  # Already unregistered or never registered
 
     def upsert_df(self, table: str, df: pd.DataFrame, key_columns: List[str]) -> int:
         """Upsert pandas DataFrame (insert or update on conflict).
@@ -290,20 +295,24 @@ class BaseDAO:
             all_columns = list(df.columns)
             non_key_columns = [col for col in all_columns if col not in key_columns]
 
-            # Build update clause
-            update_clause = ", ".join([f"{col} = excluded.{col}" for col in non_key_columns])
-
             # Build upsert query
             columns_str = ", ".join(all_columns)
+            
+            # If no non-key columns, use DO NOTHING (avoid invalid empty SET clause)
+            if non_key_columns:
+                update_clause = ", ".join([f"{col} = excluded.{col}" for col in non_key_columns])
+                conflict_action = f"DO UPDATE SET {update_clause}"
+            else:
+                conflict_action = "DO NOTHING"
+            
             query = f"""
                 INSERT INTO {table} ({columns_str})
                 SELECT {columns_str} FROM temp_df
                 ON CONFLICT ({", ".join(key_columns)})
-                DO UPDATE SET {update_clause}
+                {conflict_action}
             """
 
             conn.execute(query)
-            conn.unregister('temp_df')
 
             rows_affected = len(df)
             logger.info(f"Upserted {rows_affected} rows into {table}")
@@ -313,6 +322,12 @@ class BaseDAO:
             error_msg = f"Failed to upsert DataFrame into {table}: {str(e)}"
             logger.error(error_msg)
             raise Exception(error_msg)
+        finally:
+            # Always unregister temp table to prevent resource leaks
+            try:
+                conn.unregister('temp_df')
+            except Exception:
+                pass  # Already unregistered or never registered
 
     def table_exists(self, table_name: str) -> bool:
         """Check if table exists in database.

@@ -287,6 +287,30 @@ class DataCoordinator:
 
         logger.info("All streams stopped")
 
+    def close(self):
+        """Close all DAO connections and release resources.
+        
+        This method should be called during shutdown to properly close
+        DuckDB connections and prevent file locks and resource leaks.
+        """
+        logger.info("Closing DAO connections...")
+        
+        try:
+            if self.alpaca_dao:
+                self.alpaca_dao.close()
+                logger.debug("AlpacaDAO connection closed")
+        except Exception as e:
+            logger.warning(f"Error closing AlpacaDAO: {e}")
+        
+        try:
+            if self.av_dao:
+                self.av_dao.close()
+                logger.debug("AlphaVantageDAO connection closed")
+        except Exception as e:
+            logger.warning(f"Error closing AlphaVantageDAO: {e}")
+        
+        logger.info("All DAO connections closed")
+
 
 if __name__ == "__main__":
     """Run the coordinator."""
@@ -329,6 +353,7 @@ if __name__ == "__main__":
         finally:
             logger.info("Shutting down...")
             coordinator.stop_all_streaming()
+            coordinator.close()  # Close DAO connections to release DuckDB locks
             logger.info("Coordinator stopped. Goodbye!")
 
     # Run the async main function

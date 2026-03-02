@@ -119,7 +119,7 @@ async def combined_bar_handler(bar, timeframe: str = '1Min'):
         timeframe: Bar timeframe string (default: '1Min')
     """
     # Print for visibility
-    print(f"[BAR] {bar.symbol} | O: ${bar.open:.2f} H: ${bar.high:.2f} "
+    logger.info(f"[BAR] {bar.symbol} | O: ${bar.open:.2f} H: ${bar.high:.2f} "
           f"L: ${bar.low:.2f} C: ${bar.close:.2f} | "
           f"Vol: {bar.volume:,} | {bar.timestamp}")
 
