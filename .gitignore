@@ -41,3 +41,6 @@ Thumbs.db
 # Test Configuration
 tests/conftest.py
 docs/
+docs/
+archive/
+Trial.ipynb

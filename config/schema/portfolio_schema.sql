@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     long_positions INTEGER DEFAULT 0,
     short_positions INTEGER DEFAULT 0,
 
+    -- Position details (for backtesting and swap analysis)
+    positions_json JSON,
+
     -- Metadata
     snapshot_source VARCHAR DEFAULT 'alpaca',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -100,6 +103,18 @@ CREATE TABLE IF NOT EXISTS portfolio_parameters (
 -- Index for portfolio_parameters
 CREATE INDEX IF NOT EXISTS idx_parameters_key
     ON portfolio_parameters(parameter_key);
+
+-- ====================================================
+
+-- 4. Conversation Threads (maps client UUID to conversation file on disk)
+CREATE TABLE IF NOT EXISTS threads (
+    thread_id  TEXT PRIMARY KEY,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_threads_updated
+    ON threads(updated_at DESC);
 
 -- ====================================================
 -- Seed Default Risk Parameters

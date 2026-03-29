@@ -3,290 +3,725 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portfolio Manager - Streaming Client</title>
+    <title>Portfolio Manager</title>
     <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            max-width: 900px;
-            margin: 50px auto;
-            padding: 20px;
-            background-color: #f5f5f5;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #212121;
+            color: #ececec;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
-        .container {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+
+        /* ── Header ── */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            border-bottom: 1px solid #333;
+            background: #2b2b2b;
+            flex-shrink: 0;
         }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-        }
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-        }
-        .input-group {
-            margin-bottom: 20px;
-        }
-        label {
-            display: block;
-            margin-bottom: 5px;
-            color: #555;
-            font-weight: 500;
-        }
-        input[type="text"], textarea {
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            font-size: 14px;
-            box-sizing: border-box;
-        }
-        textarea {
-            resize: vertical;
-            min-height: 60px;
-        }
-        button {
-            background-color: #007bff;
-            color: white;
-            padding: 12px 30px;
-            border: none;
-            border-radius: 5px;
-            font-size: 16px;
+        .header-title { font-size: 15px; font-weight: 600; color: #ececec; }
+        .header-right { display: flex; align-items: center; gap: 10px; }
+        .thread-label { font-size: 11px; color: #888; font-family: monospace; }
+        .backtest-toggle { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #888; cursor: pointer; white-space: nowrap; }
+        .backtest-toggle input { accent-color: #a78bfa; cursor: pointer; }
+        .btn-new {
+            background: #333;
+            color: #ececec;
+            border: 1px solid #444;
+            border-radius: 6px;
+            padding: 5px 12px;
+            font-size: 12px;
             cursor: pointer;
-            transition: background-color 0.3s;
         }
-        button:hover {
-            background-color: #0056b3;
-        }
-        button:disabled {
-            background-color: #ccc;
-            cursor: not-allowed;
-        }
-        .response-container {
-            margin-top: 30px;
-            padding: 20px;
-            background-color: #f9f9f9;
+        .btn-new:hover { background: #3a3a3a; }
+        .btn-api {
+            background: #2a2a2a;
+            color: #888;
+            border: 1px solid #3a3a3a;
             border-radius: 5px;
-            min-height: 200px;
-            border: 1px solid #e0e0e0;
+            padding: 4px 9px;
+            font-size: 11px;
+            cursor: pointer;
+            white-space: nowrap;
         }
-        .response-header {
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 2px solid #007bff;
+        .btn-api:hover { background: #333; color: #ccc; }
+        .btn-api.active { background: #1a3a5c; color: #7cb9ff; border-color: #2f6fdb; }
+        .api-url-input {
+            background: #333;
+            border: 1px solid #444;
+            border-radius: 6px;
+            color: #ececec;
+            font-size: 12px;
+            padding: 4px 8px;
+            width: 200px;
         }
-        .response-content {
+
+        /* ── Message area ── */
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+        }
+        .messages::-webkit-scrollbar { width: 6px; }
+        .messages::-webkit-scrollbar-track { background: transparent; }
+        .messages::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+
+        .msg-row {
+            display: flex;
+            padding: 8px 20%;
+            gap: 14px;
+        }
+        .msg-row.user { justify-content: flex-end; }
+        .msg-row.assistant { justify-content: flex-start; }
+
+        .bubble {
+            max-width: 720px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.65;
             white-space: pre-wrap;
-            word-wrap: break-word;
-            color: #444;
+            word-break: break-word;
+        }
+        .bubble.user {
+            background: #2f6fdb;
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+        .bubble.assistant {
+            background: #2b2b2b;
+            border: 1px solid #333;
+            color: #ececec;
+            border-bottom-left-radius: 4px;
+            min-width: 200px;
+        }
+
+        /* Thinking section inside assistant bubble */
+        details.thinking {
+            margin-bottom: 10px;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        details.thinking summary {
+            padding: 6px 10px;
+            font-size: 12px;
+            color: #a78bfa;
+            cursor: pointer;
+            background: #1e1e2e;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        details.thinking summary::-webkit-details-marker { display: none; }
+        details.thinking summary::before { content: '▶'; font-size: 9px; transition: transform 0.2s; }
+        details[open].thinking summary::before { transform: rotate(90deg); }
+        .thinking-content {
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #9d9dbd;
+            background: #1a1a2e;
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+
+        /* Tool call badges */
+        .tool-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #1e3a5f;
+            border: 1px solid #2a5298;
+            color: #7eb8f7;
+            border-radius: 4px;
+            padding: 2px 7px;
+            font-size: 11px;
+            font-family: monospace;
+            margin: 2px 2px 4px 0;
+        }
+
+        /* Text content area */
+        .text-content { margin-top: 4px; }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #444;
+            border-top-color: #888;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Error */
+        .error-block {
+            color: #f87171;
+            background: #2d1515;
+            border: 1px solid #7f1d1d;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            margin-top: 6px;
+        }
+
+        /* Quant / Backtest result cards */
+        .result-card {
+            border-radius: 7px;
+            padding: 9px 12px;
+            font-size: 12px;
+            margin: 4px 0;
+            font-family: monospace;
+        }
+        .result-card.quant {
+            background: #0f2d1e;
+            border: 1px solid #1a5c3a;
+            color: #6ee7b7;
+        }
+        .result-card.backtest {
+            background: #1a1a00;
+            border: 1px solid #4d4400;
+            color: #fde68a;
+        }
+        .result-card.error {
+            background: #2d1515;
+            border: 1px solid #7f1d1d;
+            color: #f87171;
+        }
+        .result-card-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+        .result-card-body {
+            color: #aaa;
+            font-size: 11px;
             line-height: 1.6;
         }
-        .tool-call {
-            display: inline-block;
-            background-color: #e3f2fd;
-            color: #1976d2;
-            padding: 3px 8px;
-            border-radius: 3px;
-            font-size: 12px;
-            margin: 2px;
-        }
-        .status {
-            display: inline-block;
-            padding: 5px 10px;
-            border-radius: 3px;
-            font-size: 12px;
-            margin-left: 10px;
-        }
-        .status.streaming {
-            background-color: #fff3cd;
-            color: #856404;
-        }
-        .status.done {
-            background-color: #d4edda;
-            color: #155724;
-        }
-        .status.error {
-            background-color: #f8d7da;
-            color: #721c24;
-        }
-        .examples {
-            margin-top: 20px;
-            padding: 15px;
-            background-color: #e7f3ff;
-            border-radius: 5px;
-        }
-        .examples h3 {
-            margin-top: 0;
-            color: #0066cc;
-        }
-        .example-query {
+        .result-card-body span.val { color: #e5e5e5; }
+        details.result-detail { margin-top: 5px; }
+        details.result-detail summary {
+            font-size: 11px;
+            color: #888;
             cursor: pointer;
-            color: #007bff;
-            text-decoration: underline;
-            margin: 5px 0;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
-        .example-query:hover {
-            color: #0056b3;
+        details.result-detail summary::before { content: '▶'; font-size: 8px; }
+        details[open].result-detail summary::before { transform: rotate(90deg); display: inline-block; }
+        .result-detail-body {
+            margin-top: 4px;
+            padding: 6px 8px;
+            background: rgba(0,0,0,0.25);
+            border-radius: 4px;
+            font-size: 10.5px;
+            color: #9d9d9d;
+            white-space: pre-wrap;
+            max-height: 180px;
+            overflow-y: auto;
         }
+
+        /* Welcome / empty state */
+        .empty-state {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            padding: 40px;
+        }
+        .empty-state h2 { font-size: 22px; color: #ececec; }
+        .suggestions { display: flex; flex-direction: column; gap: 8px; width: 100%; max-width: 480px; }
+        .suggestion {
+            background: #2b2b2b;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 13px;
+            color: #ccc;
+            cursor: pointer;
+            text-align: left;
+        }
+        .suggestion:hover { background: #333; border-color: #555; }
+
+        /* ── Input bar ── */
+        .input-bar {
+            flex-shrink: 0;
+            padding: 14px 20%;
+            background: #212121;
+            border-top: 1px solid #2e2e2e;
+        }
+        .input-wrap {
+            display: flex;
+            align-items: flex-end;
+            background: #2b2b2b;
+            border: 1px solid #3a3a3a;
+            border-radius: 12px;
+            padding: 10px 14px;
+            gap: 10px;
+            transition: border-color 0.2s;
+        }
+        .input-wrap:focus-within { border-color: #555; }
+        textarea#queryInput {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #ececec;
+            font-size: 14px;
+            line-height: 1.5;
+            resize: none;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: inherit;
+        }
+        textarea#queryInput::placeholder { color: #666; }
+        .send-btn {
+            background: #2f6fdb;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            width: 34px;
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: background 0.2s;
+        }
+        .send-btn:hover { background: #1f5cc4; }
+        .send-btn:disabled { background: #333; color: #555; cursor: not-allowed; }
+        .send-btn svg { width: 16px; height: 16px; }
+        .input-hint { font-size: 11px; color: #555; text-align: center; margin-top: 6px; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🤖 Portfolio Manager - Streaming Client</h1>
-        <p class="subtitle">Real-time streaming queries with Server-Sent Events</p>
 
-        <div class="input-group">
-            <label for="apiUrl">API URL:</label>
-            <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="http://localhost:8000">
-        </div>
+<div class="header">
+    <span class="header-title">🤖 Portfolio Manager</span>
+    <div class="header-right">
+        <button class="btn-api active" id="btnLangGraph" onclick="setApi('http://localhost:8001/v1', this)">Graph</button>
+        <button class="btn-api" id="btnAgentic" onclick="setApi('http://localhost:8000', this)">Agentic</button>
+        <input class="api-url-input" id="apiUrl" value="http://localhost:8001/v1" placeholder="http://localhost:8001/v1" oninput="clearApiPreset()">
+        <label class="backtest-toggle" title="Bypass market-hours guard (required outside NYSE hours)">
+            <input type="checkbox" id="backtestMode" checked>
+            backtest mode
+        </label>
+        <span class="thread-label" id="threadLabel"></span>
+        <button class="btn-new" onclick="newChat()">+ New Chat</button>
+    </div>
+</div>
 
-        <div class="input-group">
-            <label for="threadId">Thread ID:</label>
-            <input type="text" id="threadId" value="browser-session" placeholder="my-session">
-        </div>
-
-        <div class="input-group">
-            <label for="query">Query:</label>
-            <textarea id="query" placeholder="What's my portfolio status?">What's my portfolio status?</textarea>
-        </div>
-
-        <button id="submitBtn" onclick="sendQuery()">Send Query</button>
-        <button id="clearBtn" onclick="clearResponse()" style="background-color: #6c757d; margin-left: 10px;">Clear</button>
-
-        <div class="examples">
-            <h3>Example Queries:</h3>
-            <div class="example-query" onclick="setQuery('What is my portfolio status?')">What is my portfolio status?</div>
-            <div class="example-query" onclick="setQuery('Is my portfolio healthy? Check risk limits.')">Is my portfolio healthy? Check risk limits.</div>
-            <div class="example-query" onclick="setQuery('Should I buy AAPL? Run technical analysis.')">Should I buy AAPL? Run technical analysis.</div>
-            <div class="example-query" onclick="setQuery('Show my positions with P&L breakdown')">Show my positions with P&L breakdown</div>
-            <div class="example-query" onclick="setQuery('Analyze TSLA using mean reversion strategy')">Analyze TSLA using mean reversion strategy</div>
-        </div>
-
-        <div class="response-container" id="responseContainer">
-            <div class="response-header">
-                Response
-                <span class="status" id="status" style="display: none;"></span>
-            </div>
-            <div class="response-content" id="responseContent">
-                Waiting for query...
-            </div>
+<div class="messages" id="messages">
+    <div class="empty-state" id="emptyState">
+        <h2>Portfolio Manager</h2>
+        <div class="suggestions">
+            <button class="suggestion" onclick="send('What is my portfolio status?')">What is my portfolio status?</button>
+            <button class="suggestion" onclick="send('Is my portfolio healthy? Check risk limits.')">Is my portfolio healthy? Check risk limits.</button>
+            <button class="suggestion" onclick="send('Should I buy AAPL? Run technical analysis.')">Should I buy AAPL? Run technical analysis.</button>
+            <button class="suggestion" onclick="send('Backtest a mean-reversion strategy on AAPL for Jan 2024')">Backtest a mean-reversion strategy on AAPL for Jan 2024</button>
         </div>
     </div>
+</div>
 
-    <script>
-        function setQuery(text) {
-            document.getElementById('query').value = text;
-        }
+<div class="input-bar">
+    <div class="input-wrap">
+        <textarea id="queryInput" rows="1" placeholder="Message Portfolio Manager..." onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <button class="send-btn" id="sendBtn" onclick="send()" title="Send">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
+            </svg>
+        </button>
+    </div>
+    <div class="input-hint">Enter to send · Shift+Enter for newline</div>
+</div>
 
-        function clearResponse() {
-            document.getElementById('responseContent').textContent = 'Waiting for query...';
-            const statusEl = document.getElementById('status');
-            statusEl.style.display = 'none';
-        }
+<script>
+    const CONV_DIR = 'data/conversations'; // for reference only
+    let threadId = localStorage.getItem('threadId') || crypto.randomUUID();
+    let isStreaming = false;
 
-        async function sendQuery() {
-            const apiUrl = document.getElementById('apiUrl').value;
-            const threadId = document.getElementById('threadId').value;
-            const query = document.getElementById('query').value;
-            const submitBtn = document.getElementById('submitBtn');
-            const responseContent = document.getElementById('responseContent');
-            const statusEl = document.getElementById('status');
+    // Persist thread
+    localStorage.setItem('threadId', threadId);
+    document.getElementById('threadLabel').textContent = threadId.slice(0, 8) + '…';
 
-            if (!query.trim()) {
-                alert('Please enter a query');
-                return;
-            }
+    // Restore saved API URL preference
+    const savedApi = localStorage.getItem('apiUrl');
+    if (savedApi) {
+        document.getElementById('apiUrl').value = savedApi;
+        document.getElementById('btnLangGraph').classList.toggle('active', savedApi === 'http://localhost:8001/v1');
+        document.getElementById('btnAgentic').classList.toggle('active', savedApi === 'http://localhost:8000');
+    }
 
-            // Disable button and update status
-            submitBtn.disabled = true;
-            statusEl.textContent = 'Streaming...';
-            statusEl.className = 'status streaming';
-            statusEl.style.display = 'inline-block';
-            responseContent.textContent = '';
+    // ── API preset switcher ────────────────────────────────────
+    function setApi(url, btn) {
+        document.getElementById('apiUrl').value = url;
+        localStorage.setItem('apiUrl', url);
+        document.querySelectorAll('.btn-api').forEach(b => b.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+    }
 
-            try {
-                const response = await fetch(`${apiUrl}/query`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Accept': 'text/event-stream'
-                    },
-                    body: JSON.stringify({
-                        query: query,
-                        thread_id: threadId,
-                        apply_middleware: true
-                    })
-                });
+    function clearApiPreset() {
+        document.querySelectorAll('.btn-api').forEach(b => b.classList.remove('active'));
+        localStorage.setItem('apiUrl', document.getElementById('apiUrl').value);
+    }
 
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    // ── Load history ──────────────────────────────────────────
+    async function loadHistory() {
+        const apiUrl = document.getElementById('apiUrl').value;
+        try {
+            const res = await fetch(`${apiUrl}/conversations/${threadId}`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const msgs = data.messages || [];
+            if (msgs.length === 0) return;
+
+            hideEmptyState();
+            // Render pairs: user then assistant
+            for (let i = 0; i < msgs.length; i++) {
+                const m = msgs[i];
+                if (m.role === 'user') {
+                    appendUserBubble(m.content);
+                } else if (m.role === 'assistant') {
+                    const bubble = appendAssistantBubble();
+                    if (m.reasoning) addThinking(bubble, m.reasoning);
+                    if (m.tool_calls && m.tool_calls.length > 0) {
+                        m.tool_calls.forEach(t => addToolBadge(bubble, t));
+                    }
+                    addText(bubble, m.content);
+                    removeSpinner(bubble);
                 }
+            }
+        } catch (e) {
+            console.warn('Could not load history:', e);
+        }
+    }
 
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
+    loadHistory();
 
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
+    // ── New chat ──────────────────────────────────────────────
+    function newChat() {
+        threadId = crypto.randomUUID();
+        localStorage.setItem('threadId', threadId);
+        document.getElementById('threadLabel').textContent = threadId.slice(0, 8) + '…';
+        document.getElementById('messages').innerHTML = '';
+        showEmptyState();
+    }
 
-                    const chunk = decoder.decode(value);
-                    const lines = chunk.split('\n');
+    // ── Send ──────────────────────────────────────────────────
+    async function send(text) {
+        const input = document.getElementById('queryInput');
+        const query = text || input.value.trim();
+        if (!query || isStreaming) return;
 
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            const data = line.slice(6);
-                            try {
-                                const event = JSON.parse(data);
-                                handleEvent(event, responseContent);
-                            } catch (e) {
-                                console.error('Failed to parse event:', e);
-                            }
+        const apiUrl = document.getElementById('apiUrl').value;
+        input.value = '';
+        autoResize(input);
+        isStreaming = true;
+        document.getElementById('sendBtn').disabled = true;
+
+        hideEmptyState();
+        appendUserBubble(query);
+        const bubble = appendAssistantBubble();
+
+        let thinkingEl = null;
+        let thinkingContent = null;
+        let toolSet = new Set();
+
+        try {
+            const res = await fetch(`${apiUrl}/query/stream`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, thread_id: threadId, apply_middleware: true, backtest_mode: document.getElementById('backtestMode').checked })
+            });
+
+            if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const lines = dec.decode(value).split('\n');
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let evt;
+                    try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+                    if (evt.type === 'reasoning' && evt.content) {
+                        if (!thinkingEl) {
+                            [thinkingEl, thinkingContent] = addThinkingStream(bubble);
                         }
+                        thinkingContent.textContent += evt.content;
+                        scrollMessages();
+                    } else if (evt.type === 'text' && evt.content) {
+                        addText(bubble, evt.content);
+                        scrollMessages();
+                    } else if (evt.type === 'tool_call') {
+                        const name = extractToolName(evt.content);
+                        if (name && !toolSet.has(name)) {
+                            toolSet.add(name);
+                            addToolBadge(bubble, name);
+                        }
+                    } else if (evt.type === 'node') {
+                        // LangGraph node events — map to readable badge labels
+                        const nodeName = evt.node || '';
+                        const NODE_LABELS = {
+                            'portfolio_agent_node': 'portfolio agent',
+                            'quant_router':         'quant router',
+                            'backtester_router':    'backtester router',
+                            'result_aggregator':    'aggregating results',
+                            'synthesizer':          'synthesizer',
+                            'classify_intent':      'classify intent',
+                            'market_hours_guard':   'market hours',
+                            'portfolio_guard':      'portfolio guard',
+                        };
+                        const label = NODE_LABELS[nodeName];
+                        if (label && !toolSet.has(nodeName)) {
+                            toolSet.add(nodeName);
+                            addToolBadge(bubble, label);
+                        }
+                    } else if (evt.type === 'quant_result') {
+                        // Parallel quant router result arriving from fan-out
+                        addQuantResultCard(bubble, evt.result || evt);
+                        scrollMessages();
+                    } else if (evt.type === 'backtest_result') {
+                        // Parallel backtester router result arriving from fan-out
+                        addBacktestResultCard(bubble, evt.result || evt);
+                        scrollMessages();
+                    } else if (evt.type === 'status') {
+                        // Processing status — shown only if no content yet
+                        if (!bubble.querySelector('.text-content') && evt.message) {
+                            addText(bubble, '');  // ensure container exists
+                        }
+                    } else if (evt.type === 'error') {
+                        addError(bubble, evt.error || evt.content || 'Unknown error');
+                    } else if (evt.type === 'done') {
+                        break;
                     }
                 }
-
-                statusEl.textContent = 'Done';
-                statusEl.className = 'status done';
-
-            } catch (error) {
-                console.error('Stream error:', error);
-                responseContent.textContent += `\n\n❌ Error: ${error.message}`;
-                statusEl.textContent = 'Error';
-                statusEl.className = 'status error';
-            } finally {
-                submitBtn.disabled = false;
             }
+
+        } catch (e) {
+            addError(bubble, e.message);
+        } finally {
+            removeSpinner(bubble);
+            isStreaming = false;
+            document.getElementById('sendBtn').disabled = false;
+            input.focus();
         }
+    }
 
-        function handleEvent(event, container) {
-            const type = event.type;
+    // ── DOM helpers ───────────────────────────────────────────
+    function hideEmptyState() {
+        const e = document.getElementById('emptyState');
+        if (e) e.remove();
+    }
+    function showEmptyState() {
+        const msgs = document.getElementById('messages');
+        msgs.innerHTML = `
+        <div class="empty-state" id="emptyState">
+            <h2>Portfolio Manager</h2>
+            <div class="suggestions">
+                <button class="suggestion" onclick="send('What is my portfolio status?')">What is my portfolio status?</button>
+                <button class="suggestion" onclick="send('Is my portfolio healthy? Check risk limits.')">Is my portfolio healthy? Check risk limits.</button>
+                <button class="suggestion" onclick="send('Should I buy AAPL? Run technical analysis.')">Should I buy AAPL? Run technical analysis.</button>
+                <button class="suggestion" onclick="send('Backtest a mean-reversion strategy on AAPL for Jan 2024')">Backtest a mean-reversion strategy on AAPL for Jan 2024</button>
+            </div>
+        </div>`;
+    }
 
-            if (type === 'start') {
-                container.textContent = `Starting query: ${event.query}\n\n`;
-            } else if (type === 'token') {
-                container.textContent += event.content;
-                container.scrollTop = container.scrollHeight;
-            } else if (type === 'tool_start') {
-                const toolSpan = document.createElement('span');
-                toolSpan.className = 'tool-call';
-                toolSpan.textContent = `🔧 ${event.tool}`;
-                container.appendChild(document.createTextNode('\n'));
-                container.appendChild(toolSpan);
-                container.appendChild(document.createTextNode(' '));
-                container.scrollTop = container.scrollHeight;
-            } else if (type === 'done') {
-                container.textContent += `\n\n⏱️ Execution time: ${event.execution_time_ms}ms`;
-            } else if (type === 'error') {
-                container.textContent += `\n\n❌ Error: ${event.error}`;
-                if (event.blocked_by) {
-                    container.textContent += `\nBlocked by: ${event.blocked_by}`;
+    function appendUserBubble(text) {
+        const row = document.createElement('div');
+        row.className = 'msg-row user';
+        row.innerHTML = `<div class="bubble user">${escHtml(text)}</div>`;
+        document.getElementById('messages').appendChild(row);
+        scrollMessages();
+        return row;
+    }
+
+    function appendAssistantBubble() {
+        const row = document.createElement('div');
+        row.className = 'msg-row assistant';
+        row.innerHTML = `<div class="bubble assistant"><span class="spinner"></span></div>`;
+        document.getElementById('messages').appendChild(row);
+        scrollMessages();
+        return row.querySelector('.bubble.assistant');
+    }
+
+    function addThinking(bubble, text) {
+        const details = document.createElement('details');
+        details.className = 'thinking';
+        details.innerHTML = `<summary>💭 Thinking</summary><div class="thinking-content">${escHtml(text)}</div>`;
+        bubble.insertBefore(details, bubble.querySelector('.spinner'));
+        return details;
+    }
+
+    function addThinkingStream(bubble) {
+        const details = document.createElement('details');
+        details.className = 'thinking';
+        const content = document.createElement('div');
+        content.className = 'thinking-content';
+        const summary = document.createElement('summary');
+        summary.textContent = '💭 Thinking';
+        details.appendChild(summary);
+        details.appendChild(content);
+        const spinner = bubble.querySelector('.spinner');
+        if (spinner) bubble.insertBefore(details, spinner);
+        else bubble.appendChild(details);
+        return [details, content];
+    }
+
+    function addToolBadge(bubble, name) {
+        const badge = document.createElement('span');
+        badge.className = 'tool-badge';
+        badge.textContent = '🔧 ' + name;
+        const spinner = bubble.querySelector('.spinner');
+        const textDiv = bubble.querySelector('.text-content');
+        if (spinner) bubble.insertBefore(badge, spinner);
+        else if (textDiv) bubble.insertBefore(badge, textDiv);
+        else bubble.appendChild(badge);
+    }
+
+    function addText(bubble, text) {
+        let div = bubble.querySelector('.text-content');
+        if (!div) {
+            div = document.createElement('div');
+            div.className = 'text-content';
+            bubble.appendChild(div);
+        }
+        div.textContent += text;
+    }
+
+    function addError(bubble, msg) {
+        const div = document.createElement('div');
+        div.className = 'error-block';
+        div.textContent = '❌ ' + msg;
+        bubble.appendChild(div);
+    }
+
+    function removeSpinner(bubble) {
+        const s = bubble.querySelector('.spinner');
+        if (s) s.remove();
+    }
+
+    function scrollMessages() {
+        const m = document.getElementById('messages');
+        m.scrollTop = m.scrollHeight;
+    }
+
+    function extractToolName(content) {
+        if (!content) return null;
+        if (typeof content === 'string') return content;
+        if (typeof content === 'object') {
+            // Try to find tool name in messages array
+            const msgs = content.messages || [];
+            for (const m of msgs) {
+                if (m && m.name) return m.name;
+                if (m && m.tool_calls) {
+                    for (const tc of m.tool_calls) {
+                        if (tc && tc.function && tc.function.name) return tc.function.name;
+                    }
                 }
             }
         }
-    </script>
+        return 'tool';
+    }
+
+    function addQuantResultCard(bubble, result) {
+        const isErr = result.source === 'error' || !!result.error;
+        const card = document.createElement('div');
+        card.className = 'result-card quant' + (isErr ? ' error' : '');
+
+        const symbol = result.symbol || '—';
+        const atype  = result.analysis_type || 'full';
+        const source = result.source || '—';
+        const keys   = Object.keys(result.indicators || {}).join(', ') || 'none';
+
+        card.innerHTML = `
+            <div class="result-card-header">📊 Quant — ${escHtml(symbol)}</div>
+            <div class="result-card-body">
+                type: <span class="val">${escHtml(atype)}</span> &nbsp;
+                source: <span class="val">${escHtml(source)}</span>
+                ${isErr ? `<br><span style="color:#f87171">error: ${escHtml(result.error||'')}</span>` : ''}
+                ${!isErr && keys !== 'none' ? `
+                <details class="result-detail">
+                    <summary>indicators (${keys.split(',').length})</summary>
+                    <div class="result-detail-body">${escHtml(keys)}</div>
+                </details>` : ''}
+            </div>`;
+        const spinner = bubble.querySelector('.spinner');
+        const textDiv = bubble.querySelector('.text-content');
+        if (spinner) bubble.insertBefore(card, spinner);
+        else if (textDiv) bubble.insertBefore(card, textDiv);
+        else bubble.appendChild(card);
+    }
+
+    function addBacktestResultCard(bubble, result) {
+        const isErr = !!result.error;
+        const card = document.createElement('div');
+        card.className = 'result-card backtest' + (isErr ? ' error' : '');
+
+        const wf     = result.workflow || '—';
+        const symbol = result.symbol   || '(portfolio)';
+        const runId  = result.run_id   || '—';
+
+        card.innerHTML = `
+            <div class="result-card-header">📈 Backtest — Workflow ${escHtml(wf)} &nbsp;·&nbsp; ${escHtml(symbol)}</div>
+            <div class="result-card-body">
+                run_id: <span class="val">${escHtml(runId)}</span>
+                ${isErr ? `<br><span style="color:#f87171">error: ${escHtml(result.error||'')}</span>` : ''}
+                ${!isErr && result.result && Object.keys(result.result).length > 0 ? `
+                <details class="result-detail">
+                    <summary>result details</summary>
+                    <div class="result-detail-body">${escHtml(JSON.stringify(result.result, null, 2))}</div>
+                </details>` : ''}
+            </div>`;
+        const spinner = bubble.querySelector('.spinner');
+        const textDiv = bubble.querySelector('.text-content');
+        if (spinner) bubble.insertBefore(card, spinner);
+        else if (textDiv) bubble.insertBefore(card, textDiv);
+        else bubble.appendChild(card);
+    }
+
+    function escHtml(t) {
+        return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // ── Input handling ────────────────────────────────────────
+    function handleKey(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            send();
+        }
+    }
+
+    function autoResize(el) {
+        el.style.height = 'auto';
+        el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    }
+</script>
 </body>
 </html>
