@@ -33,7 +33,7 @@ def backtest_strategy_core(
     ticker: str,
     start_date: str,
     end_date: str,
-    strategy: str = "buy-and-hold",
+    strategy: str = "mean-reversion",
     snapshot: Optional[Dict] = None,
     initial_capital: float = 100000.0,
     save_to_db: bool = False,
@@ -279,9 +279,9 @@ if __name__ == "__main__":
     parser.add_argument("--end_date", required=True, help="End date YYYY-MM-DD")
     parser.add_argument(
         "--strategy",
-        default="buy-and-hold",
+        default="mean-reversion",
         choices=["buy-and-hold", "mean-reversion", "momentum", "value"],
-        help="Strategy to backtest (default: buy-and-hold)"
+        help="Strategy to backtest (default: mean-reversion)"
     )
     parser.add_argument(
         "--initial_capital",

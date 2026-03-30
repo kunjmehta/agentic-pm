@@ -313,6 +313,125 @@
         .send-btn:disabled { background: #333; color: #555; cursor: not-allowed; }
         .send-btn svg { width: 16px; height: 16px; }
         .input-hint { font-size: 11px; color: #555; text-align: center; margin-top: 6px; }
+
+        /* ── Semi-Auto task preview (HITL) ── */
+        .task-preview {
+            background: #1a2035;
+            border: 1px solid #2a4070;
+            border-radius: 8px;
+            padding: 12px 14px;
+            margin-top: 8px;
+        }
+        .task-preview-header {
+            font-weight: 600;
+            color: #7cb9ff;
+            font-size: 12px;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        details.task-reasoning {
+            background: #12152a;
+            border: 1px solid #252850;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            overflow: hidden;
+        }
+        details.task-reasoning summary {
+            padding: 6px 10px;
+            font-size: 12px;
+            color: #a78bfa;
+            cursor: pointer;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        details.task-reasoning summary::-webkit-details-marker { display: none; }
+        details.task-reasoning summary::before { content: '▶'; font-size: 9px; transition: transform 0.2s; }
+        details[open].task-reasoning summary::before { transform: rotate(90deg); }
+        .task-reasoning-body {
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #9d9dbd;
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+        .task-table-label {
+            color: #888;
+            font-size: 11px;
+            margin: 8px 0 3px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .task-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            margin-bottom: 6px;
+            font-family: monospace;
+        }
+        .task-table th {
+            text-align: left;
+            color: #666;
+            padding: 3px 6px;
+            border-bottom: 1px solid #2a2a3a;
+            font-weight: 500;
+        }
+        .task-table td {
+            padding: 3px 6px;
+            color: #bbb;
+            border-bottom: 1px solid #1e1e2e;
+        }
+        .task-table tr:last-child td { border-bottom: none; }
+        .approve-row { display: flex; gap: 8px; margin-top: 12px; }
+        .btn-approve {
+            flex: 1;
+            background: #0f2d1a;
+            color: #6ee7b7;
+            border: 1px solid #1a5c3a;
+            border-radius: 7px;
+            padding: 8px 16px;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.15s;
+        }
+        .btn-approve:hover:not(:disabled) { background: #143820; }
+        .btn-approve:disabled { opacity: 0.45; cursor: not-allowed; }
+        .btn-reject {
+            flex: 1;
+            background: #2a1010;
+            color: #f87171;
+            border: 1px solid #7f1d1d;
+            border-radius: 7px;
+            padding: 8px 16px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .btn-reject:hover:not(:disabled) { background: #351515; }
+        .btn-reject:disabled { opacity: 0.45; cursor: not-allowed; }
+        .exec-summary {
+            background: #0f1a0f;
+            border: 1px solid #1a3a1a;
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-top: 8px;
+            font-size: 11px;
+            font-family: monospace;
+            color: #888;
+        }
+        .exec-summary-row { display: flex; gap: 12px; padding: 2px 0; }
+        .exec-summary-row .esid { color: #6ee7b7; min-width: 80px; }
+        .exec-summary-row .esfn { color: #bbb; flex: 1; }
+        .exec-summary-row .esstatus { min-width: 60px; }
+        .esstatus.success { color: #6ee7b7; }
+        .esstatus.error { color: #f87171; }
+        .esstatus.skipped { color: #888; }
     </style>
 </head>
 <body>
@@ -322,6 +441,7 @@
     <div class="header-right">
         <button class="btn-api active" id="btnLangGraph" onclick="setApi('http://localhost:8001/v1', this)">Graph</button>
         <button class="btn-api" id="btnAgentic" onclick="setApi('http://localhost:8000', this)">Agentic</button>
+        <button class="btn-api" id="btnSemiAuto" onclick="setApi('http://localhost:8000/v1', this)">Semi-Auto</button>
         <input class="api-url-input" id="apiUrl" value="http://localhost:8001/v1" placeholder="http://localhost:8001/v1" oninput="clearApiPreset()">
         <label class="backtest-toggle" title="Bypass market-hours guard (required outside NYSE hours)">
             <input type="checkbox" id="backtestMode" checked>
@@ -371,6 +491,7 @@
         document.getElementById('apiUrl').value = savedApi;
         document.getElementById('btnLangGraph').classList.toggle('active', savedApi === 'http://localhost:8001/v1');
         document.getElementById('btnAgentic').classList.toggle('active', savedApi === 'http://localhost:8000');
+        document.getElementById('btnSemiAuto').classList.toggle('active', savedApi === 'http://localhost:8000/v1');
     }
 
     // ── API preset switcher ────────────────────────────────────
@@ -393,23 +514,31 @@
             const res = await fetch(`${apiUrl}/conversations/${threadId}`);
             if (!res.ok) return;
             const data = await res.json();
-            const msgs = data.messages || [];
-            if (msgs.length === 0) return;
+            const turns = data.turns || [];
+            if (turns.length === 0) return;
 
             hideEmptyState();
-            // Render pairs: user then assistant
-            for (let i = 0; i < msgs.length; i++) {
-                const m = msgs[i];
-                if (m.role === 'user') {
-                    appendUserBubble(m.content);
-                } else if (m.role === 'assistant') {
-                    const bubble = appendAssistantBubble();
-                    if (m.reasoning) addThinking(bubble, m.reasoning);
-                    if (m.tool_calls && m.tool_calls.length > 0) {
-                        m.tool_calls.forEach(t => addToolBadge(bubble, t));
-                    }
-                    addText(bubble, m.content);
-                    removeSpinner(bubble);
+            for (const turn of turns) {
+                // User bubble
+                if (turn.query) appendUserBubble(turn.query);
+
+                // Assistant bubble
+                const bubble = appendAssistantBubble();
+                removeSpinner(bubble);
+
+                if (turn.final_response) {
+                    // Completed turn — show execution summary then response
+                    const execList = turn.execution_results || [];
+                    if (execList.length > 0) addExecSummary(bubble, execList);
+                    addText(bubble, turn.final_response);
+                } else if (turn.status === 'pending_approval') {
+                    // Interrupted turn that was never approved
+                    const notice = document.createElement('div');
+                    notice.style.cssText = 'color:#888;font-size:12px;font-style:italic;padding:4px 0;';
+                    notice.textContent = '⏳ Awaiting approval (session ended before execution)';
+                    bubble.appendChild(notice);
+                } else {
+                    addText(bubble, '(no response recorded)');
                 }
             }
         } catch (e) {
@@ -428,6 +557,12 @@
         showEmptyState();
     }
 
+    // ── Semi-Auto detection ───────────────────────────────────
+    function isSemiAuto() {
+        // Must include /v1 to distinguish from Agentic (also on 8000 but no /v1)
+        return document.getElementById('apiUrl').value.includes(':8000/v1');
+    }
+
     // ── Send ──────────────────────────────────────────────────
     async function send(text) {
         const input = document.getElementById('queryInput');
@@ -443,6 +578,11 @@
         hideEmptyState();
         appendUserBubble(query);
         const bubble = appendAssistantBubble();
+
+        if (isSemiAuto()) {
+            await sendSemiAuto(query, bubble, apiUrl);
+            return;
+        }
 
         let thinkingEl = null;
         let thinkingContent = null;
@@ -721,6 +861,192 @@
     function autoResize(el) {
         el.style.height = 'auto';
         el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+    }
+
+    // ── Semi-Auto HITL flow ───────────────────────────────────
+
+    async function sendSemiAuto(query, bubble, apiUrl) {
+        try {
+            // Phase 1: reasoning nodes → task preview (HITL interrupt)
+            const res = await fetch(`${apiUrl}/query`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query,
+                    thread_id: threadId,
+                    backtest_mode: document.getElementById('backtestMode').checked,
+                })
+            });
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+
+            const data = await res.json();
+            removeSpinner(bubble);
+
+            // Guard short-circuit: synthesizer returned directly (e.g. market closed)
+            if (data.status !== 'pending_approval') {
+                addText(bubble, data.final_response || data.message || JSON.stringify(data));
+                isStreaming = false;
+                document.getElementById('sendBtn').disabled = false;
+                return;
+            }
+
+            // Show HITL task preview card
+            showTaskPreview(bubble, data, apiUrl);
+
+        } catch (e) {
+            removeSpinner(bubble);
+            addError(bubble, e.message);
+            isStreaming = false;
+            document.getElementById('sendBtn').disabled = false;
+        }
+    }
+
+    function showTaskPreview(bubble, data, apiUrl) {
+        const preview = document.createElement('div');
+        preview.className = 'task-preview';
+
+        // Header
+        const hdr = document.createElement('div');
+        hdr.className = 'task-preview-header';
+        hdr.innerHTML = '🔍 Task Preview — Review before execution';
+        preview.appendChild(hdr);
+
+        // Reasoning sections
+        const agents = [
+            { key: 'portfolio_reasoning', label: '🏦 Portfolio Manager reasoning' },
+            { key: 'quant_reasoning',     label: '📊 Quant reasoning' },
+            { key: 'backtester_reasoning',label: '📈 Backtester reasoning' },
+        ];
+        for (const { key, label } of agents) {
+            if (!data[key]) continue;
+            const det = document.createElement('details');
+            det.className = 'task-reasoning';
+            det.open = true;
+            det.innerHTML = `<summary>${label}</summary><div class="task-reasoning-body">${escHtml(data[key])}</div>`;
+            preview.appendChild(det);
+        }
+
+        // PM supervisor review verdict (shown when sub-agents ran)
+        if (data.pm_review_notes) {
+            const verdict = document.createElement('div');
+            verdict.style.cssText = 'background:#0d1f0d;border:1px solid #1a4a1a;border-radius:6px;padding:8px 12px;margin-bottom:8px;font-size:12px;color:#6ee7b7;';
+            verdict.innerHTML = `<strong style="color:#a3e6bc">🤖 PM Review:</strong> ${escHtml(data.pm_review_notes)}`;
+            preview.appendChild(verdict);
+        }
+
+        // Task tables
+        const queues = [
+            { key: 'portfolio_tasks', label: 'Portfolio tasks' },
+            { key: 'quant_tasks',     label: 'Quant tasks' },
+            { key: 'backtester_tasks',label: 'Backtester tasks' },
+        ];
+        for (const { key, label } of queues) {
+            const tasks = data[key];
+            if (!tasks || tasks.length === 0) continue;
+            const lbl = document.createElement('div');
+            lbl.className = 'task-table-label';
+            lbl.textContent = label;
+            preview.appendChild(lbl);
+            const tbl = document.createElement('table');
+            tbl.className = 'task-table';
+            tbl.innerHTML = `<thead><tr><th>ID</th><th>Function</th><th>Params</th><th>Pri</th><th>Depends on</th></tr></thead>`;
+            const tbody = document.createElement('tbody');
+            for (const t of tasks) {
+                const tr = document.createElement('tr');
+                const deps = (t.depends_on || []).join(', ') || '—';
+                // Strip metadata keys from params display — these are top-level only
+                const META = new Set(['task_id','priority','depends_on','workflow_type','note','metrics_requested','description','retry_count']);
+                const rawParams = t.params || {};
+                const cleanParams = Object.fromEntries(Object.entries(rawParams).filter(([k]) => !META.has(k)));
+                const paramStr = JSON.stringify(cleanParams);
+                const paramShort = paramStr.length > 60 ? paramStr.slice(0, 57) + '…' : paramStr;
+                tr.innerHTML = `<td>${escHtml(t.task_id||'?')}</td><td>${escHtml(t.function_name||'?')}</td><td><details style="display:inline"><summary style="cursor:pointer;color:#888;font-size:10px;list-style:none">${escHtml(paramShort)}</summary><div style="margin-top:4px;padding:4px 6px;background:rgba(0,0,0,0.35);border-radius:4px;font-size:10px;color:#9d9d9d;white-space:pre-wrap;max-width:360px">${escHtml(JSON.stringify(cleanParams,null,2))}</div></details></td><td>${escHtml(String(t.priority||1))}</td><td>${escHtml(deps)}</td>`;
+                tbody.appendChild(tr);
+            }
+            tbl.appendChild(tbody);
+            preview.appendChild(tbl);
+        }
+
+        // Approve / Reject buttons
+        const row = document.createElement('div');
+        row.className = 'approve-row';
+        row.innerHTML = `<button class="btn-approve">✅ Approve & Execute</button><button class="btn-reject">✗ Reject</button>`;
+        preview.appendChild(row);
+
+        bubble.appendChild(preview);
+        scrollMessages();
+
+        const approveBtn = row.querySelector('.btn-approve');
+        const rejectBtn  = row.querySelector('.btn-reject');
+
+        approveBtn.onclick = async () => {
+            approveBtn.disabled = true;
+            rejectBtn.disabled = true;
+            approveBtn.textContent = '⏳ Executing…';
+            try {
+                const res = await fetch(`${apiUrl}/approve/${data.thread_id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                const result = await res.json();
+
+                // Replace preview with execution summary + final response
+                preview.remove();
+                addExecSummary(bubble, result.execution_results || []);
+                addText(bubble, result.final_response || '(no response)');
+                scrollMessages();
+            } catch (e) {
+                approveBtn.disabled = false;
+                rejectBtn.disabled = false;
+                approveBtn.textContent = '✅ Approve & Execute';
+                addError(bubble, 'Approval failed: ' + e.message);
+            } finally {
+                isStreaming = false;
+                document.getElementById('sendBtn').disabled = false;
+            }
+        };
+
+        rejectBtn.onclick = async () => {
+            approveBtn.disabled = true;
+            rejectBtn.disabled = true;
+            try {
+                await fetch(`${apiUrl}/reject/${data.thread_id}`, { method: 'POST' });
+            } catch (_) {}
+            preview.remove();
+            addText(bubble, '↩ Task execution cancelled.');
+            scrollMessages();
+            isStreaming = false;
+            document.getElementById('sendBtn').disabled = false;
+        };
+    }
+
+    function addExecSummary(bubble, execResults) {
+        // execResults may be an Array [{task_id, function_name, ...}] (SemiAutoResponse)
+        // or a plain Object {task_id: {...}} (legacy graph format)
+        const entries = Array.isArray(execResults)
+            ? execResults.map(r => [r.task_id || '?', r])
+            : Object.entries(execResults || {});
+        if (entries.length === 0) return;
+        const div = document.createElement('div');
+        div.className = 'exec-summary';
+        for (const [tid, r] of entries) {
+            const row = document.createElement('div');
+            row.className = 'exec-summary-row';
+            const status = r.status || 'unknown';
+            const dur = r.timing ? `${r.timing.duration_ms || 0}ms` : (r.duration_ms ? `${r.duration_ms}ms` : '');
+            row.innerHTML = `<span class="esid">${escHtml(tid)}</span><span class="esfn">${escHtml(r.function_name||'?')}</span><span class="esstatus ${status}">${escHtml(status)}</span><span style="color:#555">${escHtml(dur)}</span>`;
+            div.appendChild(row);
+        }
+        bubble.appendChild(div);
     }
 </script>
 </body>

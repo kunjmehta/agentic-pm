@@ -12,6 +12,7 @@ This module provides DAO classes for database operations:
 Usage:
     from src.common.dao import AlphaVantageDAO, AlpacaDAO, AnalystDAO, StrategyDAO, PortfolioDAO, BacktestDAO
 
+
     # Alpha Vantage fundamentals
     av_dao = AlphaVantageDAO()
     av_dao.save_company_overview('AAPL', overview_data)
@@ -43,7 +44,6 @@ from .analyst_dao import AnalystDAO
 from .strategy_dao import StrategyDAO
 from .portfolio_dao import PortfolioDAO
 from .backtest_dao import BacktestDAO
-from .optimizer_dao import OptimizerDAO
 
 __all__ = [
     'BaseDAO',
@@ -53,5 +53,4 @@ __all__ = [
     'StrategyDAO',
     'PortfolioDAO',
     'BacktestDAO',
-    'OptimizerDAO',
 ]
