@@ -141,8 +141,8 @@ def backtester_reasoning_node(state: dict) -> dict:
         prior_turns = state.get("prior_turns") or []
         if prior_turns:
             turns_str = "\n".join(
-                f"  [{t.get('turn_number', i+1)}] {str(t.get('user_query', ''))[:60]}"
-                f" → {str(t.get('agent_response', ''))[:80]}"
+                f"  [{t.get('turn_number', i+1)}] {t.get('user_query', '')[:60]}"
+                f" → {t.get('agent_response', '')[:80]}"
                 for i, t in enumerate(prior_turns[-3:])
             )
             user_message += f"\n\nPRIOR CONTEXT (last {min(len(prior_turns), 3)} turns):\n{turns_str}"

@@ -1316,9 +1316,9 @@
                 }
                 const result = await res.json();
 
-                // Replace preview with execution summary + rich UI panels + final response
+                // Replace preview with rich UI panels + final response
+                // (addExecSummary is skipped here — telemetry panel covers it)
                 preview.remove();
-                addExecSummary(bubble, result.execution_results || []);
                 addHealthSection(bubble, result.execution_results || []);
                 addPortfolioStats(bubble, result.execution_results || []);
                 addTradesSection(bubble, result.execution_results || []);

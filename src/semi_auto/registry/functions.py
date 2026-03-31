@@ -1494,6 +1494,33 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Get current portfolio risk parameters and thresholds.",
             "params": {},
         },
+        "save_eod_snapshot": {
+            "description": "Save an end-of-day portfolio snapshot with position details.",
+            "params": {
+                "timestamp": "str — ISO or YYYY-MM-DD HH:MM:SS",
+                "equity": "float",
+                "cash": "float",
+                "buying_power": "float",
+                "positions": "list[dict]",
+                "daily_pnl": "float — optional",
+                "snapshot_source": "str — default 'manual'",
+            },
+        },
+        "snapshot_worth": {
+            "description": "Calculate what the current portfolio would be worth at a future date (workflow B — no swaps).",
+            "params": {
+                "snapshot_date": "str — YYYY-MM-DD",
+                "end_date": "str — YYYY-MM-DD",
+            },
+        },
+        "swap_positions": {
+            "description": "Simulate swapping portfolio positions and calculate resulting worth (workflow C).",
+            "params": {
+                "snapshot_date": "str — YYYY-MM-DD",
+                "end_date": "str — YYYY-MM-DD",
+                "tickers": "dict — {symbol: {swap_to: str, quantity: int}}",
+            },
+        },
     }
 
 

@@ -153,9 +153,9 @@ class TestGraphState:
 class TestRegistry:
     """Function registry import and structure."""
 
-    def test_registry_has_38_functions(self):
+    def test_registry_has_41_functions(self):
         from src.semi_auto.registry.functions import FUNCTION_REGISTRY
-        assert len(FUNCTION_REGISTRY) == 38
+        assert len(FUNCTION_REGISTRY) == 41
 
     def test_registry_schema_has_all_keys(self):
         from src.semi_auto.registry.functions import get_registry_schema, FUNCTION_REGISTRY

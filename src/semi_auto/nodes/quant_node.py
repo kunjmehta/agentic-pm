@@ -29,15 +29,10 @@ _QUANT_SYSTEM_PROMPT = """You are a Quant Analyst AI. Your ONLY job is to reason
 Given the analysis request, output a TaskList of quant function calls with the exact parameters.
 
 DATA MODE — choose the correct mode based on the user's request:
-┌──────────────────────────────────────────────────────────────────────
-│ LIVE mode   — omit start_date/end_date; set lookback_days (default 90)           │
-│   When to use: "current signal", "now", "today", "latest", "right now"           │
-│   How it works: fetches the most recent bars from today backwards by N days       │
-├──────────────────────────────────────────────────────────────────────┤
-│ HISTORICAL mode — provide start_date + end_date (YYYY-MM-DD); drop lookback_days  │
-│   When to use: explicit date range, "last March", "from X to Y", "in Q1 2024"    │
-│   How it works: analyzes bars only within the specified window                    │
-└──────────────────────────────────────────────────────────────────────┘
+  LIVE mode: omit start_date/end_date; set lookback_days (default 90).
+    Use when: "current signal", "now", "today", "latest", "right now".
+  HISTORICAL mode: provide start_date + end_date (YYYY-MM-DD); drop lookback_days.
+    Use when: explicit date range, "last March", "from X to Y", "in Q1 2024".
 ⚠ NEVER mix start_date/end_date + lookback_days in the same params dict.
 
 TECHNICAL INDICATOR FUNCTIONS:
@@ -174,8 +169,8 @@ def quant_reasoning_node(state: dict) -> dict:
         prior_turns = state.get("prior_turns") or []
         if prior_turns:
             turns_str = "\n".join(
-                f"  [{t.get('turn_number', i+1)}] {str(t.get('user_query', ''))[:60]}"
-                f" → {str(t.get('agent_response', ''))[:80]}"
+                f"  [{t.get('turn_number', i+1)}] {t.get('user_query', '')[:60]}"
+                f" → {t.get('agent_response', '')[:80]}"
                 for i, t in enumerate(prior_turns[-3:])
             )
             user_message += f"\n\nPRIOR CONTEXT (last {min(len(prior_turns), 3)} turns):\n{turns_str}"

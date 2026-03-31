@@ -102,6 +102,8 @@ class QueryIntent(BaseModel):
 
 # ── Classifier node ───────────────────────────────────────────────────────────
 
+_REPLAY_PATTERNS = {"run again", "repeat", "do it again", "same query", "redo", "run it again"}
+
 _SYSTEM_PROMPT = (
     "You are an intent classifier for an autonomous portfolio management system. "
     "Given the user query, extract a structured QueryIntent. "
@@ -130,7 +132,6 @@ def classify_intent(state: dict) -> dict:
     default_start = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
 
     # Replay detection: substitute last query for "run again" / "repeat" commands
-    _REPLAY_PATTERNS = {"run again", "repeat", "do it again", "same query", "redo", "run it again"}
     if any(p in query.lower() for p in _REPLAY_PATTERNS):
         prior = state.get("prior_turns") or []
         if prior:
