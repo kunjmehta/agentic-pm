@@ -145,16 +145,13 @@ async def handle_trade_correction(correction):
         if updated_in_cache:
             logger.info(f"Trade correction applied in cache: {symbol} trade_id={trade_id}")
         else:
-            # Trade not in cache - must be already flushed to DB
-            # Update directly in database
-            logger.info(f"Trade not in cache, updating in database: {symbol} trade_id={trade_id}")
+            # Trade not in cache — already flushed to live_trades staging table.
+            # Upsert the corrected row there (primary key will overwrite).
+            logger.info(f"Trade not in cache, updating in live_trades: {symbol} trade_id={trade_id}")
 
-            # Create DataFrame for the correction
             correction_df = pd.DataFrame([correction_data])
-
-            # Update in database (upsert)
-            dao.save_trades(correction_df)
-            logger.info(f"Trade correction applied in database: {symbol} trade_id={trade_id}")
+            dao.save_live_trades(correction_df)
+            logger.info(f"Trade correction applied in live_trades: {symbol} trade_id={trade_id}")
 
     except Exception as e:
         logger.error(f"Failed to handle trade correction: {e}", exc_info=True)
@@ -181,17 +178,19 @@ async def handle_trade_cancellation(cancellation):
         if cancelled_in_cache:
             logger.info(f"Trade cancelled in cache: {symbol} trade_id={trade_id}")
         else:
-            # Trade not in cache - must be already flushed to DB
-            # Delete from database
-            logger.info(f"Trade not in cache, deleting from database: {symbol} trade_id={trade_id}")
-
-            # Execute DELETE query
-            query = """
-                DELETE FROM historical_trades
-                WHERE symbol = ? AND trade_id = ?
-            """
-            dao.execute(query, (symbol, trade_id))
-            logger.info(f"Trade cancelled in database: {symbol} trade_id={trade_id}")
+            # Trade not in cache — already flushed to live_trades staging table.
+            # Delete from live_trades first, then from historical_trades as a safety net
+            # (trade might have been archived already).
+            logger.info(f"Trade not in cache, deleting from live_trades: {symbol} trade_id={trade_id}")
+            dao.execute(
+                "DELETE FROM live_trades WHERE symbol = ? AND trade_id = ?",
+                (symbol, trade_id),
+            )
+            dao.execute(
+                "DELETE FROM historical_trades WHERE symbol = ? AND trade_id = ?",
+                (symbol, trade_id),
+            )
+            logger.info(f"Trade cancellation applied to live_trades and historical_trades: {symbol} trade_id={trade_id}")
 
     except Exception as e:
         logger.error(f"Failed to handle trade cancellation: {e}", exc_info=True)
@@ -214,15 +213,11 @@ async def flush_cache_to_db():
             logger.debug("No trades to flush from cache")
             return
 
-        # Save to live_trades table (staging)
-        # Note: We'll need to add this method to AlpacaDAO
-        if hasattr(dao, 'save_live_trades'):
-            rows = dao.save_live_trades(df)
-        else:
-            # Fallback: save to historical_trades with source='stream'
-            rows = dao.save_trades(df)
+        # Save to live_trades (staging table).  Historical archival happens
+        # separately via AlpacaDAO.archive_live_trades() from the API endpoint.
+        rows = dao.save_live_trades(df)
 
-        logger.info(f"Flushed {len(df):,} trades to database ({rows} rows affected)")
+        logger.info(f"Flushed {len(df):,} trades to live_trades ({rows} rows affected)")
 
     except Exception as e:
         logger.error(f"Failed to flush cache to DB: {e}", exc_info=True)

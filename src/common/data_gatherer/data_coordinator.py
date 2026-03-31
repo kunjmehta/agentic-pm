@@ -28,7 +28,8 @@ from src.common.skills.alpha_vantage_skills import (
     fetch_cash_flow
 )
 from src.common.dao import AlpacaDAO, AlphaVantageDAO
-from src.common.data_gatherer.alpaca_stream import AlpacaDataStreamer, default_trade_handler, default_bar_handler
+from src.common.data_gatherer.alpaca_stream import AlpacaDataStreamer, default_bar_handler
+from src.common.data_gatherer.db_stream_handlers import combined_trade_cache_handler
 from src.common.utils import get_logger, config
 
 
@@ -216,8 +217,8 @@ class DataCoordinator:
         logger.info(f"Starting real-time stream for {symbol}...")
 
         streamer = AlpacaDataStreamer(symbol=symbol)
-        # Use default handlers that auto-save to DB
-        streamer.subscribe_trades(default_trade_handler)
+        # Use cache handler for trades (batched writes) and direct DB for bars
+        streamer.subscribe_trades(combined_trade_cache_handler)
         streamer.subscribe_bars(default_bar_handler)
 
         self.streamers[symbol] = streamer

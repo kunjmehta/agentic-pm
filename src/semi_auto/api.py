@@ -18,9 +18,14 @@ Endpoints:
     GET  /v1/conversations/{thread_id}  - Load interaction history
     GET  /v1/registry                   - List FUNCTION_REGISTRY keys + param schemas
     GET  /v1/portfolio/status           - Direct portfolio status
+    GET  /v1/portfolio/health           - Risk compliance check
+    GET  /v1/portfolio/history          - Historical portfolio snapshots
     GET  /v1/agent/state/{thread_id}    - Graph checkpoint state
     POST /v1/admin/cleanup              - Delete expired threads
     GET  /v1/admin/stats                - Database statistics
+    GET  /v1/ingestion/status           - Data ingestion pipeline status
+    POST /v1/ingestion/trigger-etl      - Manually trigger ETL
+    POST /v1/ingestion/flush-cache      - Manually flush trade cache
 """
 
 import asyncio
@@ -54,6 +59,10 @@ from src.semi_auto.models.responses import (
 from src.semi_auto.registry.functions import get_registry_schema
 from src.common.utils import get_logger, config as app_config
 from src.common.data_gatherer.data_coordinator import DataCoordinator
+from src.common.data_gatherer.db_stream_handlers import (
+    start_background_flush_task,
+    stop_background_flush_task,
+)
 
 logger = get_logger(__name__)
 
@@ -72,13 +81,20 @@ async def _run_live_streams(coordinator: DataCoordinator) -> None:
     """Start live market data streams for all watchlist symbols.
 
     Runs streaming only (no historical backfill) so the API starts fast.
-    Handlers write directly to market_data.duckdb via db_stream_handlers.
+    Trades are batched via TradeCache and flushed to market_data.duckdb in
+    bulk (size or time threshold). Bars are written directly per-event since
+    they are already low-frequency and trigger indicator computation.
+    A background asyncio task handles time-based cache eviction.
     """
     symbols = coordinator.symbols
     logger.info(f"[streams] starting live streams for {symbols}")
+    flush_task = None
     try:
         for symbol in symbols:
             await coordinator.start_streaming(symbol)
+        # Start background flush so time-based cache eviction fires even on low volume
+        flush_task = start_background_flush_task()
+        logger.info("[streams] background cache-flush task started")
         shutdown_flag = [False]
         await coordinator.run_streaming_loop(shutdown_flag)
     except asyncio.CancelledError:
@@ -86,6 +102,9 @@ async def _run_live_streams(coordinator: DataCoordinator) -> None:
     except Exception as exc:
         logger.error(f"[streams] unexpected error: {exc}", exc_info=True)
     finally:
+        if flush_task is not None:
+            await stop_background_flush_task()
+            logger.info("[streams] background flush task stopped")
         coordinator.stop_all_streaming()
         coordinator.close()
 
@@ -773,6 +792,222 @@ async def admin_stats():
         stats["portfolio_db"] = {"error": str(e)}
 
     return {"stats": stats, "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/v1/portfolio/health")
+async def portfolio_health():
+    """Risk compliance check against portfolio risk parameters.
+
+    Calls check_portfolio_health_core via the registry wrapper which
+    auto-fetches portfolio_status and positions_data if not provided.
+
+    Returns:
+        Health status with violations, warnings, and checks performed.
+    """
+    try:
+        from src.semi_auto.registry.functions import AVAILABLE_FUNCTIONS
+        health_fn = AVAILABLE_FUNCTIONS.get("check_portfolio_health")
+        if health_fn is None:
+            raise HTTPException(status_code=503, detail="check_portfolio_health not available")
+        result = health_fn()
+        return {"status": "success", "health": result, "timestamp": datetime.now(timezone.utc).isoformat()}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[api/portfolio/health] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/v1/portfolio/history")
+async def portfolio_history(
+    start: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+):
+    """Historical portfolio snapshots.
+
+    Args:
+        start: Optional start date filter (YYYY-MM-DD).
+        end: Optional end date filter (YYYY-MM-DD).
+
+    Returns:
+        List of portfolio snapshots with count.
+    """
+    try:
+        from src.common.dao.portfolio_dao import PortfolioDAO
+        dao = PortfolioDAO()
+        history = dao.get_snapshot_history(start_date=start, end_date=end)
+        dao.close()
+        return {
+            "status": "success",
+            "snapshots": history,
+            "count": len(history),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[api/portfolio/history] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/v1/ingestion/status")
+async def ingestion_status():
+    """Real-time status of the data ingestion pipeline.
+
+    Reports on:
+    - DataCoordinator streaming task (running/stopped, symbols)
+    - Trade cache (size, utilization)
+    - ETL configuration
+
+    Returns:
+        Dict with data_stream, cache, and etl sub-sections.
+    """
+    # ── Data stream ───────────────────────────────────────────────────────
+    stream_running = _stream_task is not None and not _stream_task.done()
+    symbols = _data_coordinator.symbols if _data_coordinator is not None else []
+    data_stream_info: Dict[str, Any] = {
+        "enabled": app_config.get("data_stream.enabled", default=False),
+        "running": stream_running,
+        "symbols": symbols,
+        "task_name": _stream_task.get_name() if _stream_task is not None else None,
+    }
+
+    # ── Trade cache ───────────────────────────────────────────────────────
+    try:
+        from src.common.data_gatherer.trade_cache import get_cache
+        cache = get_cache()
+        cache_size = len(cache._cache) if hasattr(cache, "_cache") else 0
+        cache_max = app_config.get("cache.max_size", default=100_000)
+        cache_info: Dict[str, Any] = {
+            "current_size": cache_size,
+            "max_size": cache_max,
+            "utilization_pct": round(cache_size / cache_max * 100, 2) if cache_max else 0,
+            "batch_interval_minutes": app_config.get("cache.batch_interval_minutes", default=5),
+        }
+    except Exception as exc:
+        cache_info = {"error": str(exc)}
+
+    # ── ETL ───────────────────────────────────────────────────────────────
+    etl_info: Dict[str, Any] = {
+        "enabled": app_config.get("etl.enabled", default=True),
+        "mode": "auto-run with bar ingestion",
+        "timeframes": app_config.get("etl.timeframes", default=["1Min", "1Hour", "1Day"]),
+        "lookback_days": app_config.get("etl.lookback_days", default=60),
+    }
+
+    return {
+        "data_stream": data_stream_info,
+        "cache": cache_info,
+        "etl": etl_info,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/v1/ingestion/trigger-etl")
+async def trigger_etl():
+    """Manually trigger ETL pipeline to compute indicators for all watchlist symbols.
+
+    Runs indicator computation across all configured timeframes.
+    This may take several minutes depending on data volume.
+
+    Returns:
+        Dict with status, total_rows computed, and symbols processed.
+    """
+    try:
+        from src.common.etl.pipeline import IndicatorsETL
+        logger.info("[api/trigger-etl] manual ETL triggered")
+        etl = IndicatorsETL()
+        result = etl.run_for_watchlist()
+        etl.close()
+        logger.info(f"[api/trigger-etl] complete: {result.get('total_rows')} rows")
+        return {
+            "status": "success",
+            "message": f"ETL completed for {len(result.get('symbols', []))} symbol(s)",
+            "total_rows": result.get("total_rows"),
+            "symbols": result.get("symbols"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[api/trigger-etl] {exc}", exc_info=True)
+        return {
+            "status": "error",
+            "message": "ETL execution failed",
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+@app.post("/v1/ingestion/flush-cache")
+async def flush_cache(
+    archive_older_than_minutes: int = Query(
+        default=60,
+        ge=1,
+        description="Archive live_trades rows older than this many minutes into historical_trades",
+    ),
+):
+    """Flush the trade cache to live_trades, then archive aged rows to historical_trades.
+
+    Two-phase operation:
+    1. Force-flush TradeCache → live_trades (staging).
+    2. Archive live_trades rows older than `archive_older_than_minutes` into
+       historical_trades with source='stream', then delete from live_trades.
+
+    Args:
+        archive_older_than_minutes: Rows ingested before this threshold are moved
+            to historical_trades. Default 60 minutes.
+
+    Returns:
+        Dict with trades_flushed (step 1) and trades_archived (step 2).
+    """
+    from datetime import timedelta
+    from src.common.data_gatherer.trade_cache import get_cache
+    from src.common.data_gatherer.db_stream_handlers import flush_cache_to_db
+    from src.common.dao.alpaca_dao import AlpacaDAO
+
+    result: dict = {
+        "status": "success",
+        "trades_flushed": 0,
+        "trades_archived": 0,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # ── Step 1: flush in-memory cache → live_trades ────────────────────────
+    try:
+        cache = get_cache()
+        cache_size = len(cache._cache) if hasattr(cache, "_cache") else 0
+        if cache_size > 0:
+            logger.info(f"[api/flush-cache] flushing {cache_size} trade(s) to live_trades")
+            await flush_cache_to_db()
+            result["trades_flushed"] = cache_size
+        else:
+            logger.info("[api/flush-cache] cache empty, skipping flush step")
+    except Exception as exc:
+        logger.error(f"[api/flush-cache] flush step failed: {exc}", exc_info=True)
+        return {
+            "status": "error",
+            "message": "Cache flush to live_trades failed",
+            "error": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # ── Step 2: archive aged live_trades → historical_trades ──────────────
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=archive_older_than_minutes)
+        dao = AlpacaDAO()
+        try:
+            archived = dao.archive_live_trades(cutoff_time=cutoff)
+            result["trades_archived"] = archived
+            logger.info(f"[api/flush-cache] archived {archived} trade(s) older than {cutoff.isoformat()}")
+        finally:
+            dao.close()
+    except Exception as exc:
+        logger.error(f"[api/flush-cache] archive step failed: {exc}", exc_info=True)
+        # Archive failure is non-fatal: cache was already flushed successfully
+        result["archive_warning"] = str(exc)
+
+    result["message"] = (
+        f"Flushed {result['trades_flushed']} trade(s) to live_trades; "
+        f"archived {result['trades_archived']} trade(s) to historical_trades"
+    )
+    return result
 
 
 if __name__ == "__main__":
