@@ -474,14 +474,23 @@ async def reject_endpoint(thread_id: str):
     }
 
 
+_REASONING_NODE_TO_AGENT = {
+    "portfolio_reasoning_node": "portfolio",
+    "quant_reasoning_node": "quant",
+    "backtester_reasoning_node": "backtester",
+}
+
+
 @app.post("/v1/query/stream")
 async def query_stream(request: SemiAutoQueryRequest):
-    """SSE stream: runs Phase 1 (reasoning) and emits events per node.
+    """SSE stream: runs Phase 1 (reasoning) and emits token-level thought events.
 
     Emits events:
+      {"type": "thought_delta", "agent": "portfolio", "token": "..."}  ← per LLM token
       {"type": "reasoning", "agent": "portfolio", "content": "...", "tasks": [...]}
       {"type": "reasoning", "agent": "quant", "content": "..."}
       {"type": "interrupt", "message": "...", "thread_id": "...", "tasks_preview": {...}}
+      {"type": "text", "content": "..."}  ← on guard short-circuit
       {"type": "error", "content": "..."}
       {"type": "done"}
 
@@ -501,23 +510,36 @@ async def query_stream(request: SemiAutoQueryRequest):
     )
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        """Generate SSE events as graph executes."""
+        """Generate SSE events as graph executes, including per-token thought_delta."""
         def _format_event(data: dict) -> str:
             return f"data: {json.dumps(data)}\n\n"
 
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, lambda: graph.invoke(initial, config=config)
-            )
+            # Stream events from the graph as LLM tokens arrive
+            async for event in graph.astream_events(initial, config=config, version="v2"):
+                event_type = event.get("event", "")
+                metadata = event.get("metadata", {})
+                node_name = metadata.get("langgraph_node", "")
+                agent = _REASONING_NODE_TO_AGENT.get(node_name)
 
-            # Use get_state().next for authoritative interrupt detection
+                # Emit token-level thought_delta for reasoning nodes only
+                if event_type == "on_chat_model_stream" and agent:
+                    chunk = event.get("data", {}).get("chunk")
+                    token = getattr(chunk, "content", "") if chunk else ""
+                    if token:
+                        yield _format_event({
+                            "type": "thought_delta",
+                            "agent": agent,
+                            "token": token,
+                        })
+
+            # After stream ends: use get_state() for authoritative results
             state_snapshot = graph.get_state(config)
             snapshot = state_snapshot.values
             next_nodes = list(state_snapshot.next)
 
-            # Emit reasoning events
-            for agent, reasoning_key, queue_key in [
+            # Emit structured reasoning summaries (full plan + task lists)
+            for agent_key, reasoning_key, queue_key in [
                 ("portfolio", "portfolio_reasoning", "portfolio_task_queue"),
                 ("quant", "quant_reasoning", "quant_task_queue"),
                 ("backtester", "backtester_reasoning", "backtester_task_queue"),
@@ -527,7 +549,7 @@ async def query_stream(request: SemiAutoQueryRequest):
                 if reasoning or tasks:
                     yield _format_event({
                         "type": "reasoning",
-                        "agent": agent,
+                        "agent": agent_key,
                         "content": reasoning or "",
                         "tasks": tasks,
                     })
@@ -541,7 +563,7 @@ async def query_stream(request: SemiAutoQueryRequest):
                 yield _format_event({"type": "done"})
                 return
 
-            # Interrupted before executor_node → HITL
+            # Interrupted before executor_node → HITL approval
             yield _format_event({
                 "type": "interrupt",
                 "message": "Reasoning complete. Call POST /v1/approve/{thread_id} to execute.",

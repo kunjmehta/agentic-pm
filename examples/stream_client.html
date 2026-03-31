@@ -866,9 +866,35 @@
     // ── Semi-Auto HITL flow ───────────────────────────────────
 
     async function sendSemiAuto(query, bubble, apiUrl) {
+        // Per-agent thought buffers for incremental display
+        const thoughtEls = {};   // agent → {details, content} DOM elements
+        let interruptData = null;
+        let finalText = null;
+
+        function getOrCreateThought(agent) {
+            if (!thoughtEls[agent]) {
+                const details = document.createElement('details');
+                details.className = 'thinking';
+                details.open = true;
+                const summary = document.createElement('summary');
+                const agentLabel = agent.charAt(0).toUpperCase() + agent.slice(1);
+                summary.textContent = `💭 ${agentLabel} thinking…`;
+                const content = document.createElement('div');
+                content.className = 'thinking-content';
+                details.appendChild(summary);
+                details.appendChild(content);
+                const spinner = bubble.querySelector('.spinner');
+                if (spinner) bubble.insertBefore(details, spinner);
+                else bubble.appendChild(details);
+                thoughtEls[agent] = { details, content, summary };
+                scrollMessages();
+            }
+            return thoughtEls[agent];
+        }
+
         try {
-            // Phase 1: reasoning nodes → task preview (HITL interrupt)
-            const res = await fetch(`${apiUrl}/query`, {
+            // Phase 1: SSE stream — reasoning nodes + token-level thought_delta
+            const res = await fetch(`${apiUrl}/query/stream`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -878,24 +904,74 @@
                 })
             });
 
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                throw new Error(err.detail || `HTTP ${res.status}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+
+            outer: while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const lines = dec.decode(value).split('\n');
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    let evt;
+                    try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+
+                    if (evt.type === 'thought_delta' && evt.agent && evt.token) {
+                        // Append token to the agent's thinking block
+                        const el = getOrCreateThought(evt.agent);
+                        el.content.textContent += evt.token;
+                        scrollMessages();
+
+                    } else if (evt.type === 'reasoning' && evt.agent) {
+                        // Finalise the thinking block: collapse + update summary label
+                        const el = thoughtEls[evt.agent];
+                        if (el) {
+                            el.details.open = false;
+                            const agentLabel = evt.agent.charAt(0).toUpperCase() + evt.agent.slice(1);
+                            el.summary.textContent = `💭 ${agentLabel} reasoning (${(evt.tasks || []).length} tasks)`;
+                        }
+
+                    } else if (evt.type === 'interrupt') {
+                        interruptData = evt;
+
+                    } else if (evt.type === 'text' && evt.content) {
+                        finalText = evt.content;
+
+                    } else if (evt.type === 'error') {
+                        addError(bubble, evt.content || 'Unknown error');
+
+                    } else if (evt.type === 'done') {
+                        break outer;
+                    }
+                }
             }
 
-            const data = await res.json();
             removeSpinner(bubble);
 
-            // Guard short-circuit: synthesizer returned directly (e.g. market closed)
-            if (data.status !== 'pending_approval') {
-                addText(bubble, data.final_response || data.message || JSON.stringify(data));
+            if (finalText) {
+                // Guard short-circuit (market closed, synthesizer response)
+                addText(bubble, finalText);
                 isStreaming = false;
                 document.getElementById('sendBtn').disabled = false;
                 return;
             }
 
-            // Show HITL task preview card
-            showTaskPreview(bubble, data, apiUrl);
+            if (interruptData) {
+                // Map interrupt event tasks_preview → showTaskPreview format
+                const tp = interruptData.tasks_preview || {};
+                const previewData = {
+                    thread_id: interruptData.thread_id,
+                    portfolio_tasks:  tp.portfolio  || [],
+                    quant_tasks:      tp.quant      || [],
+                    backtester_tasks: tp.backtester || [],
+                    // Reasoning text captured in thought blocks above — not duplicated here
+                };
+                showTaskPreview(bubble, previewData, apiUrl);
+                return;
+            }
 
         } catch (e) {
             removeSpinner(bubble);

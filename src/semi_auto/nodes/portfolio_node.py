@@ -39,12 +39,12 @@ PORTFOLIO FUNCTIONS (core):
 - get_portfolio_status: No params. Use for: equity, cash, buying power queries.
 - get_positions_summary: No params. Use for: positions, holdings, P&L queries.
 - check_portfolio_health: No params (results injected automatically). Use for: risk compliance checks. Set depends_on=["pm_001","pm_002"] and priority=2.
-- fetch_historical_data: params={symbol, start_date, end_date, timeframe}. Use to fetch bars before a backtest. Set priority=3 (write-heavy, runs sequentially).
+- fetch_historical_data: params={symbol, start_date, end_date, timeframe}. Use to fetch bars before a backtest. Set priority=3 (write-heavy, runs sequentially). Default timeframe=1Min"
 - check_data_availability: params={symbol, start_date, end_date}. Use to verify data exists before fetching.
 
 ADDITIONAL DATA FUNCTIONS (use only when relevant):
 - get_latest_price: params={symbol, timeframe="1Day"}. Get most recent bar for a symbol.
-- get_market_bars: params={symbol, start_date, end_date, timeframe="1Day"}. Fetch raw OHLCV bars for a date range.
+- get_market_bars: params={symbol, start_date, end_date, timeframe="1Min"}. Fetch raw OHLCV bars for a date range.
 - get_watchlist: No params. Returns symbols currently in the watchlist.
 - get_company_fundamentals: params={symbol}. PE ratio, market cap, sector, EPS.
 - get_portfolio_snapshot: No params. Most recent portfolio snapshot including unrealized P&L.
