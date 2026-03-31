@@ -159,7 +159,11 @@ class MeanReversionInput(BaseModel):
     )
     start_date: Optional[str] = Field(default=None, description="YYYY-MM-DD — historical mode")
     end_date: Optional[str] = Field(default=None, description="YYYY-MM-DD — historical mode")
-    timeframe: str = Field(default="1Day", description="Bar timeframe (historical mode only)")
+    timeframe: str = Field(default="1Min", description="Bar timeframe (historical mode only; live always uses this value)")
+    sr_lookback: int = Field(
+        default=60, ge=10, le=500,
+        description="Bars to scan for support/resistance high/low levels (60 = 1 hr of 1Min data)",
+    )
 
     @field_validator("symbol")
     @classmethod
@@ -234,13 +238,34 @@ class BacktestInput(BaseModel):
     @field_validator("strategy")
     @classmethod
     def validate_strategy(cls, v: str) -> str:
-        """Normalise and validate strategy name."""
-        v_lower = v.lower().strip()
-        if v_lower not in _VALID_STRATEGIES:
-            raise ValueError(
-                f"strategy must be one of {sorted(_VALID_STRATEGIES)}, got {v!r}"
-            )
-        return v_lower
+        """Normalise and validate strategy name.
+
+        Performs exact match first, then fuzzy keyword match so that LLM
+        variants like 'momentum_SMA_50_200' or 'mean_reversion_zscore' are
+        silently coerced to the canonical name instead of failing.
+        """
+        v_norm = v.lower().strip().replace("_", "-")
+        # Exact match
+        if v_norm in _VALID_STRATEGIES:
+            return v_norm
+        # Fuzzy keyword match — first valid strategy whose name appears as a
+        # substring (or whose keywords all appear) in the submitted value
+        _FUZZY_MAP = [
+            ("mean-reversion", ["mean", "reversion"]),
+            ("buy-and-hold",   ["buy", "hold"]),
+            ("momentum",       ["momentum"]),
+            ("value",          ["value"]),
+        ]
+        for canonical, keywords in _FUZZY_MAP:
+            if all(kw in v_norm for kw in keywords):
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"[BacktestInput] strategy {v!r} fuzzy-matched → {canonical!r}"
+                )
+                return canonical
+        raise ValueError(
+            f"strategy must be one of {sorted(_VALID_STRATEGIES)}, got {v!r}"
+        )
 
     @model_validator(mode="after")
     def check_dates(self) -> "BacktestInput":

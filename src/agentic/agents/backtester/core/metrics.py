@@ -216,7 +216,9 @@ def calculate_profit_factor(trades: List[TradeRecord]) -> float:
     gross_loss = abs(sum(t.get("pnl", 0) for t in closed_trades if t.get("pnl", 0) < 0))
 
     if gross_loss == 0:
-        return float('inf') if gross_profit > 0 else 0.0
+        # No losing trades — perfect result; return a large finite cap so the
+        # value can be stored in DECIMAL columns without a ConversionException.
+        return 99.0 if gross_profit > 0 else 0.0
 
     profit_factor = gross_profit / gross_loss
 

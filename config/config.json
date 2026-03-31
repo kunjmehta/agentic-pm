@@ -59,6 +59,15 @@
     "trades_page_limit": 10000,
     "trades_max_total": null
   },
+  "strategy": {
+    "enabled": true,
+    "mean_reversion": {
+      "threshold": 2.5,
+      "ma_period": 20,
+      "lookback": 120,
+      "sr_lookback": 60
+    }
+  },
   "sandbox_mode": true,
   "middleware": {
     "model_call_limit": 5,

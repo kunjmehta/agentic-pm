@@ -21,7 +21,6 @@ from src.semi_auto.models.skills import (
     BacktestInput,
     CandleInput,
     DataAvailabilityInput,
-    HistoricalDataInput,
     MeanReversionInput,
     MomentumInput,
     VolatilityInput,
@@ -30,7 +29,6 @@ from src.semi_auto.models.skills import (
     BacktestOutput,
     CandleOutput,
     DataAvailabilityOutput,
-    FetchHistoricalDataOutput,
     HealthCheckOutput,
     MeanReversionOutput,
     MomentumOutput,
@@ -52,7 +50,6 @@ from src.semi_auto.skills.portfolio.skills import (
     get_portfolio_status_core,
     get_positions_summary_core,
     check_portfolio_health_core,
-    fetch_historical_data_core,
     check_data_availability_core,
 )
 
@@ -341,6 +338,54 @@ def _analyze_candles_wrapped(
         return _out(CandleOutput, result)
     return _out(CandleOutput, _candlestick_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days))
 
+def _save_mean_reversion_signal(symbol: str, timeframe: str, result: Dict) -> None:
+    """Persist a mean-reversion analysis result to StrategyDAO.
+
+    Called after both live and historical ``_mean_reversion_analyze`` runs so that
+    user-directed signals appear alongside automated pipeline signals in the
+    ``strategy_results`` table (distinguishable via ``model_used="user-directed"``).
+
+    Args:
+        symbol: Ticker (already upper-cased by MeanReversionInput).
+        timeframe: Bar timeframe used for the analysis.
+        result: Full analysis dict as returned by ``MeanReversionSkill``.
+    """
+    try:
+        from src.common.dao.strategy_dao import StrategyDAO
+        rec = result.get("trade_recommendation", {})
+        signals = result.get("signals", {})
+        s_dao = StrategyDAO()
+        s_dao.save_strategy_result(
+            symbol=symbol,
+            strategy_name="mean-reversion",
+            current_price=result.get("current_price", 0.0),
+            statistics=result.get("statistics", {}),
+            indicators={
+                "moving_averages": result.get("moving_averages", {}),
+                "levels": result.get("levels", {}),
+            },
+            signals=signals,
+            action=rec.get("action", "hold"),
+            confidence=float(rec.get("confidence", 0.0)),
+            reason=rec.get("reason", ""),
+            entry_price=rec.get("entry_price"),
+            stop_loss=rec.get("stop_loss"),
+            take_profit=rec.get("take_profit"),
+            support_level=result.get("levels", {}).get("support"),
+            resistance_level=result.get("levels", {}).get("resistance"),
+            current_state=signals.get("current_state"),
+            parameters=result.get("parameters", {}),
+            timeframe=timeframe,
+            model_used="user-directed",
+        )
+        s_dao.close()
+        logger.info(
+            f"[registry] Persisted user-directed signal for {symbol}/{timeframe}: "
+            f"action={rec.get('action','hold')}  confidence={rec.get('confidence',0.0):.2f}"
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] StrategyDAO persist failed for {symbol}: {exc}")
+
 
 def _mean_reversion_analyze(
     symbol: str,
@@ -358,15 +403,18 @@ def _mean_reversion_analyze(
     - **Historical mode**: analyzes a specific date range when ``start_date`` and
       ``end_date`` are both provided.
 
+    Results are persisted to ``strategy_results`` (``model_used="user-directed"``)
+    so user-directed signals are queryable alongside automated pipeline signals.
+
     Input is validated and normalised via :class:`~src.semi_auto.models.skills.MeanReversionInput`.
 
     Args:
         symbol: Stock ticker.
-        lookback: Lookback period in trading days.
+        lookback: Lookback period in trading bars.
         threshold: Z-score threshold for entry signal.
         start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
         end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
-        timeframe: Bar timeframe (historical mode only; live always uses default).
+        timeframe: Bar timeframe. Defaults to ``"1Min"`` for intraday analysis.
 
     Returns:
         Full analysis dict with statistics, signals, trade_recommendation — or error dict.
@@ -385,13 +433,22 @@ def _mean_reversion_analyze(
             df = _fetch_bars_range("mean_reversion_analyze", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
             if df is None:
                 return _out(MeanReversionOutput, {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}\u2013{inp.end_date}", "symbol": inp.symbol})
-            result = _mean_reversion_skill.analyze_bars(df, threshold=inp.threshold, lookback=inp.lookback)
+            result = _mean_reversion_skill.analyze_bars(
+                df, threshold=inp.threshold, lookback=inp.lookback, sr_lookback=inp.sr_lookback,
+            )
             result.update({"symbol": inp.symbol, "start_date": inp.start_date,
                            "end_date": inp.end_date, "mode": "historical"})
-            return _out(MeanReversionOutput, result)
-        return _out(MeanReversionOutput, _mean_reversion_skill.generate_signals(
-            symbol=inp.symbol, lookback=inp.lookback, threshold=inp.threshold
-        ))
+        else:
+            result = _mean_reversion_skill.generate_signals(
+                symbol=inp.symbol, lookback=inp.lookback, threshold=inp.threshold,
+                timeframe=inp.timeframe, sr_lookback=inp.sr_lookback,
+            )
+
+        # Persist to StrategyDAO (non-blocking — failures only warn)
+        if "error" not in result:
+            _save_mean_reversion_signal(inp.symbol, inp.timeframe, result)
+
+        return _out(MeanReversionOutput, result)
     except Exception as exc:
         logger.warning(f"[registry] mean_reversion_analyze failed for {inp.symbol}: {exc}")
         return _out(MeanReversionOutput, {"error": str(exc), "symbol": inp.symbol})
@@ -647,70 +704,55 @@ def _check_data_availability_wrapped(
         return _out(DataAvailabilityOutput, {"error": str(exc)})
 
 
-def _fetch_historical_data_wrapped(
+def _get_market_bars(
     symbol: str,
     start_date: str,
     end_date: str,
     timeframe: str = "1Min",
     **kwargs,
-) -> Dict:
-    """Normalising wrapper around fetch_historical_data_core.
+) -> list:
+    """Fetch OHLCV bars for a symbol; auto-fetches from Alpaca API if not in DB.
 
-    Input is validated via :class:`~src.semi_auto.models.skills.HistoricalDataInput`
-    which converts LLM-emitted timeframe aliases (e.g. "1d") to canonical form
-    and upper-cases the symbol before calling the underlying skill.
-
-    Args:
-        symbol: Stock ticker.
-        start_date: Start date "YYYY-MM-DD".
-        end_date: End date "YYYY-MM-DD".
-        timeframe: Bar timeframe — normalised automatically.
-
-    Returns:
-        Result dict from fetch_historical_data_core, or error dict.
-    """
-    if fetch_historical_data_core is None:
-        return {"error": "fetch_historical_data skill not available"}
-    try:
-        inp = HistoricalDataInput(
-            symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe,
-        )
-    except Exception as exc:
-        logger.warning(f"[registry] HistoricalDataInput validation failed: {exc}")
-        return {"error": f"Invalid parameters for fetch_historical_data: {exc}"}
-    if inp.timeframe != timeframe:
-        logger.info(f"[registry] fetch_historical_data: normalised timeframe '{timeframe}' → '{inp.timeframe}'")
-    try:
-        result = fetch_historical_data_core(
-            symbol=inp.symbol,
-            start_date=inp.start_date,
-            end_date=inp.end_date,
-            timeframe=inp.timeframe,
-        )
-        return _out(FetchHistoricalDataOutput, result)
-    except Exception as exc:
-        logger.warning(f"[registry] fetch_historical_data failed for {inp.symbol}: {exc}")
-        return _out(FetchHistoricalDataOutput, {"error": str(exc)})
-
-
-def _get_market_bars(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> list:
-    """Fetch raw OHLCV bars from DB for a symbol and date range.
+    Replaces the former ``fetch_historical_data`` registry function.  A single
+    call now covers both ensuring data is present and returning the actual
+    bar records — eliminating the two-step fetch-then-read pattern.
 
     Args:
         symbol: Stock ticker.
         start_date: Start date string "YYYY-MM-DD".
         end_date: End date string "YYYY-MM-DD".
-        timeframe: Bar timeframe e.g. "1Day", "1Min".
+        timeframe: Bar timeframe e.g. "1Day", "1Min" (default "1Min").
 
     Returns:
-        List of bar dicts or empty list.
+        List of bar dicts; empty list if no data and API returned nothing.
     """
     try:
         from datetime import datetime as _dt
         from src.common.dao import AlpacaDAO
+
+        # Normalise timeframe aliases the LLM commonly emits
+        _TF_MAP = {"1d": "1Day", "1day": "1Day", "1h": "1Hour", "1hour": "1Hour",
+                   "1m": "1Min", "1min": "1Min"}
+        tf = _TF_MAP.get(timeframe.lower(), timeframe)
+
+        start_dt = _dt.fromisoformat(start_date)
+        end_dt   = _dt.fromisoformat(end_date)
+
         dao = AlpacaDAO()
-        df = dao.get_bars(symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), timeframe)
+        df = dao.get_bars(symbol, start_dt, end_dt, tf)
         dao.close()
+
+        if df.empty:
+            # Not in local DB — pull from Alpaca API; save_bars is called inside
+            logger.info(f"[registry] get_market_bars: no local data for {symbol}, fetching from API")
+            try:
+                from src.common.skills.alpaca_skills import fetch_historical_bars
+                df = fetch_historical_bars(
+                    symbol=symbol, start=start_date, end=end_date, timeframe=tf
+                )
+            except Exception as fetch_exc:
+                logger.warning(f"[registry] get_market_bars: API fetch failed for {symbol}: {fetch_exc}")
+
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_market_bars failed for {symbol}: {exc}")
@@ -883,7 +925,11 @@ def _get_precomputed_indicators(symbol: str, start_date: str, end_date: str, tim
 
 
 def _get_tick_trades(symbol: str, start_date: str, end_date: str, limit: int = 1000) -> list:
-    """Retrieve historical tick-level trades for a symbol.
+    """Retrieve tick-level trades for a symbol across live and historical tables.
+
+    Queries both the ``live_trades`` staging table and ``historical_trades``
+    archive, deduplicating on (symbol, timestamp, trade_id) so rows that were
+    just archived are not double-counted.
 
     Args:
         symbol: Stock ticker.
@@ -892,13 +938,13 @@ def _get_tick_trades(symbol: str, start_date: str, end_date: str, limit: int = 1
         limit: Max number of trades to return.
 
     Returns:
-        List of trade dicts or empty list.
+        List of trade dicts or error dict.
     """
     try:
         from datetime import datetime as _dt
         from src.common.dao import AlpacaDAO
         dao = AlpacaDAO()
-        df = dao.get_trades(symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), limit=limit)
+        df = dao.get_recent_trades(symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), limit=limit)
         dao.close()
         return _df_to_records(df)
     except Exception as exc:
@@ -907,7 +953,11 @@ def _get_tick_trades(symbol: str, start_date: str, end_date: str, limit: int = 1
 
 
 def _get_trade_count(symbol: str, start_date: str, end_date: str) -> dict:
-    """Get count of trades for a symbol in a date range.
+    """Get deduplicated trade count for a symbol across live and historical tables.
+
+    Counts distinct (symbol, timestamp, trade_id) tuples from both
+    ``live_trades`` and ``historical_trades`` to avoid undercounting
+    trades that are still in the staging table awaiting archival.
 
     Args:
         symbol: Stock ticker.
@@ -915,13 +965,13 @@ def _get_trade_count(symbol: str, start_date: str, end_date: str) -> dict:
         end_date: End date string "YYYY-MM-DD".
 
     Returns:
-        Dict with count key.
+        Dict with trade_count key.
     """
     try:
         from datetime import datetime as _dt
         from src.common.dao import AlpacaDAO
         dao = AlpacaDAO()
-        count = dao.get_trade_count(symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date))
+        count = dao.get_recent_trade_count(symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date))
         dao.close()
         return {"symbol": symbol, "start_date": start_date, "end_date": end_date, "trade_count": count}
     except Exception as exc:
@@ -1338,7 +1388,6 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "get_portfolio_status":    _get_portfolio_status_wrapped,
     "get_positions_summary":   _get_positions_summary_wrapped,
     "check_portfolio_health":  _check_portfolio_health_wrapped,
-    "fetch_historical_data":   _fetch_historical_data_wrapped,
     "check_data_availability": _check_data_availability_wrapped,
     # ── Quant indicators (wrapped to fetch bars internally) ───────────────────
     "calc_momentum":           _calc_momentum_wrapped,
@@ -1350,6 +1399,9 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "backtest_strategy":       _backtest_strategy,
     # ── AlpacaDAO market data ─────────────────────────────────────────────────
     "get_market_bars":         _get_market_bars,
+    # fetch_historical_data: alias of get_market_bars — used by quant + backtester
+    # to explicitly signal "download bars into DB"; same implementation.
+    "fetch_historical_data":   _get_market_bars,
     "get_latest_price":        _get_latest_price,
     "get_precomputed_indicators": _get_precomputed_indicators,
     "get_tick_trades":         _get_tick_trades,
@@ -1413,21 +1465,24 @@ def get_registry_schema() -> Dict[str, Any]:
             },
             "note": "depends_on: ['pm_001', 'pm_002'] — injected automatically by executor",
         },
-        "fetch_historical_data": {
-            "description": "Fetch and store historical OHLCV bars from Alpaca.",
-            "params": {
-                "symbol": "str — stock ticker",
-                "start_date": "str — YYYY-MM-DD",
-                "end_date": "str — YYYY-MM-DD",
-                "timeframe": "str — '1Min' | '5Min' | '1Hour' | '1Day' (default '1Min')",
-            },
-        },
         "check_data_availability": {
             "description": "Check if historical bars exist in DB for the given period.",
             "params": {
                 "symbol": "str",
                 "start_date": "str — YYYY-MM-DD",
                 "end_date": "str — YYYY-MM-DD",
+                "timeframe": "str — default '1Min'",
+            },
+        },
+        "fetch_historical_data": {
+            "description": "Download bars from Alpaca API and persist to local DB. "
+                           "Alias of get_market_bars with explicit download semantics. "
+                           "Use when data is confirmed missing; set priority=3.",
+            "params": {
+                "symbol": "str",
+                "start_date": "str — YYYY-MM-DD",
+                "end_date": "str — YYYY-MM-DD",
+                "timeframe": "str — default '1Min'",
             },
         },
         "calc_momentum": {
@@ -1482,7 +1537,7 @@ def get_registry_schema() -> Dict[str, Any]:
         },
         # ── AlpacaDAO ─────────────────────────────────────────────────────────
         "get_market_bars": {
-            "description": "Fetch raw OHLCV bars from DB for a symbol and date range.",
+            "description": "Fetch OHLCV bars for a symbol; auto-fetches from Alpaca API if not in local DB.",
             "params": {"symbol": "str", "start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD", "timeframe": "str — default '1Min'"},
         },
         "get_latest_price": {
@@ -1625,11 +1680,11 @@ if __name__ == "__main__":
         status = "[OK]" if fn is not None else "[WARN] not available"
         print(f"  {status}  {name}")
 
-    assert len(FUNCTION_REGISTRY) == 38, f"Expected 38 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
-    print("\n[OK] All 38 functions registered")
+    assert len(FUNCTION_REGISTRY) == 37, f"Expected 37 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
+    print("\n[OK] All 37 functions registered")
 
     schema = get_registry_schema()
-    assert len(schema) == 38, f"Expected 38 schema entries, got {len(schema)}"
+    assert len(schema) == 37, f"Expected 37 schema entries, got {len(schema)}"
     print("[OK] Registry schema returned")
 
     print("\n[ALL OK] registry/functions.py smoke test passed")

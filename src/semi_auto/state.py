@@ -4,14 +4,15 @@ All fields are Optional except required inputs (query, thread_id, etc.).
 Nodes populate their slice of state and return a partial dict.
 
 State lifecycle:
-  context_node        → conversation_id, turn_number, prior_turns
-  classify_intent     → intent, symbol, bt_workflow
-  market_hours_guard  → routing_error (if blocked)
-  portfolio_node      → portfolio_task_queue, portfolio_reasoning, delegation flags
-  quant_node          → quant_task_queue, quant_reasoning
-  backtester_node     → backtester_task_queue, backtester_reasoning
-  executor_node       → execution_results, tool_timings
-  synthesizer_node    → final_response, execution_time_ms
+  context_node          → conversation_id, turn_number, prior_turns
+  classify_intent       → intent, symbol, bt_workflow
+  data_availability_node→ data_availability
+  market_hours_guard    → routing_error (if blocked)
+  portfolio_node        → portfolio_task_queue, portfolio_reasoning, delegation flags
+  quant_node            → quant_task_queue, quant_reasoning
+  backtester_node       → backtester_task_queue, backtester_reasoning
+  executor_node         → execution_results, tool_timings
+  synthesizer_node      → final_response, execution_time_ms
 """
 
 from datetime import datetime, timezone
@@ -34,6 +35,12 @@ class GraphState(TypedDict):
     conversation_id: Optional[str]          # app-level session UUID
     turn_number: Optional[int]              # incremented each turn
     prior_turns: Optional[List[Dict[str, Any]]]  # last N DB interactions
+
+    # ── Data availability pre-check ────────────────────────────────────────
+    data_availability: Optional[Dict[str, Any]]  # set by data_availability_node
+    # Shape: {symbol, timeframe, indicators_available, bars_available,
+    #         trades_available, indicator_rows, bar_count, trade_count,
+    #         latest_indicator_ts, latest_bar_ts, checked_at}
 
     # ── Intent classification ───────────────────────────────────────────────
     intent: Optional[str]       # "portfolio" | "quant" | "backtest" | "full_analysis"
@@ -127,6 +134,7 @@ def make_initial_state(
         "execution_time_ms": None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool_timings": None,
+        "data_availability": None,
     }
 
 

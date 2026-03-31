@@ -45,6 +45,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from src.semi_auto.state import GraphState, make_initial_state
 from src.semi_auto.nodes.classifier import classify_intent
 from src.semi_auto.nodes.context_node import context_node
+from src.semi_auto.nodes.data_availability_node import data_availability_node
 from src.semi_auto.nodes.guards import market_hours_guard
 from src.semi_auto.nodes.portfolio_node import portfolio_reasoning_node
 from src.semi_auto.nodes.quant_node import quant_reasoning_node
@@ -217,6 +218,7 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
     # ── Register nodes ─────────────────────────────────────────────────────
     builder.add_node("context_node", context_node)
     builder.add_node("classify_intent", classify_intent)
+    builder.add_node("data_availability_node", data_availability_node)
     builder.add_node("market_hours_guard", market_hours_guard)
     builder.add_node("portfolio_reasoning_node", portfolio_reasoning_node)
     builder.add_node("quant_reasoning_node", quant_reasoning_node)
@@ -228,7 +230,8 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
     # ── Fixed edges ────────────────────────────────────────────────────────
     builder.add_edge(START, "context_node")
     builder.add_edge("context_node", "classify_intent")
-    builder.add_edge("classify_intent", "market_hours_guard")
+    builder.add_edge("classify_intent", "data_availability_node")
+    builder.add_edge("data_availability_node", "market_hours_guard")
     builder.add_edge("executor_node", "synthesizer_node")
     builder.add_edge("synthesizer_node", END)
 
@@ -311,7 +314,8 @@ if __name__ == "__main__":
         print(f"       {src} -> {tgt}")
 
     expected_nodes = {
-        "context_node", "classify_intent", "market_hours_guard",
+        "context_node", "classify_intent", "data_availability_node",
+        "market_hours_guard",
         "portfolio_reasoning_node", "quant_reasoning_node",
         "backtester_reasoning_node", "pm_review_node",
         "executor_node", "synthesizer_node",

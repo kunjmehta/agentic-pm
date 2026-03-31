@@ -269,11 +269,54 @@ async def save_bar_to_db(bar, timeframe: str = '1Min'):
         logger.error(f"Failed to save bar to DB: {e}", exc_info=True)
 
 
+def _build_indicator_row(symbol: str, timestamp, timeframe: str, result: dict) -> dict:
+    """Flatten a single ``IndicatorsEngine.calc_all`` result into a DB-ready dict.
+
+    Args:
+        symbol: Stock ticker.
+        timestamp: Bar timestamp value.
+        timeframe: Bar timeframe string.
+        result: Dict returned by ``IndicatorsEngine.calc_all``.
+
+    Returns:
+        Flat dict matching the ``computed_indicators`` table schema.
+    """
+    return {
+        "symbol": symbol,
+        "timestamp": timestamp,
+        "timeframe": timeframe,
+        # Momentum
+        "macd_value": result["momentum"]["macd"]["value"],
+        "macd_signal": result["momentum"]["macd"]["signal"],
+        "macd_histogram": result["momentum"]["macd"]["histogram"],
+        "rsi": result["momentum"]["rsi"],
+        # Volatility
+        "bb_upper": result["volatility"]["upper"],
+        "bb_middle": result["volatility"]["middle"],
+        "bb_lower": result["volatility"]["lower"],
+        "bb_bandwidth": result["volatility"]["bandwidth"],
+        # Volume
+        "obv": result["volume"]["obv"],
+        "volume_trend": result["volume"]["volume_trend"],
+        "avg_volume_10d": result["volume"]["avg_volume_10d"],
+        "current_vs_avg": result["volume"]["current_vs_avg"],
+        # Mean reversion
+        "z_score": result["mean_reversion"]["z_score"],
+        "percentile": result["mean_reversion"]["percentile"],
+        "vwap": result["mean_reversion"].get("vwap"),
+    }
+
+
 async def _compute_and_save_indicators(symbol: str, timeframe: str, dao: AlpacaDAO):
     """Compute indicators for the most recent bar and save to database.
 
-    This runs automatically after each bar is saved, ensuring indicators
-    are always up-to-date without needing a separate scheduler.
+    Uses two modes to avoid O(n²) recomputation on every bar tick:
+
+    * **Seed mode** — first time (no existing rows for this symbol+timeframe in
+      the last 24 h): runs the full rolling window back-fill so all historical
+      indicator rows are populated.
+    * **Live mode** — subsequent bar events: computes indicators only for the
+      latest bar (O(1)), since everything before it is already persisted.
 
     Args:
         symbol: Stock symbol
@@ -284,80 +327,158 @@ async def _compute_and_save_indicators(symbol: str, timeframe: str, dao: AlpacaD
         from src.common.etl.indicators_engine import IndicatorsEngine
         from datetime import datetime, timedelta
 
-        # Get lookback period from config (default 60 days)
         lookback_days = config.get("etl.lookback_days", default=60)
+        # Use the strategy lookback as the minimum bar count so both steps stay in sync.
+        min_bars: int = int(config.get("strategy.mean_reversion.lookback", default=120))
 
-        # Fetch recent bars (lookback window)
         end_date = datetime.now()
         start_date = end_date - timedelta(days=lookback_days)
 
-        bars = dao.get_bars(
-            symbol=symbol,
-            start=start_date,
-            end=end_date,
-            timeframe=timeframe
-        )
+        bars = dao.get_bars(symbol=symbol, start=start_date, end=end_date, timeframe=timeframe)
 
-        if bars.empty or len(bars) < 60:
-            logger.info(f"⏳ Insufficient data for {symbol} {timeframe} - have {len(bars)} bars, need 60+")
+        if bars.empty or len(bars) < min_bars:
+            logger.info(
+                f"⏳ Insufficient data for {symbol} {timeframe} — "
+                f"have {len(bars)} bars, need {min_bars}+"
+            )
             return
 
-        # Compute indicators
         engine = IndicatorsEngine()
 
-        # Calculate indicators for ALL rows (rolling window)
-        indicator_rows = []
-        for i in range(60, len(bars) + 1):  # Need minimum 60 bars for mean reversion
-            window_data = bars.iloc[:i].copy()
-            result = engine.calc_all(window_data)
+        # ── Detect seed vs live mode ───────────────────────────────────────────
+        # Check for ANY indicator rows written in the last 24 hours.
+        recent_check = dao.get_computed_indicators(
+            symbol, end_date - timedelta(hours=24), end_date, timeframe
+        )
+        is_live_mode = not recent_check.empty
 
-            # Get the timestamp for this row
-            timestamp = window_data.iloc[-1]['timestamp']
+        if is_live_mode:
+            # Live (incremental): compute only for the single latest bar.
+            result = engine.calc_all(bars)
+            timestamp = bars.iloc[-1]["timestamp"]
+            indicator_rows = [_build_indicator_row(symbol, timestamp, timeframe, result)]
+            mode_label = "live/incremental"
+        else:
+            # Seed: back-fill the full rolling window (runs once per symbol).
+            indicator_rows = []
+            for i in range(min_bars, len(bars) + 1):
+                window = bars.iloc[:i].copy()
+                result = engine.calc_all(window)
+                indicator_rows.append(
+                    _build_indicator_row(symbol, window.iloc[-1]["timestamp"], timeframe, result)
+                )
+            mode_label = f"seed ({len(indicator_rows)} rows)"
 
-            # Flatten result into a single row
-            row = {
-                'symbol': symbol,
-                'timestamp': timestamp,
-                'timeframe': timeframe,
-
-                # Momentum
-                'macd_value': result['momentum']['macd']['value'],
-                'macd_signal': result['momentum']['macd']['signal'],
-                'macd_histogram': result['momentum']['macd']['histogram'],
-                'rsi': result['momentum']['rsi'],
-
-                # Volatility
-                'bb_upper': result['volatility']['upper'],
-                'bb_middle': result['volatility']['middle'],
-                'bb_lower': result['volatility']['lower'],
-                'bb_bandwidth': result['volatility']['bandwidth'],
-
-                # Volume
-                'obv': result['volume']['obv'],
-                'volume_trend': result['volume']['trend'],
-                'avg_volume_10d': result['volume']['avg_volume_10d'],
-                'current_vs_avg': result['volume']['current_vs_avg'],
-
-                # Mean reversion
-                'z_score': result['mean_reversion']['z_score'],
-                'percentile': result['mean_reversion']['percentile'],
-                'vwap': result['mean_reversion']['vwap']
-            }
-            indicator_rows.append(row)
-
-        # Convert to DataFrame
         indicators_df = pd.DataFrame(indicator_rows)
 
-        # Save to database (upsert to handle duplicates)
-        if hasattr(dao, 'save_computed_indicators'):
+        if hasattr(dao, "save_computed_indicators"):
             rows = dao.save_computed_indicators(indicators_df)
-            logger.info(f"✓ Computed and saved {rows} indicators for {symbol} {timeframe} (from {len(bars)} bars)")
+            logger.info(
+                f"✓ Indicators [{mode_label}] saved {rows} rows for {symbol} {timeframe}"
+            )
         else:
-            logger.error("❌ AlpacaDAO.save_computed_indicators() method missing - cannot save indicators")
+            logger.error("❌ AlpacaDAO.save_computed_indicators() method missing — cannot save indicators")
+
+        # Generate and persist strategy signals from the same bars.
+        strategy_enabled = config.get("strategy.enabled", default=True)
+        if strategy_enabled:
+            await _generate_and_save_signals(symbol, timeframe, bars, config)
 
     except Exception as e:
         logger.error(f"❌ Failed to compute/save indicators for {symbol} {timeframe}: {e}", exc_info=True)
         logger.error(f"   Context: {len(bars) if 'bars' in locals() else 'unknown'} bars fetched")
+
+
+async def _generate_and_save_signals(
+    symbol: str,
+    timeframe: str,
+    bars: "pd.DataFrame",
+    cfg,
+) -> None:
+    """Run mean-reversion signal generation on *bars* and persist to StrategyDAO.
+
+    Parameters are read from config so callers are not hard-coded:
+
+    * ``strategy.mean_reversion.threshold``  (default 2.5)
+    * ``strategy.mean_reversion.ma_period``  (default 20)
+    * ``strategy.mean_reversion.lookback``   (default 120)
+    * ``strategy.mean_reversion.sr_lookback`` (default 60)
+
+    Args:
+        symbol: Stock ticker symbol.
+        timeframe: Bar timeframe string (e.g. ``'1Min'``, ``'1Day'``).
+        bars: DataFrame of OHLCV bars already fetched by the caller.
+        cfg: Config accessor instance (the module-level ``config`` object).
+    """
+    try:
+        from src.semi_auto.skills.quant.skills import MeanReversionSkill
+        from src.common.dao.strategy_dao import StrategyDAO
+
+        # --- Read strategy parameters from config (all have safe defaults) ---
+        threshold: float = cfg.get("strategy.mean_reversion.threshold", default=2.5)
+        ma_period: int = int(cfg.get("strategy.mean_reversion.ma_period", default=20))
+        lookback: int = int(cfg.get("strategy.mean_reversion.lookback", default=120))
+        sr_lookback: int = int(cfg.get("strategy.mean_reversion.sr_lookback", default=60))
+
+        if len(bars) < lookback:
+            logger.debug(
+                f"⏳ [{symbol}] Skipping signal generation — only {len(bars)} bars, need {lookback}"
+            )
+            return
+
+        # --- Run pure-DataFrame analysis (no extra network call) ---
+        skill = MeanReversionSkill()
+        result = skill.analyze_bars(
+            bars,
+            threshold=threshold,
+            ma_period=ma_period,
+            lookback=lookback,
+            sr_lookback=sr_lookback,
+        )
+
+        if "error" in result:
+            logger.warning(f"⚠ [{symbol}] Signal generation returned error: {result['error']}")
+            return
+
+        rec = result.get("trade_recommendation", {})
+        signals = result.get("signals", {})
+
+        # --- Persist signal to StrategyDAO ---
+        s_dao = StrategyDAO()
+        s_dao.save_strategy_result(
+            symbol=symbol,
+            strategy_name="mean-reversion",
+            current_price=result.get("current_price", float(bars["close"].iloc[-1])),
+            statistics=result.get("statistics", {}),
+            indicators={
+                "moving_averages": result.get("moving_averages", {}),
+                "levels": result.get("levels", {}),
+            },
+            signals=signals,
+            action=rec.get("action", "hold"),
+            confidence=float(rec.get("confidence", 0.0)),
+            reason=rec.get("reason", ""),
+            entry_price=rec.get("entry_price"),
+            stop_loss=rec.get("stop_loss"),
+            take_profit=rec.get("take_profit"),
+            support_level=result.get("levels", {}).get("support"),
+            resistance_level=result.get("levels", {}).get("resistance"),
+            current_state=signals.get("current_state"),
+            parameters=result.get("parameters", {}),
+            timeframe=timeframe,
+            model_used="rule-based",
+        )
+        s_dao.close()
+
+        logger.info(
+            f"✓ Signal generated for {symbol} {timeframe}: "
+            f"action={rec.get('action','hold')}  "
+            f"confidence={rec.get('confidence', 0.0):.2f}  "
+            f"state={signals.get('current_state', '?')}"
+        )
+
+    except Exception as exc:
+        logger.error(f"❌ Signal generation failed for {symbol} {timeframe}: {exc}", exc_info=True)
 
 
 async def combined_trade_handler(trade):

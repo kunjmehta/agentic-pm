@@ -105,6 +105,18 @@ get_precomputed_indicators
   Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
   Optional : timeframe="1Min"
 
+check_data_availability
+  Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
+  Optional : timeframe="1Min"
+  Use when Quant needs to verify bar coverage before a historical indicator call.
+
+fetch_historical_data
+  Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
+  Optional : timeframe="1Min"   ← default is 1Min
+  Use only when check_data_availability reports bars are missing.
+  Must have priority=3 and depends_on=[<check_task_id>].
+  If bars_available=True from DATA AVAILABILITY REPORT, remove this task.
+
 get_company_fundamentals
   Required : symbol (str)
   No optional params
@@ -142,6 +154,8 @@ backtest_strategy          ← Last task (depends_on=[bt_002] if fetch was added
   Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
   Optional : strategy="mean-reversion"  initial_capital=100000.0
   Valid strategies: "buy-and-hold" | "mean-reversion" | "momentum" | "value"
+  ⚠ EXACT strings only — never "momentum_SMA_50_200" or any variant. If you see a non-canonical
+    strategy string, emit an update_params edit to replace it with the nearest valid name.
   DEFAULT STRATEGY: always "mean-reversion" for workflow A unless user specified otherwise
 
 save_eod_snapshot          ← Workflow B: save portfolio snapshot
@@ -316,10 +330,47 @@ def pm_review_node(state: dict) -> dict:
             if current_iteration > 0 else ""
         )
 
+        # ── Data availability pre-check results ──────────────────────────────
+        data_avail = state.get("data_availability") or {}
+        data_avail_section = ""
+        if data_avail:
+            symbol_da = data_avail.get("symbol", "N/A")
+            indicators_avail = data_avail.get("indicators_available", False)
+            ind_rows = data_avail.get("indicator_rows", 0)
+            bars_avail = data_avail.get("bars_available", False)
+            bar_count = data_avail.get("bar_count", 0)
+            trades_avail = data_avail.get("trades_available", False)
+            trade_count = data_avail.get("trade_count", 0)
+
+            data_avail_section = (
+                f"\nDATA AVAILABILITY REPORT (symbol={symbol_da}):\n"
+                f"  indicators_available={indicators_avail}  ({ind_rows} pre-computed rows)\n"
+                f"  bars_available={bars_avail}  ({bar_count} bars in DB)\n"
+                f"  trades_available={trades_avail}  ({trade_count} trades)\n"
+                f"\nREVIEW GUIDANCE based on data availability:\n"
+            )
+            if indicators_avail:
+                data_avail_section += (
+                    "  - Pre-computed indicators exist. If Quant is ONLY calling calc_* functions "
+                    "without get_precomputed_indicators, flag this but do NOT force a rejection — "
+                    "calc_* results are still valid.\n"
+                )
+            if bars_avail:
+                data_avail_section += (
+                    "  - Bars ARE in the DB. If Backtester included fetch_historical_data, "
+                    "add a remove edit for that task — data is already present.\n"
+                )
+            else:
+                data_avail_section += (
+                    "  - No bars found in DB. If Backtester is missing fetch_historical_data "
+                    "before backtest_strategy, that is a structural error — set approved=false.\n"
+                )
+
         user_message = (
             f"User query: {query}\n"
             f"Intent: {intent}\n"
-            f"{revision_context}\n"
+            f"{revision_context}"
+            f"{data_avail_section}\n"
             f"Plans to review:\n\n{task_summary}"
         )
 

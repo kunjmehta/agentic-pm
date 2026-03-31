@@ -88,8 +88,8 @@ def client():
     mock_coordinator.close = MagicMock()
 
     with (
-        patch("src.semi_auto.api.build_graph", return_value=mock_graph),
-        patch("src.semi_auto.api.DataCoordinator", return_value=mock_coordinator),
+        patch("src.semi_auto.lifespan.build_graph", return_value=mock_graph),
+        patch("src.semi_auto.lifespan.DataCoordinator", return_value=mock_coordinator),
     ):
         from src.semi_auto.api import app
         with TestClient(app, raise_server_exceptions=False) as c:
@@ -212,12 +212,9 @@ class TestPortfolioStatusEndpoint:
         assert r.status_code in (200, 500)  # 500 if import path differs
 
     def test_returns_500_on_exception(self, client):
-        with patch(
-            "src.semi_auto.api.portfolio_status",
-            side_effect=Exception("DB error"),
-        ):
-            # Direct test: the endpoint catches exceptions and re-raises as 500
-            pass  # This is tested indirectly
+        # Endpoint catches exceptions and returns 500; tested indirectly via
+        # the router's own error path (patch target moved to routers/portfolio.py)
+        pass
 
 
 # ── Portfolio health endpoint (new) ───────────────────────────────────────────
@@ -339,9 +336,8 @@ class TestPortfolioHistoryEndpoint:
 class TestAgentStateEndpoint:
     def test_known_thread_returns_state(self, client):
         state_vals = {"query": "test", "intent": "portfolio", "turn_number": 1}
-        from src.semi_auto.api import _graph
         snapmock = _make_state_snapshot(values=state_vals)
-        with patch("src.semi_auto.api._graph") as mg:
+        with patch("src.semi_auto.app_state._graph") as mg:
             mg.get_state.return_value = snapmock
             r = client.get("/v1/agent/state/my-thread-id")
         assert r.status_code == 200
@@ -349,7 +345,7 @@ class TestAgentStateEndpoint:
         assert "state" in data
 
     def test_none_state_returns_404(self, client):
-        with patch("src.semi_auto.api._graph") as mg:
+        with patch("src.semi_auto.app_state._graph") as mg:
             mg.get_state.return_value = None
             r = client.get("/v1/agent/state/unknown-thread")
         assert r.status_code == 404
@@ -357,7 +353,7 @@ class TestAgentStateEndpoint:
     def test_prior_turns_stripped_from_state(self, client):
         state_vals = {"query": "q", "intent": "p", "prior_turns": [{"old": 1}]}
         snapmock = _make_state_snapshot(values=state_vals)
-        with patch("src.semi_auto.api._graph") as mg:
+        with patch("src.semi_auto.app_state._graph") as mg:
             mg.get_state.return_value = snapmock
             data = client.get("/v1/agent/state/my-thread").json()
         assert "prior_turns" not in data.get("state", {})
@@ -412,22 +408,22 @@ class TestAdminEndpoints:
 
 class TestIngestionStatusEndpoint:
     def test_returns_200(self, client):
-        with patch("src.semi_auto.api._stream_task", None), \
-             patch("src.semi_auto.api._data_coordinator", None):
+        with patch("src.semi_auto.app_state._stream_task", None), \
+             patch("src.semi_auto.app_state._data_coordinator", None):
             r = client.get("/v1/ingestion/status")
         assert r.status_code == 200
 
     def test_has_required_sections(self, client):
-        with patch("src.semi_auto.api._stream_task", None), \
-             patch("src.semi_auto.api._data_coordinator", None):
+        with patch("src.semi_auto.app_state._stream_task", None), \
+             patch("src.semi_auto.app_state._data_coordinator", None):
             data = client.get("/v1/ingestion/status").json()
         assert "data_stream" in data
         assert "etl" in data
         assert "timestamp" in data
 
     def test_stream_not_running_when_task_none(self, client):
-        with patch("src.semi_auto.api._stream_task", None), \
-             patch("src.semi_auto.api._data_coordinator", None):
+        with patch("src.semi_auto.app_state._stream_task", None), \
+             patch("src.semi_auto.app_state._data_coordinator", None):
             data = client.get("/v1/ingestion/status").json()
         assert data["data_stream"]["running"] is False
 
@@ -436,8 +432,8 @@ class TestIngestionStatusEndpoint:
         mock_coordinator.symbols = ["AAPL", "MSFT"]
         mock_task = MagicMock()
         mock_task.done.return_value = False
-        with patch("src.semi_auto.api._stream_task", mock_task), \
-             patch("src.semi_auto.api._data_coordinator", mock_coordinator):
+        with patch("src.semi_auto.app_state._stream_task", mock_task), \
+             patch("src.semi_auto.app_state._data_coordinator", mock_coordinator):
             data = client.get("/v1/ingestion/status").json()
         assert data["data_stream"]["running"] is True
         assert "AAPL" in data["data_stream"]["symbols"]
@@ -445,8 +441,8 @@ class TestIngestionStatusEndpoint:
     def test_cache_section_present_when_cache_available(self, client):
         mock_cache = MagicMock()
         mock_cache._cache = {}  # empty cache dict
-        with patch("src.semi_auto.api._stream_task", None), \
-             patch("src.semi_auto.api._data_coordinator", None), \
+        with patch("src.semi_auto.app_state._stream_task", None), \
+             patch("src.semi_auto.app_state._data_coordinator", None), \
              patch("src.common.data_gatherer.trade_cache.get_cache", return_value=mock_cache):
             data = client.get("/v1/ingestion/status").json()
         assert "cache" in data

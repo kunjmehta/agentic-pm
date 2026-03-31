@@ -66,11 +66,21 @@ TECHNICAL INDICATOR FUNCTIONS:
 
 MARKET DATA FUNCTIONS:
 - get_market_bars: params={{symbol, start_date, end_date, timeframe="1Min"}}
-  Fetch raw OHLCV bars from DB for a date range
+  Fetch raw OHLCV bars from DB. Auto-fetches from Alpaca API and caches locally if not present.
 - get_latest_price: params={{symbol, timeframe="1Min"}}
   Get most recent bar (open, high, low, close, volume)
 - get_precomputed_indicators: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Retrieve pre-computed technical indicators stored in DB
+
+DATA MANAGEMENT FUNCTIONS (use when data may be missing):
+- check_data_availability: params={{symbol, start_date, end_date, timeframe="1Min"}}
+  Verify whether OHLCV bars exist in the local DB for the requested date range.
+  Returns: available=True/False, bar_count, coverage_pct, gaps, action_needed.
+  Use BEFORE calling calc_* on a historical date range you are not sure is populated.
+- fetch_historical_data: params={{symbol, start_date, end_date, timeframe="1Min"}}
+  Download bars from Alpaca API and persist to local DB, then return them.
+  Use ONLY when check_data_availability (or data_availability state) reports bars are missing.
+  Set priority=3 and make any calc_* / get_market_bars calls depend on it.
 
 FUNDAMENTAL DATA FUNCTIONS:
 - get_company_fundamentals: params={{symbol}}
@@ -85,6 +95,20 @@ ANALYST & SIGNAL FUNCTIONS:
   Recent signals from StrategyDAO (strategy_name is required)
 - get_actionable_signals: params={{min_confidence=0.6}}
   Returns high-confidence signals across all strategies (current/live)
+
+SELECTION PRIORITY — check this BEFORE choosing compute functions:
+- Rule 0: For any LIVE indicator query, FIRST call `get_precomputed_indicators` with
+  params={symbol, start_date=<today - 2 hours>, end_date=<now>, timeframe="1Min"}.
+  If it returns a non-empty result, READ the indicator values from that result.
+  Only call calc_momentum / calc_volatility_bands / calc_volume_flow as a fallback
+  when pre-computed data is absent (empty result or stale > 5 min).
+  mean_reversion_analyze always runs fresh (it produces the trade recommendation).
+- Rule 1 (historical queries): If the DATA AVAILABILITY REPORT in the user message
+  says bars_available=False for the requested date range, include:
+    (a) check_data_availability (qa_001, priority=1)
+    (b) fetch_historical_data   (qa_002, priority=3, depends_on=[qa_001])
+  then make your indicator/bar calls depend on qa_002.
+  If bars_available=True, skip both — data is already present.
 
 SELECTION RULES:
 - For momentum/RSI queries: include calc_momentum
@@ -157,12 +181,64 @@ def quant_reasoning_node(state: dict) -> dict:
         pm_notes: str = state.get("pm_review_notes") or ""
         review_iteration: int = state.get("review_iteration") or 0
 
+        # ── DATA AVAILABILITY BLOCK ───────────────────────────────────────────
+        da: dict = state.get("data_availability") or {}
+        indicators_avail: bool = bool(da.get("indicators_available", False))
+        bars_avail: bool = bool(da.get("bars_available", False))
+        trades_avail: bool = bool(da.get("trades_available", False))
+        ind_rows: int = int(da.get("indicator_rows", 0))
+        bar_count: int = int(da.get("bar_count", 0))
+        trade_count: int = int(da.get("trade_count", 0))
+        latest_ind_ts: str = da.get("latest_indicator_ts") or "unknown"
+        latest_bar_ts: str = da.get("latest_bar_ts") or "unknown"
+
+        if indicators_avail:
+            avail_guidance = (
+                "✅ PRE-COMPUTED INDICATORS ARE AVAILABLE.\n"
+                f"   {ind_rows} indicator rows exist for {symbol}/1Min (latest: {latest_ind_ts}).\n"
+                "   → You MUST include get_precomputed_indicators as task qa_001 with\n"
+                "     params={symbol, start_date=<today minus 2 hours>, end_date=<now>, timeframe=\"1Min\"}.\n"
+                "   → Only add calc_* functions if the query explicitly needs something\n"
+                "     NOT in the pre-computed set (e.g. candlestick patterns, mean_reversion_analyze).\n"
+                "   → mean_reversion_analyze ALWAYS runs fresh (it generates the trade recommendation)."
+            )
+        elif bars_avail:
+            avail_guidance = (
+                "⚠️  BARS ARE AVAILABLE BUT INDICATORS ARE NOT PRE-COMPUTED.\n"
+                f"   {bar_count} market bars found (latest: {latest_bar_ts}).\n"
+                "   → Do NOT call get_precomputed_indicators — it will return empty.\n"
+                "   → Use calc_momentum / calc_volatility_bands / calc_volume_flow directly.\n"
+                "   → mean_reversion_analyze is available (it fetches bars internally)."
+            )
+        else:
+            avail_guidance = (
+                "❌ NO LOCAL DATA FOUND for this symbol.\n"
+                "   → Do NOT call get_precomputed_indicators or get_market_bars — both will return empty.\n"
+                "   → You may still call mean_reversion_analyze (live mode fetches from broker API).\n"
+                "   → For other indicators, note in your reasoning_summary that data is unavailable\n"
+                "     and request data ingestion before re-analysis."
+            )
+
+        trades_note = (
+            f"   Trade data: {trade_count} trades in last 24 h — available for get_latest_price."
+            if trades_avail
+            else "   Trade data: NOT available — skip get_latest_price unless essential."
+        )
+
+        data_avail_section = (
+            f"\nDATA AVAILABILITY REPORT (verified {da.get('checked_at', 'now')}):\n"
+            f"{avail_guidance}\n{trades_note}\n"
+        )
+        # ── END DATA AVAILABILITY BLOCK ───────────────────────────────────────
+
         user_message = (
             f"Analysis request: {query}\n"
             f"Symbol: {symbol or 'Not specified'}\n"
-            f"Intent: {intent}\n\n"
+            f"Intent: {intent}\n"
+            f"{data_avail_section}\n"
             f"Plan the minimum set of indicator functions needed to answer this request."
         )
+
 
         prior_turns = state.get("prior_turns") or []
         if prior_turns:

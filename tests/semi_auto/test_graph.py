@@ -153,9 +153,9 @@ class TestGraphState:
 class TestRegistry:
     """Function registry import and structure."""
 
-    def test_registry_has_38_functions(self):
+    def test_registry_has_37_functions(self):
         from src.semi_auto.registry.functions import FUNCTION_REGISTRY
-        assert len(FUNCTION_REGISTRY) == 38
+        assert len(FUNCTION_REGISTRY) == 37
 
     def test_registry_schema_has_all_keys(self):
         from src.semi_auto.registry.functions import get_registry_schema, FUNCTION_REGISTRY
@@ -182,7 +182,7 @@ class TestRegistry:
         from src.semi_auto.registry.functions import FUNCTION_REGISTRY
         portfolio_fns = [
             "get_portfolio_status", "get_positions_summary",
-            "check_portfolio_health", "fetch_historical_data",
+            "check_portfolio_health",
             "check_data_availability",
         ]
         for fn_name in portfolio_fns:
@@ -193,6 +193,7 @@ class TestRegistry:
         quant_fns = [
             "calc_momentum", "calc_volatility_bands", "calc_volume_flow",
             "analyze_candle_structure", "mean_reversion_analyze",
+            "check_data_availability", "fetch_historical_data",
         ]
         for fn_name in quant_fns:
             assert fn_name in FUNCTION_REGISTRY, f"Missing: {fn_name}"

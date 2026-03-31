@@ -36,6 +36,7 @@ BACKTEST CORE FUNCTIONS:
 - backtest_strategy: params={{symbol, start_date, end_date, strategy, initial_capital=100000.0}}
   Run the actual backtest. Priority=2 if depends on fetch_historical_data, else 1.
   strategy options: "buy-and-hold", "mean-reversion", "momentum", "value"
+  ⚠ EXACT strings only — never invent variants like "momentum_SMA_50_200" or "mean_reversion_zscore".
   DEFAULT: For workflow A, use "mean-reversion" unless user explicitly requests another strategy.
 
 MARKET DATA FUNCTIONS:
@@ -127,11 +128,43 @@ def backtester_reasoning_node(state: dict) -> dict:
         pm_notes: str = state.get("pm_review_notes") or ""
         review_iteration: int = state.get("review_iteration") or 0
 
+        # ── Data availability pre-check results ──────────────────────────────
+        data_avail = state.get("data_availability") or {}
+        data_avail_section = ""
+        if data_avail:
+            symbol_da = data_avail.get("symbol", "N/A")
+            bars_avail = data_avail.get("bars_available", False)
+            bar_count = data_avail.get("bar_count", 0)
+            latest_bar_ts = data_avail.get("latest_bar_ts", "N/A")
+            trades_avail = data_avail.get("trades_available", False)
+            trade_count = data_avail.get("trade_count", 0)
+
+            if bars_avail:
+                data_avail_section = (
+                    f"\nDATA AVAILABILITY REPORT (symbol={symbol_da}):\n"
+                    f"  bars_available=True  ({bar_count} bars in DB, latest={latest_bar_ts})\n"
+                    f"  trades_available={trades_avail}  ({trade_count} trades)\n"
+                    f"\nDATA GUIDANCE:\n"
+                    f"  - Bars ARE already in the DB. DO NOT include fetch_historical_data.\n"
+                    f"  - check_data_availability (bt_001) is still required to confirm date-range coverage.\n"
+                    f"  - Recommended sequence: check_data_availability → backtest_strategy.\n"
+                )
+            else:
+                data_avail_section = (
+                    f"\nDATA AVAILABILITY REPORT (symbol={symbol_da}):\n"
+                    f"  bars_available=False  (no bars found in DB)\n"
+                    f"  trades_available={trades_avail}  ({trade_count} trades)\n"
+                    f"\nDATA GUIDANCE:\n"
+                    f"  - No bars in DB. MUST include fetch_historical_data (bt_002, priority=3).\n"
+                    f"  - Required sequence: check_data_availability → fetch_historical_data → backtest_strategy.\n"
+                )
+
         user_message = (
             f"Backtest request: {query}\n"
             f"Symbol: {symbol or 'Not specified'}\n"
             f"Workflow type: {bt_workflow} (A=strategy backtest, B=snapshot worth, C=swap positions)\n"
-            f"Default date range: {thirty_days_ago} to {today}\n\n"
+            f"Default date range: {thirty_days_ago} to {today}\n"
+            f"{data_avail_section}\n"
             f"Plan the exact function calls needed. Include check_data_availability first."
         )
 

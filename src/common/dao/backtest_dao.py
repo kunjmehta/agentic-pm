@@ -111,12 +111,25 @@ class BacktestDAO(BaseDAO):
                      sharpe_ratio, max_drawdown_pct, win_rate, profit_factor,
                      total_trades, winning_trades, losing_trades, avg_win, avg_loss)
         """
+        def _sanitize(v):
+            """Replace non-finite floats (inf, -inf, nan) with None so DuckDB
+            DECIMAL columns never receive an uncastable value."""
+            if v is None:
+                return None
+            try:
+                import math
+                if isinstance(v, float) and not math.isfinite(v):
+                    return None
+            except Exception:
+                pass
+            return v
+
         set_clauses = []
         params = []
 
         for key, value in metrics.items():
             set_clauses.append(f"{key} = ?")
-            params.append(value)
+            params.append(_sanitize(value))
 
         if set_clauses:
             query = f"""

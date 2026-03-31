@@ -43,20 +43,29 @@ class QueryIntent(BaseModel):
     agents: List[Literal["portfolio", "quant", "backtester"]] = Field(
         description=(
             "Which agents should handle this query. "
-            "['portfolio'] for status/health, "
-            "['quant'] for technical analysis only, "
-            "['backtester'] for backtesting only, "
-            "['quant', 'backtester'] for combined analysis+backtest, "
-            "['portfolio', 'quant', 'backtester'] for full analysis."
+            "['portfolio'] — ONLY for pure status/health/holdings queries (no stock decision). "
+            "['quant'] — technical analysis / indicators only (user already decided to buy). "
+            "['backtester'] — historical simulation only. "
+            "['portfolio', 'quant'] — buy/sell/hold decision on a specific stock "
+            "  (need both current position context AND quant signals). "
+            "['quant', 'backtester'] — technical analysis + backtest. "
+            "['portfolio', 'quant', 'backtester'] — full comprehensive review."
         )
     )
     intent: Literal["portfolio", "quant", "backtest", "full_analysis"] = Field(
         description=(
             "High-level routing intent. "
-            "'portfolio'=status/holdings/health, "
-            "'quant'=technical indicators/signals, "
-            "'backtest'=historical simulation/strategy test, "
-            "'full_analysis'=comprehensive multi-agent review."
+            "'portfolio' — ONLY for pure portfolio status queries: "
+            "  'what are my holdings', 'show me my positions', 'portfolio health check'. "
+            "  Do NOT use for buy/sell/hold decisions. "
+            "'quant' — for technical indicator/signal analysis on a stock "
+            "  when no buy/sell decision is asked ('analyse AAPL RSI'). "
+            "'backtest' — for historical strategy simulation. "
+            "'full_analysis' — for ANY buy/sell/hold decision on a stock "
+            "  ('should I buy VZ', 'is AAPL a good buy', 'should I sell MSFT today', "
+            "  'is now a good time to buy Tesla', 'recommend a trade for NVDA'). "
+            "  Also use for: 'full analysis of X', 'comprehensive review', "
+            "  queries combining portfolio context + quant signals."
         )
     )
     bt_workflow: Optional[Literal["A", "B", "C"]] = Field(
@@ -109,8 +118,22 @@ _SYSTEM_PROMPT = (
     "Given the user query, extract a structured QueryIntent. "
     "Be precise about dates (YYYY-MM-DD), tickers (uppercase), and strategy names. "
     "When the user mentions a company name without a ticker, extract the company name "
-    "and infer the ticker if it is well-known (e.g. Apple → AAPL). "
-    "Today's date is {today}."
+    "and infer the ticker if it is well-known (e.g. Apple → AAPL, Verizon → VZ, "
+    "Tesla → TSLA, Microsoft → MSFT, Google → GOOGL, Amazon → AMZN, "
+    "Meta → META, Netflix → NFLX, Nvidia → NVDA). "
+    "Today's date is {today}.\n\n"
+    "INTENT ROUTING RULES (critical — follow exactly):\n"
+    "- 'portfolio' ONLY for pure status queries: 'what are my positions', "
+    "  'show portfolio health', 'what is my equity'. NO stock-specific decisions.\n"
+    "- 'full_analysis' for ANY buy/sell/hold/trade decision on a specific stock:\n"
+    "  Examples: 'should I buy VZ today', 'is AAPL a good buy', "
+    "  'should I sell my Tesla', 'recommend a trade for MSFT', "
+    "  'is now a good time to get into NVDA', 'should I add to my Amazon position'.\n"
+    "- 'quant' ONLY when the user asks for a technical indicator or signal "
+    "  WITHOUT a buy/sell decision: 'analyse AAPL RSI', 'show MACD for TSLA'.\n"
+    "- 'backtest' for explicit simulation/historical strategy requests.\n"
+    "For 'full_analysis' on a stock decision, always set "
+    "agents=['portfolio', 'quant'] (add 'backtester' only if backtest is also requested)."
 )
 
 
@@ -198,6 +221,15 @@ _QUANT_KEYWORDS = {
 _PORT_KEYWORDS = {
     "portfolio", "status", "positions", "health", "equity", "cash", "holdings",
 }
+# Buy/sell/hold decision keywords → full_analysis (portfolio context + quant signals)
+_DECISION_KEYWORDS = {
+    "should i buy", "should i sell", "should i add", "should i get",
+    "good buy", "good time to buy", "good time to sell", "right time to buy",
+    "is it worth buying", "worth buying", "worth getting",
+    "recommend a trade", "trade recommendation", "entry point",
+    "buy signal", "sell signal", "should i invest", "is now a good time",
+    "should i hold", "should i exit", "should i take profit",
+}
 _TICKER_STOPS = {
     "I", "A", "AN", "THE", "AND", "OR", "FOR", "IN", "ON", "AT", "TO",
     "BY", "OF", "IF", "MY", "IT", "IS", "BE", "DO", "NO", "UP", "US",
@@ -223,8 +255,15 @@ def _keyword_fallback(query: str, today: str, default_start: str) -> QueryIntent
     has_bt = any(kw in ql for kw in _BT_KEYWORDS)
     has_quant = any(kw in ql for kw in _QUANT_KEYWORDS)
     has_port = any(kw in ql for kw in _PORT_KEYWORDS)
+    has_decision = any(kw in ql for kw in _DECISION_KEYWORDS)
 
-    if has_bt and has_quant:
+    if has_decision:
+        # Buy/sell/hold decisions always need portfolio context + quant signals
+        intent = "full_analysis"
+        agents = ["portfolio", "quant"]
+        if has_bt:
+            agents.append("backtester")
+    elif has_bt and has_quant:
         intent, agents = "full_analysis", ["quant", "backtester"]
     elif has_bt:
         intent, agents = "backtest", ["backtester"]

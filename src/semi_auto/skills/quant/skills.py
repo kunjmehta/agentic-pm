@@ -447,6 +447,7 @@ class MeanReversionSkill:
         threshold: float = 2.0,
         ma_period: int = 20,
         lookback: int = 60,
+        sr_lookback: int = 60,
     ) -> Dict:
         """Run mean-reversion analysis on a pre-fetched DataFrame.
 
@@ -460,6 +461,8 @@ class MeanReversionSkill:
             threshold: Z-score entry threshold. Defaults to 2.0.
             ma_period: Moving average period. Defaults to 20.
             lookback: Number of bars to use for statistics. Defaults to 60.
+            sr_lookback: Bars to scan for support/resistance pivots. Defaults
+                to 60 (1 hour of 1Min data).
 
         Returns:
             Analysis dict with statistics, moving_averages, signals,
@@ -472,7 +475,7 @@ class MeanReversionSkill:
         stats = self._calc_statistics(df, lookback)
         ma = self._calc_moving_averages(df)
         bands = self._calc_bollinger_bands(df, ma_period, lookback)
-        levels = self._calc_support_resistance(df)
+        levels = self._calc_support_resistance(df, sr_lookback=sr_lookback)
         levels.update({"upper_band": bands.get("upper_band"), "lower_band": bands.get("lower_band")})
 
         if stats:
@@ -502,7 +505,7 @@ class MeanReversionSkill:
             "signals": signals,
             "levels": levels,
             "trade_recommendation": recommendation,
-            "parameters": {"lookback": lookback, "threshold": threshold, "ma_period": ma_period},
+            "parameters": {"lookback": lookback, "threshold": threshold, "ma_period": ma_period, "sr_lookback": sr_lookback},
         }
 
     # ------------------------------------------------------------------
@@ -515,7 +518,8 @@ class MeanReversionSkill:
         lookback: int = 60,
         threshold: float = 2.0,
         ma_period: int = 20,
-        timeframe: str = "1Day",
+        timeframe: str = "1Min",
+        sr_lookback: int = 60,
     ) -> Dict:
         """Fetch recent bars and run the full mean-reversion analysis.
 
@@ -524,7 +528,8 @@ class MeanReversionSkill:
             lookback: Number of bars for statistics. Defaults to 60.
             threshold: Z-score entry threshold. Defaults to 2.0.
             ma_period: Moving average period. Defaults to 20.
-            timeframe: Bar timeframe. Defaults to ``"1Day"``.
+            timeframe: Bar timeframe. Defaults to ``"1Min"``.
+            sr_lookback: Bars to scan for support/resistance pivots. Defaults to 60.
 
         Returns:
             Full analysis dict (same as ``analyze_bars`` plus symbol /
@@ -545,7 +550,7 @@ class MeanReversionSkill:
         if df is None or df.empty:
             return {"error": f"No data available for {symbol}", "symbol": symbol}
 
-        result = self.analyze_bars(df, threshold=threshold, ma_period=ma_period, lookback=lookback)
+        result = self.analyze_bars(df, threshold=threshold, ma_period=ma_period, lookback=lookback, sr_lookback=sr_lookback)
         result["symbol"] = symbol.upper()
         result["timestamp"] = datetime.now().isoformat()
         return result
@@ -634,18 +639,23 @@ class MeanReversionSkill:
             "lower_band": round(float((sma - std * 2).iloc[-1]), 2),
         }
 
-    def _calc_support_resistance(self, df: pd.DataFrame) -> Dict:
+    def _calc_support_resistance(self, df: pd.DataFrame, sr_lookback: int = 60) -> Dict:
         """Calculate recent support and resistance levels.
 
         Args:
             df: Price DataFrame.
+            sr_lookback: Number of bars to scan for high/low pivots. Defaults to
+                60, which equals 1 hour of 1Min data — wide enough to produce
+                meaningful stop-loss / take-profit prices without being hit by
+                normal intraday tick noise (the old default of 20 bars was only
+                20 minutes and caused very tight stops).
 
         Returns:
             Dict with resistance and support, or ``{}`` if insufficient data.
         """
-        if df.empty or len(df) < 20:
+        if df.empty or len(df) < sr_lookback:
             return {}
-        rec = df.tail(20)
+        rec = df.tail(sr_lookback)
         return {
             "resistance": round(float(rec["high"].max()), 2),
             "support": round(float(rec["low"].min()), 2),

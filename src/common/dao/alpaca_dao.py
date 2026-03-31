@@ -369,6 +369,89 @@ class AlpacaDAO(BaseDAO):
         result = self.fetch_one(query, (symbol, start, end))
         return result['count'] if result else 0
 
+    # ========================================================================
+    # Recent Trades (live_trades ∪ historical_trades)
+    # ========================================================================
+
+    def get_recent_trades(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Retrieve trades from both live_trades and historical_trades.
+
+        Unions in-flight trade data (live_trades staging table) with the
+        persistent historical archive for the given time window. Deduplicates
+        on (symbol, timestamp, trade_id) so archived rows are not double-counted
+        after an archival run.
+
+        Args:
+            symbol: Stock ticker symbol
+            start: Start timestamp
+            end: End timestamp
+            limit: Optional maximum number of trades to return (applied after sort)
+
+        Returns:
+            DataFrame with trade data ordered by timestamp ASC
+        """
+        base_query = """
+            SELECT symbol, timestamp, trade_id, price, size,
+                   exchange, conditions, tape
+            FROM (
+                SELECT symbol, timestamp, trade_id, price, size,
+                       exchange, conditions, tape
+                FROM live_trades
+                WHERE symbol = ?
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+                UNION ALL
+                SELECT symbol, timestamp, trade_id, price, size,
+                       exchange, conditions, tape
+                FROM historical_trades
+                WHERE symbol = ?
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+            ) combined
+            GROUP BY symbol, timestamp, trade_id, price, size, exchange, conditions, tape
+            ORDER BY timestamp ASC
+        """
+        params = (symbol, start, end, symbol, start, end)
+
+        if limit is not None:
+            try:
+                limit_int = int(limit)
+            except (TypeError, ValueError):
+                raise ValueError("limit must be an integer")
+            if limit_int > 0:
+                base_query += f" LIMIT {limit_int}"
+
+        return self.fetch_df(base_query, params)
+
+    def get_recent_trade_count(self, symbol: str, start: datetime, end: datetime) -> int:
+        """Get deduplicated trade count across live_trades and historical_trades.
+
+        Args:
+            symbol: Stock ticker symbol
+            start: Start timestamp
+            end: End timestamp
+
+        Returns:
+            Number of distinct trades in the time range
+        """
+        query = """
+            SELECT COUNT(*) as count FROM (
+                SELECT trade_id FROM live_trades
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+                UNION
+                SELECT trade_id FROM historical_trades
+                WHERE symbol = ? AND timestamp >= ? AND timestamp <= ?
+            ) deduped
+        """
+        result = self.fetch_one(query, (symbol, start, end, symbol, start, end))
+        return result['count'] if result else 0
+
     def calculate_intraday_stats(self, symbol: str, date: date) -> dict:
         """Calculate intraday statistics from 1-minute bars.
 
