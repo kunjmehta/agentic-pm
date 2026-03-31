@@ -20,10 +20,43 @@
   },
   "database": {
     "path": "data/portfolio.duckdb",
+    "market_data_path": "data/market_data.duckdb",
+    "portfolio_path": "data/portfolio.duckdb",
+    "analysis_path": "data/analysis.duckdb",
+    "backtest_path": "data/backtest.duckdb",
     "alpha_vantage_schema": "config/schema/alpha_vantage_schema.sql",
     "alpaca_schema": "config/schema/alpaca_schema.sql",
     "auto_persist_stream": true,
     "auto_persist_skills": true
+  },
+  "data_stream": {
+    "enabled": true,
+    "auto_start": true,
+    "feed": "iex",
+    "max_retries": 3,
+    "retry_delay": 5
+  },
+  "cache": {
+    "enabled": true,
+    "batch_interval_minutes": 5,
+    "max_size": 100000
+  },
+  "etl": {
+    "enabled": true,
+    "mode": "auto-run",
+    "description": "Indicators computed automatically when bars are saved (no separate scheduler)",
+    "timeframes": ["1Min", "1Hour", "1Day"],
+    "lookback_days": 60
+  },
+  "archival": {
+    "enabled": true,
+    "live_trades_retention_hours": 24,
+    "schedule_cron": "0 0 * * *"
+  },
+  "pagination": {
+    "bars_chunk_days": 7,
+    "trades_page_limit": 10000,
+    "trades_max_total": null
   },
   "sandbox_mode": true
 }

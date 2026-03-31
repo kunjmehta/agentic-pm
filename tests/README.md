@@ -6,9 +6,20 @@ This directory contains comprehensive tests for the agentic-trader project.
 
 ```
 tests/
-├── conftest.py                              # Shared fixtures
+├── conftest.py                              # Shared fixtures and configuration
+├── pytest.ini                               # Pytest configuration
 ├── dao/
-│   └── test_strategy_dao.py                 # StrategyDAO tests
+│   ├── test_strategy_dao.py                 # StrategyDAO tests
+│   └── test_multi_database.py              # Multi-database separation tests (NEW)
+├── data_gatherer/
+│   └── test_trade_cache.py                 # TradeCache tests (NEW)
+├── etl/
+│   └── test_indicators_engine.py           # IndicatorsEngine tests (NEW)
+├── integration/
+│   ├── test_etl_pipeline.py                # ETL integration tests (NEW)
+│   └── test_pagination.py                  # Pagination integration tests (NEW)
+├── performance/
+│   └── test_cache_throughput.py            # Cache performance tests (NEW)
 ├── agents/
 │   ├── test_middleware.py                   # Middleware tests
 │   ├── test_quant_tools.py                  # Quant tools tests
@@ -71,17 +82,81 @@ pytest -m "not slow"
 pytest -m integration
 ```
 
+### Run Only Performance Tests
+```bash
+pytest -m performance
+```
+
+### Run Only Unit Tests
+```bash
+pytest -m unit
+```
+
+### Run Tests by Directory
+```bash
+pytest tests/etl/                    # ETL pipeline tests
+pytest tests/data_gatherer/          # Data gathering tests
+pytest tests/integration/            # Integration tests
+pytest tests/performance/            # Performance tests
+```
+
 ## Test Markers
 
 Tests are marked with custom markers:
 
-- `@pytest.mark.slow` - Slow-running tests
+- `@pytest.mark.unit` - Unit tests (isolated component tests)
 - `@pytest.mark.integration` - Integration tests requiring multiple components
+- `@pytest.mark.performance` - Performance tests (may be slow, test throughput/speed)
+- `@pytest.mark.slow` - Slow-running tests
 - `@pytest.mark.requires_api` - Tests requiring API keys (usually skipped)
 
 ## Test Coverage
 
 Current test coverage by module:
+
+### Ingestion Pipeline Redesign (NEW)
+
+#### ETL Pipeline
+- ✅ `IndicatorsEngine` - Full unit test coverage
+  - Momentum indicators (MACD, RSI)
+  - Volatility indicators (Bollinger Bands)
+  - Volume indicators (OBV, volume trend)
+  - Candlestick patterns (engulfing, doji, hammer, hanging man)
+  - Mean reversion (Z-score, VWAP, percentile)
+  - Edge cases (empty data, insufficient data, NaN values)
+
+#### Cache Layer
+- ✅ `TradeCache` - Full unit test coverage
+  - Time-based flush triggers
+  - Size-based flush triggers
+  - Thread safety (concurrent adds, concurrent flushes)
+  - Statistics and monitoring
+  - Force flush
+  - Singleton pattern
+  - Edge cases
+
+#### Multi-Database Architecture
+- ✅ `BaseDAO` multi-database routing
+- ✅ Database isolation (writes to different files)
+- ✅ DAO database assignment (AlpacaDAO → market_data.duckdb, etc.)
+  - Concurrent writes to different databases
+  - Schema initialization
+  - Override mechanisms
+
+#### Integration Tests
+- ✅ ETL pipeline end-to-end (fetch → compute → save)
+- ✅ Multi-timeframe processing
+- ✅ Watchlist batch processing
+- ✅ Indicator accuracy verification
+- ✅ Rolling window calculations
+- ✅ Pagination (chunking, rate limiting, multi-page fetching)
+
+#### Performance Tests
+- ✅ Cache throughput (single-thread: >10K trades/sec, multi-thread: >5K trades/sec)
+- ✅ Memory efficiency
+- ✅ Flush performance
+- ✅ Sustained high-volume load
+- ✅ Realistic trading day simulation
 
 ### DAO Layer
 - ✅ `StrategyDAO` - 100% coverage

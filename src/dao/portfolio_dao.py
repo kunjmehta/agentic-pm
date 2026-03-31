@@ -23,21 +23,22 @@ logger = get_logger(__name__)
 class PortfolioDAO(BaseDAO):
     """Data access layer for portfolio management and observability."""
 
-    def __init__(self, db_path: str = "data/portfolio.duckdb"):
+    def __init__(self, db_path: Optional[str] = None):
         """Initialize PortfolioDAO.
 
         Args:
-            db_path: Path to DuckDB database file
+            db_path: Path to DuckDB database file. If None, uses portfolio.duckdb.
         """
-        super().__init__(db_path)
+        super().__init__(db_path=db_path, db_type='portfolio')
         self._initialize_schema()
 
     def _initialize_schema(self):
         """Initialize portfolio schema from schema file."""
         schema_path = Path("config/schema/portfolio_schema.sql")
         if schema_path.exists():
-            self.execute_schema_file(str(schema_path))
-            logger.info("Portfolio schema initialized")
+            # Only execute if portfolio_snapshots table doesn't exist
+            self.execute_schema_file(str(schema_path), check_table="portfolio_snapshots")
+            logger.debug("Portfolio schema check completed")
         else:
             logger.warning(f"Schema file not found: {schema_path}")
 

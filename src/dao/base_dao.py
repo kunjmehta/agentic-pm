@@ -31,15 +31,35 @@ class BaseDAO:
         _conn: DuckDB connection instance (singleton per DAO instance)
     """
 
-    def __init__(self, db_path: Optional[str] = None):
-        """Initialize DAO with database path.
+    # Database file mapping by concern
+    DB_FILE_MAP = {
+        'market': 'data/market_data.duckdb',
+        'portfolio': 'data/portfolio.duckdb',
+        'analysis': 'data/analysis.duckdb',
+        'backtest': 'data/backtest.duckdb'
+    }
+
+    def __init__(self, db_path: Optional[str] = None, db_type: Optional[str] = None):
+        """Initialize DAO with database path or type.
 
         Args:
-            db_path: Path to DuckDB database file. If None, uses path from config.
+            db_path: Explicit path to DuckDB database file. Overrides db_type if provided.
                      Special value ":memory:" creates in-memory database.
+            db_type: Database type identifier ('market', 'portfolio', 'analysis', 'backtest').
+                     Used to look up path from DB_FILE_MAP if db_path is None.
+
+        Priority order:
+            1. Explicit db_path parameter
+            2. db_type parameter (looks up in DB_FILE_MAP)
+            3. Config file setting ("database.path")
+            4. Default fallback ("data/portfolio.duckdb")
         """
         if db_path is None:
-            db_path = config.get("database.path", default="data/portfolio.duckdb")
+            if db_type:
+                db_path = self.DB_FILE_MAP.get(db_type, 'data/portfolio.duckdb')
+                logger.debug(f"Using db_type='{db_type}' → {db_path}")
+            else:
+                db_path = config.get("database.path", default="data/portfolio.duckdb")
 
         # Handle in-memory database as special case
         if db_path == ":memory:":
@@ -51,11 +71,14 @@ class BaseDAO:
 
             self.db_path = db_path
 
-            # Ensure database directory exists (not needed for in-memory)
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            # Ensure database directory exists (only if not already there)
+            db_dir = Path(self.db_path).parent
+            if not db_dir.exists():
+                db_dir.mkdir(parents=True, exist_ok=True)
+                logger.debug(f"Created database directory: {db_dir}")
 
         self._conn: Optional[duckdb.DuckDBPyConnection] = None
-        logger.info(f"DAO initialized with database: {self.db_path}")
+        logger.debug(f"DAO initialized with database: {self.db_path}")
 
     def connect(self) -> duckdb.DuckDBPyConnection:
         """Get or create database connection.
@@ -351,15 +374,22 @@ class BaseDAO:
         result = self.fetch_one(query, (table_name,))
         return result['count'] > 0 if result else False
 
-    def execute_schema_file(self, schema_file: str) -> None:
+    def execute_schema_file(self, schema_file: str, check_table: Optional[str] = None) -> None:
         """Execute SQL commands from schema file.
 
         Args:
             schema_file: Path to SQL schema file
+            check_table: Optional table name to check before executing.
+                        If provided and table exists, schema execution is skipped.
 
         Raises:
             Exception: If file not found or execution fails
         """
+        # Skip if check_table exists
+        if check_table and self.table_exists(check_table):
+            logger.debug(f"Schema already initialized - table '{check_table}' exists, skipping {schema_file}")
+            return
+
         schema_path = Path(schema_file)
         if not schema_path.is_absolute():
             schema_path = project_root / schema_file

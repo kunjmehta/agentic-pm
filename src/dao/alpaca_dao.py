@@ -34,17 +34,18 @@ class AlpacaDAO(BaseDAO):
         """Initialize AlpacaDAO.
 
         Args:
-            db_path: Path to DuckDB database. If None, uses config default.
+            db_path: Path to DuckDB database. If None, uses market_data.duckdb.
         """
-        super().__init__(db_path)
+        super().__init__(db_path=db_path, db_type='market')
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
         """Ensure Alpaca schema exists in database."""
         schema_file = "config/schema/alpaca_schema.sql"
         try:
-            self.execute_schema_file(schema_file)
-            logger.info("Alpaca schema initialized")
+            # Only execute if market_bars table doesn't exist
+            self.execute_schema_file(schema_file, check_table="market_bars")
+            logger.debug("Alpaca schema check completed")
         except Exception as e:
             logger.warning(f"Schema initialization skipped: {str(e)}")
 
@@ -301,7 +302,7 @@ class AlpacaDAO(BaseDAO):
             df = df[[col for col in table_cols if col in df.columns]]
 
             rows = self.upsert_df('historical_trades', df,
-                                 key_columns=['symbol', 'timestamp'])
+                                 key_columns=['symbol', 'timestamp', 'trade_id'])
             logger.info(f"Successfully saved {rows} trades")
             return rows
 
@@ -346,8 +347,7 @@ class AlpacaDAO(BaseDAO):
             if limit_int > 0:
                 query += f" LIMIT {limit_int}"
 
-        return self.fetch_df(query, (symbol, start, end))  
-
+        return self.fetch_df(query, (symbol, start, end))
 
     def get_trade_count(self, symbol: str, start: datetime, end: datetime) -> int:
         """Get count of trades for a symbol in a time range.
@@ -398,6 +398,182 @@ class AlpacaDAO(BaseDAO):
             GROUP BY symbol
         """
         return self.fetch_one(query, (symbol, date))
+
+    # ========================================================================
+    # Live Trades Operations (Staging Table)
+    # ========================================================================
+
+    def save_live_trades(self, df: pd.DataFrame) -> int:
+        """Save live trades to staging table.
+
+        Args:
+            df: DataFrame with columns: symbol, timestamp, trade_id, price,
+                size, exchange, conditions, tape
+
+        Returns:
+            Number of rows saved
+
+        Raises:
+            Exception: If save fails
+        """
+        if df.empty:
+            logger.info("No live trades to save")
+            return 0
+
+        logger.info(f"Saving {len(df)} live trades to staging table")
+
+        try:
+            # Ensure required columns exist
+            required_cols = ['symbol', 'timestamp', 'price', 'size']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
+
+            # Convert timestamp to datetime if needed
+            df = df.copy()
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+            # Rename 'id' column to 'trade_id' if it exists
+            if 'id' in df.columns and 'trade_id' not in df.columns:
+                df = df.rename(columns={'id': 'trade_id'})
+
+            # Select only columns that exist in the table
+            table_cols = ['symbol', 'timestamp', 'trade_id', 'price', 'size',
+                         'exchange', 'conditions', 'tape']
+            df = df[[col for col in table_cols if col in df.columns]]
+
+            rows = self.upsert_df('live_trades', df,
+                                 key_columns=['symbol', 'timestamp', 'trade_id'])
+            logger.info(f"Successfully saved {rows} live trades")
+            return rows
+
+        except Exception as e:
+            error_msg = f"Failed to save live trades: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
+    def archive_live_trades(self, cutoff_time: datetime) -> int:
+        """Archive live trades to historical_trades table.
+
+        Moves trades older than cutoff_time from live_trades to historical_trades,
+        then deletes them from live_trades.
+
+        Args:
+            cutoff_time: Timestamp threshold - trades ingested before this are archived
+
+        Returns:
+            Number of trades archived
+
+        Raises:
+            Exception: If archive operation fails
+        """
+        logger.info(f"Archiving live trades older than {cutoff_time}")
+
+        try:
+            with self.transaction():
+                # Insert into historical_trades
+                insert_query = """
+                    INSERT INTO historical_trades
+                    (symbol, timestamp, trade_id, price, size, exchange,
+                     conditions, tape, source, archived_at)
+                    SELECT symbol, timestamp, trade_id, price, size, exchange,
+                           conditions, tape, 'stream' as source, CURRENT_TIMESTAMP
+                    FROM live_trades
+                    WHERE ingested_at < ?
+                """
+                self.execute(insert_query, (cutoff_time,))
+
+                # Delete from live_trades
+                delete_query = "DELETE FROM live_trades WHERE ingested_at < ?"
+                self.execute(delete_query, (cutoff_time,))
+
+                # Get count of archived trades
+                count_query = "SELECT changes() as count"
+                result = self.fetch_one(count_query)
+                count = result['count'] if result else 0
+
+                logger.info(f"Successfully archived {count} live trades")
+                return count
+
+        except Exception as e:
+            error_msg = f"Failed to archive live trades: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
+    # ========================================================================
+    # Computed Indicators Operations
+    # ========================================================================
+
+    def save_computed_indicators(self, df: pd.DataFrame) -> int:
+        """Save pre-computed technical indicators.
+
+        Args:
+            df: DataFrame with columns: symbol, timestamp, timeframe, and indicator columns
+                (macd_value, macd_signal, rsi, bb_upper, bb_middle, bb_lower, etc.)
+
+        Returns:
+            Number of rows saved
+
+        Raises:
+            Exception: If save fails
+        """
+        if df.empty:
+            logger.info("No computed indicators to save")
+            return 0
+
+        logger.info(f"Saving {len(df)} computed indicator rows")
+
+        try:
+            # Ensure required columns exist
+            required_cols = ['symbol', 'timestamp', 'timeframe']
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"Missing required columns: {missing_cols}")
+
+            # Convert timestamp to datetime if needed
+            df = df.copy()
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+            rows = self.upsert_df('computed_indicators', df,
+                                 key_columns=['symbol', 'timestamp', 'timeframe'])
+            logger.info(f"Successfully saved {rows} computed indicator rows")
+            return rows
+
+        except Exception as e:
+            error_msg = f"Failed to save computed indicators: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
+    def get_computed_indicators(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: str = "1Min"
+    ) -> pd.DataFrame:
+        """Retrieve pre-computed technical indicators.
+
+        Args:
+            symbol: Stock ticker symbol
+            start: Start timestamp
+            end: End timestamp
+            timeframe: Timeframe string ('1Min', '1Hour', '1Day')
+
+        Returns:
+            DataFrame with indicator data
+        """
+        query = """
+            SELECT * FROM computed_indicators
+            WHERE symbol = ?
+              AND timeframe = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC
+        """
+
+        return self.fetch_df(query, (symbol, timeframe, start, end))
 
 
 if __name__ == "__main__":

@@ -23,22 +23,22 @@ logger = get_logger(__name__)
 class AnalystDAO(BaseDAO):
     """Data access layer for end-of-day analyst summaries."""
 
-    def __init__(self, db_path: str = "data/portfolio.duckdb"):
+    def __init__(self, db_path: Optional[str] = None):
         """Initialize AnalystDAO.
 
         Args:
-            db_path: Path to DuckDB database file
+            db_path: Path to DuckDB database file. If None, uses analysis.duckdb.
         """
-        super().__init__(db_path)
+        super().__init__(db_path=db_path, db_type='analysis')
         self._initialize_schema()
 
     def _initialize_schema(self):
         """Initialize analyst_summaries table from schema file."""
         schema_path = project_root / "config" / "schema" / "analyst_schema.sql"
         if schema_path.exists():
-            schema = schema_path.read_text()
-            self.execute(schema)
-            logger.info("Analyst schema initialized (EOD summaries)")
+            # Only execute if analyst_summaries table doesn't exist
+            self.execute_schema_file(str(schema_path), check_table="analyst_summaries")
+            logger.debug("Analyst schema check completed")
         else:
             logger.warning(f"Schema file not found: {schema_path}")
 

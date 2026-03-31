@@ -23,21 +23,22 @@ logger = get_logger(__name__)
 class BacktestDAO(BaseDAO):
     """Data access layer for backtest simulation data."""
 
-    def __init__(self, db_path: str = "data/portfolio.duckdb"):
+    def __init__(self, db_path: Optional[str] = None):
         """Initialize BacktestDAO.
 
         Args:
-            db_path: Path to DuckDB database file
+            db_path: Path to DuckDB database file. If None, uses backtest.duckdb.
         """
-        super().__init__(db_path)
+        super().__init__(db_path=db_path, db_type='backtest')
         self._initialize_schema()
 
     def _initialize_schema(self):
         """Initialize backtest schema from schema file."""
         schema_path = Path("config/schema/backtest_schema.sql")
         if schema_path.exists():
-            self.execute_schema_file(str(schema_path))
-            logger.info("Backtest schema initialized")
+            # Only execute if backtest_runs table doesn't exist
+            self.execute_schema_file(str(schema_path), check_table="backtest_runs")
+            logger.debug("Backtest schema check completed")
         else:
             logger.warning(f"Schema file not found: {schema_path}")
 

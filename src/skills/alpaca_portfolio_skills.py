@@ -358,6 +358,99 @@ def fetch_portfolio_history(
 
 
 # =============================================================================
+# Watchlists
+# =============================================================================
+
+def fetch_watchlists() -> List[Dict]:
+    """Fetch all watchlists from Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/getwatchlists-1
+
+    Returns:
+        List of watchlist dictionaries, each containing:
+        - id: Watchlist UUID
+        - name: Watchlist name
+        - account_id: Account UUID
+        - created_at: Creation timestamp
+        - updated_at: Last update timestamp
+        - assets: List of asset dicts with symbol info
+
+    Raises:
+        Exception: If API request fails
+    """
+    logger.info("Fetching watchlists from Alpaca")
+
+    try:
+        watchlists = trading_client.get_watchlists()
+
+        watchlists_data = []
+        for wl in watchlists:
+            watchlist_dict = {
+                "id": str(wl.id),
+                "name": wl.name,
+                "account_id": str(wl.account_id),
+                "created_at": str(wl.created_at) if hasattr(wl, 'created_at') else None,
+                "updated_at": str(wl.updated_at) if hasattr(wl, 'updated_at') else None,
+                "assets": []
+            }
+
+            # Get watchlist details to fetch assets
+            try:
+                detailed_wl = trading_client.get_watchlist_by_id(wl.id)
+                if hasattr(detailed_wl, 'assets'):
+                    watchlist_dict["assets"] = [
+                        {
+                            "symbol": asset.symbol,
+                            "class": asset.asset_class if hasattr(asset, 'asset_class') else None,
+                            "exchange": asset.exchange if hasattr(asset, 'exchange') else None
+                        }
+                        for asset in detailed_wl.assets
+                    ]
+            except Exception as e:
+                logger.warning(f"Could not fetch assets for watchlist {wl.name}: {e}")
+
+            watchlists_data.append(watchlist_dict)
+
+        logger.info(f"Fetched {len(watchlists_data)} watchlists")
+
+        return watchlists_data
+
+    except Exception as e:
+        error_msg = f"Failed to fetch watchlists: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def get_all_watchlist_symbols() -> List[str]:
+    """Get all unique symbols across all watchlists.
+
+    Returns:
+        List of unique stock symbols from all watchlists
+
+    Raises:
+        Exception: If API request fails
+    """
+    try:
+        watchlists = fetch_watchlists()
+        symbols = set()
+
+        for wl in watchlists:
+            for asset in wl.get("assets", []):
+                if asset.get("symbol"):
+                    symbols.add(asset["symbol"])
+
+        symbols_list = sorted(list(symbols))
+        logger.info(f"Found {len(symbols_list)} unique symbols across all watchlists")
+
+        return symbols_list
+
+    except Exception as e:
+        error_msg = f"Failed to get watchlist symbols: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+# =============================================================================
 # Main Block for Functional Testing
 # =============================================================================
 

@@ -26,7 +26,8 @@ from src.skills.alpaca_portfolio_skills import (
     fetch_orders,
     fetch_portfolio_history
 )
-from src.dao import PortfolioDAO
+from src.skills.alpaca_skills import fetch_historical_bars
+from src.dao import PortfolioDAO, AlpacaDAO
 
 logger = get_logger(__name__)
 
@@ -444,6 +445,383 @@ def delegate_to_backtester(query: str, thread_id: str = "default") -> str:
             "recommendation": "Try again later or check data availability",
             "details": str(e),
             "timestamp": datetime.now().isoformat()
+        })
+
+
+<<<<<<< HEAD
+# =============================================================================
+# Historical Data Fetching Tool
+# =============================================================================
+
+@tool
+def fetch_historical_data(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> str:
+    """Fetch historical market data and save to database.
+
+    Use this tool BEFORE delegating to Backtester to ensure data availability.
+    This tool fetches data from Alpaca API and persists it to the database.
+
+    Args:
+        symbol: Stock ticker (e.g., 'AAPL')
+        start_date: Start date in YYYY-MM-DD format (e.g., '2026-01-01')
+        end_date: End date in YYYY-MM-DD format (e.g., '2026-01-31')
+        timeframe: Bar timeframe (default: '1Min' for intraday backtesting)
+
+    Returns:
+        JSON string with fetch status:
+        - status: 'success' or 'error'
+        - bars_fetched: Number of bars retrieved
+        - date_range: Confirmation of requested period
+        - message: Human-readable result
+
+    Example:
+        fetch_historical_data.invoke({
+            "symbol": "AAPL",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31"
+        })
+    """
+    logger.info(f"[DATA FETCH] Fetching historical data for {symbol} from {start_date} to {end_date}")
+
+    try:
+        # Convert date strings to datetime objects
+        start_dt = datetime.fromisoformat(start_date)
+        end_dt = datetime.fromisoformat(end_date)
+
+        # Validate dates are historical
+        now = datetime.now()
+        if start_dt > now or end_dt > now:
+            return json.dumps({
+                "status": "error",
+                "error": "Future dates not allowed",
+                "message": f"Start or end date is in the future. Current date: {now.date()}",
+                "suggestion": f"Use dates up to {now.date()}"
+            })
+
+        # First check if data already exists
+        dao = AlpacaDAO()
+        existing_bars = dao.get_bars(symbol, start=start_dt, end=end_dt, timeframe=timeframe)
+
+        if not existing_bars.empty:
+            bar_count = len(existing_bars)
+            logger.info(f"[DATA FETCH] Data already exists: {bar_count} bars for {symbol}")
+            return json.dumps({
+                "status": "success",
+                "bars_fetched": bar_count,
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "timeframe": timeframe,
+                "message": f"Data already available: {bar_count} bars found in database",
+                "data_source": "database_cache"
+            })
+
+        # Data doesn't exist, fetch from Alpaca API
+        logger.info(f"[DATA FETCH] No existing data, fetching from Alpaca API...")
+
+        # Use Alpaca skills to fetch and save data
+        bars_df = fetch_historical_bars(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            timeframe=timeframe
+        )
+
+        if bars_df is None or bars_df.empty:
+            return json.dumps({
+                "status": "error",
+                "error": "No data returned from API",
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"Alpaca API returned no data for {symbol} in the specified range",
+                "suggestion": "Verify symbol is correct and date range is valid (market was open)"
+            })
+
+        bar_count = len(bars_df)
+        logger.info(f"[DATA FETCH] Successfully fetched {bar_count} bars for {symbol}")
+
+        return json.dumps({
+            "status": "success",
+            "bars_fetched": bar_count,
+            "symbol": symbol,
+            "date_range": f"{start_date} to {end_date}",
+            "timeframe": timeframe,
+            "message": f"Successfully fetched and saved {bar_count} bars from Alpaca API",
+            "data_source": "alpaca_api"
+        })
+
+    except Exception as e:
+        logger.error(f"[DATA FETCH] Error fetching data for {symbol}: {e}", exc_info=True)
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "symbol": symbol,
+            "date_range": f"{start_date} to {end_date}",
+            "message": f"Failed to fetch historical data: {str(e)}"
+        })
+
+
+@tool
+def check_data_availability(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> str:
+    """Check if historical data exists in database for given period.
+
+    Use this tool BEFORE fetch_historical_data to avoid unnecessary API calls.
+    This tool only queries the database, does not fetch from API.
+
+    Args:
+        symbol: Stock ticker (e.g., 'AAPL')
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        timeframe: Bar timeframe (default: '1Min')
+
+    Returns:
+        JSON string with availability status:
+        - available: true/false
+        - bar_count: Number of bars found (0 if not available)
+        - coverage: Percentage of expected bars found
+        - message: Human-readable result
+    """
+    logger.info(f"[DATA CHECK] Checking data availability for {symbol} from {start_date} to {end_date}")
+
+    try:
+        start_dt = datetime.fromisoformat(start_date)
+        end_dt = datetime.fromisoformat(end_date)
+
+        dao = AlpacaDAO()
+        bars_df = dao.get_bars(symbol, start=start_dt, end=end_dt, timeframe=timeframe)
+
+        bar_count = len(bars_df)
+
+        # Calculate expected bars (rough estimate: 390 bars per trading day for 1Min)
+        trading_days = (end_dt - start_dt).days
+        expected_bars = trading_days * 390 if timeframe == "1Min" else trading_days
+        coverage_pct = (bar_count / expected_bars * 100) if expected_bars > 0 else 0
+
+        if bar_count == 0:
+            return json.dumps({
+                "available": False,
+                "bar_count": 0,
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"No data found for {symbol} in database",
+                "action_needed": "fetch_historical_data"
+            })
+        elif coverage_pct < 80:
+            return json.dumps({
+                "available": "partial",
+                "bar_count": bar_count,
+                "expected_bars": expected_bars,
+                "coverage_pct": round(coverage_pct, 1),
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"Partial data found: {bar_count} bars ({coverage_pct:.1f}% coverage)",
+                "action_needed": "fetch_historical_data to fill gaps"
+            })
+        else:
+            return json.dumps({
+                "available": True,
+                "bar_count": bar_count,
+                "expected_bars": expected_bars,
+                "coverage_pct": round(coverage_pct, 1),
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"Data available: {bar_count} bars ({coverage_pct:.1f}% coverage)",
+                "action_needed": "none - proceed with backtest"
+            })
+
+    except Exception as e:
+        logger.error(f"[DATA CHECK] Error checking data availability: {e}")
+        return json.dumps({
+            "available": False,
+            "error": str(e),
+            "message": f"Error checking data availability: {str(e)}"
+        })
+
+
+=======
+>>>>>>> feat: Phase 4 - Backtester Agent Implementation
+# =============================================================================
+# Historical Data Fetching Tool
+# =============================================================================
+
+@tool
+def fetch_historical_data(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> str:
+    """Fetch historical market data and save to database.
+
+    Use this tool BEFORE delegating to Backtester to ensure data availability.
+    This tool fetches data from Alpaca API and persists it to the database.
+
+    Args:
+        symbol: Stock ticker (e.g., 'AAPL')
+        start_date: Start date in YYYY-MM-DD format (e.g., '2026-01-01')
+        end_date: End date in YYYY-MM-DD format (e.g., '2026-01-31')
+        timeframe: Bar timeframe (default: '1Min' for intraday backtesting)
+
+    Returns:
+        JSON string with fetch status:
+        - status: 'success' or 'error'
+        - bars_fetched: Number of bars retrieved
+        - date_range: Confirmation of requested period
+        - message: Human-readable result
+
+    Example:
+        fetch_historical_data.invoke({
+            "symbol": "AAPL",
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-31"
+        })
+    """
+    logger.info(f"[DATA FETCH] Fetching historical data for {symbol} from {start_date} to {end_date}")
+
+    try:
+        # Convert date strings to datetime objects
+        start_dt = datetime.fromisoformat(start_date)
+        end_dt = datetime.fromisoformat(end_date)
+
+        # Validate dates are historical
+        now = datetime.now()
+        if start_dt > now or end_dt > now:
+            return json.dumps({
+                "status": "error",
+                "error": "Future dates not allowed",
+                "message": f"Start or end date is in the future. Current date: {now.date()}",
+                "suggestion": f"Use dates up to {now.date()}"
+            })
+
+        # First check if data already exists
+        dao = AlpacaDAO()
+        existing_bars = dao.get_bars(symbol, start=start_dt, end=end_dt, timeframe=timeframe)
+
+        if not existing_bars.empty:
+            bar_count = len(existing_bars)
+            logger.info(f"[DATA FETCH] Data already exists: {bar_count} bars for {symbol}")
+            return json.dumps({
+                "status": "success",
+                "bars_fetched": bar_count,
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "timeframe": timeframe,
+                "message": f"Data already available: {bar_count} bars found in database",
+                "data_source": "database_cache"
+            })
+
+        # Data doesn't exist, fetch from Alpaca API
+        logger.info(f"[DATA FETCH] No existing data, fetching from Alpaca API...")
+
+        # Use Alpaca skills to fetch and save data
+        bars_df = fetch_historical_bars(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            timeframe=timeframe
+        )
+
+        if bars_df is None or bars_df.empty:
+            return json.dumps({
+                "status": "error",
+                "error": "No data returned from API",
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"Alpaca API returned no data for {symbol} in the specified range",
+                "suggestion": "Verify symbol is correct and date range is valid (market was open)"
+            })
+
+        bar_count = len(bars_df)
+        logger.info(f"[DATA FETCH] Successfully fetched {bar_count} bars for {symbol}")
+
+        return json.dumps({
+            "status": "success",
+            "bars_fetched": bar_count,
+            "symbol": symbol,
+            "date_range": f"{start_date} to {end_date}",
+            "timeframe": timeframe,
+            "message": f"Successfully fetched and saved {bar_count} bars from Alpaca API",
+            "data_source": "alpaca_api"
+        })
+
+    except Exception as e:
+        logger.error(f"[DATA FETCH] Error fetching data for {symbol}: {e}", exc_info=True)
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "symbol": symbol,
+            "date_range": f"{start_date} to {end_date}",
+            "message": f"Failed to fetch historical data: {str(e)}"
+        })
+
+
+@tool
+def check_data_availability(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> str:
+    """Check if historical data exists in database for given period.
+
+    Use this tool BEFORE fetch_historical_data to avoid unnecessary API calls.
+    This tool only queries the database, does not fetch from API.
+
+    Args:
+        symbol: Stock ticker (e.g., 'AAPL')
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        timeframe: Bar timeframe (default: '1Min')
+
+    Returns:
+        JSON string with availability status:
+        - available: true/false
+        - bar_count: Number of bars found (0 if not available)
+        - coverage: Percentage of expected bars found
+        - message: Human-readable result
+    """
+    logger.info(f"[DATA CHECK] Checking data availability for {symbol} from {start_date} to {end_date}")
+
+    try:
+        start_dt = datetime.fromisoformat(start_date)
+        end_dt = datetime.fromisoformat(end_date)
+
+        dao = AlpacaDAO()
+        bars_df = dao.get_bars(symbol, start=start_dt, end=end_dt, timeframe=timeframe)
+
+        bar_count = len(bars_df)
+
+        # Calculate expected bars (rough estimate: 390 bars per trading day for 1Min)
+        trading_days = (end_dt - start_dt).days
+        expected_bars = trading_days * 390 if timeframe == "1Min" else trading_days
+        coverage_pct = (bar_count / expected_bars * 100) if expected_bars > 0 else 0
+
+        if bar_count == 0:
+            return json.dumps({
+                "available": False,
+                "bar_count": 0,
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"No data found for {symbol} in database",
+                "action_needed": "fetch_historical_data"
+            })
+        elif coverage_pct < 80:
+            return json.dumps({
+                "available": "partial",
+                "bar_count": bar_count,
+                "expected_bars": expected_bars,
+                "coverage_pct": round(coverage_pct, 1),
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"Partial data found: {bar_count} bars ({coverage_pct:.1f}% coverage)",
+                "action_needed": "fetch_historical_data to fill gaps"
+            })
+        else:
+            return json.dumps({
+                "available": True,
+                "bar_count": bar_count,
+                "expected_bars": expected_bars,
+                "coverage_pct": round(coverage_pct, 1),
+                "symbol": symbol,
+                "date_range": f"{start_date} to {end_date}",
+                "message": f"Data available: {bar_count} bars ({coverage_pct:.1f}% coverage)",
+                "action_needed": "none - proceed with backtest"
+            })
+
+    except Exception as e:
+        logger.error(f"[DATA CHECK] Error checking data availability: {e}")
+        return json.dumps({
+            "available": False,
+            "error": str(e),
+            "message": f"Error checking data availability: {str(e)}"
         })
 
 

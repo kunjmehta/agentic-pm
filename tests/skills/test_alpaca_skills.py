@@ -99,7 +99,7 @@ class TestFetchHistoricalBars:
 
         mock_client.get_stock_bars.side_effect = Exception("API Error")
 
-        with pytest.raises(Exception, match="Failed to fetch historical bars"):
+        with pytest.raises(Exception, match="Failed to fetch bars chunk"):
             fetch_historical_bars(
                 symbol="AAPL",
                 start="2024-01-01",
