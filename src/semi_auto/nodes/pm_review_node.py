@@ -61,33 +61,37 @@ VALID TIMEFRAMES (exact strings only — AlpacaDAO rejects anything else):
   Default "1Min"
 
 ───────────────────────────────────────────────────────────
-QUANT FUNCTIONS
+QUANT FUNCTIONS — LIVE and HISTORICAL modes
 ───────────────────────────────────────────────────────────
+All five indicator functions support two data modes:
+  LIVE mode      — omit start_date/end_date; use lookback_days (from today backwards)
+  HISTORICAL mode — provide start_date + end_date; omit lookback_days
+
 calc_momentum
-  Required : symbol (str)
-  Optional : timeframe="1Day"  lookback_days=90
-  Computes  : MACD (value, signal, histogram) + RSI
+  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=90]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  Computes   : MACD (value, signal, histogram) + RSI
 
 calc_volatility_bands
-  Required : symbol (str)
-  Optional : timeframe="1Day"  lookback_days=90
-  Computes  : Bollinger Bands (upper, middle, lower, bandwidth)
+  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=90]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  Computes   : Bollinger Bands (upper, middle, lower, bandwidth)
 
 calc_volume_flow
-  Required : symbol (str)
-  Optional : timeframe="1Day"  lookback_days=90
-  Computes  : OBV + volume trend (increasing/decreasing/stable)
+  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=90]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  Computes   : OBV + volume trend (increasing/decreasing/stable)
 
 analyze_candle_structure
-  Required : symbol (str)
-  Optional : timeframe="1Day"  lookback_days=30   ← note: 30, not 90
-  Detects  : Engulfing, Doji, Hammer, Hanging Man
+  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=30]   ← default 30, not 90
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  Detects    : Engulfing, Doji, Hammer, Hanging Man
 
 mean_reversion_analyze
-  Required : symbol (str)
-  Optional : lookback=60  threshold=2.0
-  Note     : NO timeframe param — uses symbol directly
-  Computes  : Z-score, Bollinger, moving averages, buy/sell/hold signal
+  LIVE       : symbol (str)  [lookback=60]  [threshold=2.0]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [threshold=2.0]  [timeframe="1Day"]
+  Note       : timeframe is valid ONLY in HISTORICAL mode
+  Computes   : Z-score, Bollinger, moving averages, buy/sell/hold signal + trade_recommendation
 
 get_market_bars
   Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
@@ -117,6 +121,14 @@ get_latest_signal
   Required : symbol (str)  strategy_name (str)
   No optional params
 
+get_recent_signals
+  Required : symbol (str)
+  Optional : strategy_name=None  limit=10
+
+get_actionable_signals
+  Optional : symbol=None  min_confidence=0.6
+  Returns  : high-confidence signals across all strategies
+
 ───────────────────────────────────────────────────────────
 BACKTESTER FUNCTIONS
 ───────────────────────────────────────────────────────────
@@ -136,6 +148,18 @@ backtest_strategy          ← Last task (depends_on=[bt_002] if fetch was added
   ⚠ param name is "ticker" — NOT "symbol" (only exception across all functions)
   Valid strategies: "buy-and-hold" | "mean-reversion" | "momentum" | "value"
   DEFAULT STRATEGY: always "mean-reversion" for workflow A unless user specified otherwise
+
+save_eod_snapshot          ← Workflow B: save portfolio snapshot
+  Required : timestamp (ISO str)  equity (float)  cash (float)
+             buying_power (float)  positions (list of position dicts)
+  Optional : portfolio_value=None
+
+snapshot_worth             ← Workflow B: calculate portfolio value over a range
+  Required : snapshot_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
+
+swap_positions             ← Workflow C: simulate position swap
+  Required : snapshot_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
+             tickers (list[str])
 
 get_market_bars            (same signature as quant version above)
 get_latest_price           (same signature as quant version above)
@@ -157,18 +181,22 @@ get_strategy_performance
 ───────────────────────────────────────────────────────────
 CRITICAL PARAM RULES — violations must be corrected with update_params edits
 ───────────────────────────────────────────────────────────
-1. check_data_availability / fetch_historical_data → "symbol" key, NEVER "ticker"
-2. backtest_strategy → "ticker" key, NEVER "symbol"
-3. Timeframe strings must be canonical ("1Day" not "1d"; "1Min" not "1min")
-4. fetch_historical_data default timeframe is "1Min" (granular intraday), not "1Day"
-5. mean_reversion_analyze has NO timeframe param — remove it if present
-6. initial_capital must be a float (100000.0) — reject integer-only "100000"
-7. Do NOT change dates the agents set unless they are clearly invalid (e.g. end < start)
-8. Do NOT change lookback_days / lookback / threshold unless clearly out of range
-9. task_id / priority / depends_on are TOP-LEVEL task fields — they must NEVER appear
-   inside the params dict. If you see them in params, emit an update_params edit that
-   removes them (rebuild params without those keys). The executor will error if they
-   are left in params.
+1.  check_data_availability / fetch_historical_data → "symbol" key, NEVER "ticker"
+2.  backtest_strategy → "ticker" key, NEVER "symbol"
+3.  Timeframe strings must be canonical ("1Day" not "1d"; "1Min" not "1min")
+4.  fetch_historical_data default timeframe is "1Min" (granular intraday), not "1Day"
+5.  mean_reversion_analyze in LIVE mode has NO timeframe — remove it if present in live calls
+    In HISTORICAL mode (start_date + end_date present) timeframe IS valid — leave it
+6.  initial_capital must be a float (100000.0) — reject integer-only "100000"
+7.  Do NOT change dates the agents set unless they are clearly invalid (e.g. end < start)
+8.  Do NOT change lookback_days / lookback / threshold unless clearly out of range
+9.  task_id / priority / depends_on are TOP-LEVEL task fields — they must NEVER appear
+    inside the params dict. If you see them in params, emit an update_params edit that
+    removes them (rebuild params without those keys). The executor will error if they
+    are left in params.
+10. NEVER allow both start_date/end_date and lookback_days in the same indicator call.
+    If both are present, keep start_date/end_date and remove lookback_days (historical
+    mode takes precedence when a date range was explicitly provided by the user).
 ───────────────────────────────────────────────────────────"""
 
 

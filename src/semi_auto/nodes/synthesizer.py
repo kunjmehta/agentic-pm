@@ -21,30 +21,52 @@ from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
-_SYNTHESIZER_SYSTEM_PROMPT = """You are a Portfolio Manager AI synthesizing the results of a multi-agent analysis.
+_SYNTHESIZER_SYSTEM_PROMPT = """You are a Portfolio Manager AI. Your job is to synthesize multi-agent analysis results into a structured SynthesisResult.
 
-Given the reasoning traces and function execution results below, produce a clear, concise final response.
+Fill in each field accurately given the reasoning traces and execution results provided.
 
-Rules:
-- Lead with the key finding or decision (e.g. "Portfolio is healthy at $X equity", "AAPL shows a Z-score of -1.8")
-- Include the most critical numbers from the results
-- Mention each agent's contribution briefly if applicable (PM, Quant, Backtester)
-- Keep it to 2-3 short paragraphs maximum
-- If tasks failed, acknowledge the missing data gracefully
-- Plain prose — no bullet points, no markdown headers
+FIELD GUIDANCE:
 
-For BACKTEST results specifically:
-- Always quote the summary sentence from the result verbatim
-- State total return %, Sharpe ratio, max drawdown %, and win rate explicitly
-- Quote the recommendation field (RECOMMENDED / NOT RECOMMENDED) as your closing verdict on that strategy
-- If multiple strategies were backtested, compare their Sharpe ratios and total returns side-by-side"""
+headline — concise title, e.g. "AAPL — Mean-Reversion Backtest" or "MSFT Technical Analysis (Live)" or "Portfolio Status"
+
+intent — one of: "backtest" | "quant" | "portfolio" | "mixed"
+
+verdict — BACKTEST ONLY: "RECOMMENDED" or "NOT RECOMMENDED" — based on the recommendation field in results
+
+summary_quote — BACKTEST ONLY: copy the verbatim summary sentence from the backtest result (one sentence)
+
+overall_signal — QUANT ONLY: the top-level signal "BUY", "SELL", or "HOLD" — synthesize from all indicators
+
+signal_confidence — QUANT ONLY: "High" (≥2 confirming indicators), "Medium" (split signals), "Low" (insufficient data)
+
+sections — structured content blocks. Use these standard section titles:
+  * Backtest: "Returns", "Risk", "Trade Statistics"
+  * Quant: "Momentum", "Volatility", "Volume", "Candlestick Patterns", "Signals Summary"
+  * Portfolio: "Account Summary", "Positions", "Health"
+  Each section has:
+    - table: list of {metric, value} rows for all numeric data — use pre-formatted strings ("+12.50%", "$100,000", "1.340")
+    - bullets: 1-3 short qualitative observations per section (not for every section — only where insight adds value)
+    - note: single italic sentence for caveats or missing data (optional)
+
+takeaway — ONE sentence that summarises the bottom-line conclusion (will be shown as a blockquote)
+
+agents_used — list the agents that actually ran, e.g. ["PM"], ["PM", "Quant"], ["PM", "Backtester", "Quant"]
+
+error_note — if any tasks errored or returned no data, briefly note what is missing (keep to one line)
+
+RULES:
+- Never invent metrics that are not present in the execution results
+- If the backtest includes multiple strategies, create one section group per strategy using title "Strategy: <name>"
+- For portfolio positions, put each position as a bullet in the Positions section
+- Omit sections/tables that have no data rather than showing empty rows
+"""
 
 
 def _format_backtest_result(result_data: dict) -> str:
-    """Format a backtest_strategy result dict into a readable block.
+    """Format a backtest_strategy result dict into a readable grouped block.
 
-    Extracts metrics, summary, and recommendation so the LLM receives
-    all key numbers without truncation.
+    Groups metrics into Returns, Risk, and Trade-Stats sections so the
+    LLM receives all key numbers without truncation and in logical order.
 
     Args:
         result_data: The ``result`` field from an executor task result.
@@ -52,50 +74,122 @@ def _format_backtest_result(result_data: dict) -> str:
     Returns:
         Formatted multi-line string.
     """
+
+    def _pct(v):
+        try:
+            return f"{float(v):+.2f}%"
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _money(v):
+        try:
+            fv = float(v)
+            return f"-${abs(fv):,.2f}" if fv < 0 else f"${fv:,.2f}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _ratio(v):
+        try:
+            return f"{float(v):.3f}"
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _rate(v):
+        try:
+            fv = float(v)
+            return f"{fv * 100:.1f}%" if fv <= 1.0 else f"{fv:.1f}%"
+        except (TypeError, ValueError):
+            return str(v)
+
+    def _int(v):
+        try:
+            return str(int(v))
+        except (TypeError, ValueError):
+            return str(v)
+
     lines = []
 
-    # Top-level summary and recommendation are the most important
-    if result_data.get("summary"):
-        lines.append(f"  summary    : {result_data['summary']}")
+    # ── Header ──────────────────────────────────────────────────────────
+    ticker = result_data.get("ticker") or result_data.get("symbol") or "?"
+    strategy = result_data.get("strategy") or "?"
+    start = result_data.get("start_date") or ""
+    end = result_data.get("end_date") or ""
+    run_id = result_data.get("run_id")
+    header_parts = [f"strategy={strategy}", f"ticker={ticker}"]
+    if start and end:
+        header_parts.append(f"{start} to {end}")
+    if run_id:
+        header_parts.append(f"run_id={run_id}")
+    sep = "=" * 64
+    lines.append(sep)
+    lines.append("  BACKTEST RESULT: " + "  |  ".join(header_parts))
+    lines.append(sep)
+
+    # ── Verdict & Summary ──────────────────────────────────────────────
     if result_data.get("recommendation"):
-        lines.append(f"  verdict    : {result_data['recommendation']}")
+        rec = result_data["recommendation"].upper()
+        icon = "[OK]" if "RECOMMEND" in rec and "NOT" not in rec else "[NO]"
+        lines.append(f"  Verdict  : {icon} {rec}")
+    if result_data.get("summary"):
+        lines.append(f"  Summary  : {result_data['summary']}")
+    lines.append("")
 
-    # Strategy / run metadata
-    for field in ("strategy", "ticker", "symbol", "start_date", "end_date", "run_id"):
-        if result_data.get(field):
-            lines.append(f"  {field:<12}: {result_data[field]}")
-
-    # Core performance metrics — always included fully (no truncation)
     metrics = result_data.get("metrics") or result_data.get("performance") or {}
-    if metrics:
-        lines.append("  metrics:")
-        METRIC_ORDER = [
-            "total_return_pct", "total_return_dollars",
-            "sharpe_ratio", "sortino_ratio",
-            "max_drawdown_pct", "max_drawdown_dollars",
-            "win_rate", "profit_factor",
-            "total_trades", "winning_trades", "losing_trades",
-            "avg_win", "avg_loss", "avg_trade",
-            "largest_win", "largest_loss",
-        ]
-        # Emit in canonical order first, then any extra keys
-        seen = set()
-        for key in METRIC_ORDER:
-            if key in metrics:
-                val = metrics[key]
-                # Format percentages and dollars readably
-                if "pct" in key:
-                    lines.append(f"    {key:<30}: {val:.4f}%")
-                elif "dollar" in key or key in ("avg_win", "avg_loss", "avg_trade", "largest_win", "largest_loss"):
-                    lines.append(f"    {key:<30}: ${val:,.2f}")
-                elif key in ("win_rate",):
-                    lines.append(f"    {key:<30}: {val:.1%}")
-                else:
-                    lines.append(f"    {key:<30}: {val}")
-                seen.add(key)
-        for key, val in metrics.items():
-            if key not in seen:
-                lines.append(f"    {key:<30}: {val}")
+    if not metrics:
+        lines.append("  (no metrics available)")
+        return "\n".join(lines)
+
+    # ── Returns section ────────────────────────────────────────────────
+    RETURNS = [
+        ("total_return_pct",     "Total Return",     _pct),
+        ("total_return_dollars", "Total Return $",   _money),
+        ("sharpe_ratio",         "Sharpe Ratio",     _ratio),
+        ("sortino_ratio",        "Sortino Ratio",    _ratio),
+        ("profit_factor",        "Profit Factor",    _ratio),
+        ("initial_capital",      "Initial Capital",  _money),
+        ("final_capital",        "Final Capital",    _money),
+    ]
+    RISK = [
+        ("max_drawdown_pct",     "Max Drawdown %",   _pct),
+        ("max_drawdown_dollars", "Max Drawdown $",   _money),
+        ("volatility",           "Volatility",       _ratio),
+        ("calmar_ratio",         "Calmar Ratio",     _ratio),
+    ]
+    TRADES = [
+        ("total_trades",         "Total Trades",      _int),
+        ("win_rate",             "Win Rate",          _rate),
+        ("winning_trades",       "Winning Trades",    _int),
+        ("losing_trades",        "Losing Trades",     _int),
+        ("avg_win",              "Avg Win",           _money),
+        ("avg_loss",             "Avg Loss",          _money),
+        ("avg_trade",            "Avg Trade",         _money),
+        ("largest_win",          "Largest Win",       _money),
+        ("largest_loss",         "Largest Loss",      _money),
+    ]
+
+    seen = set()
+
+    def _section(title: str, fields):
+        rows = [(label, fmt(metrics[key])) for key, label, fmt in fields
+                if key in metrics and metrics[key] is not None]
+        if not rows:
+            return
+        lines.append(f"  --- {title} ---")
+        for label, val in rows:
+            lines.append(f"  {label:<26} {val}")
+            seen.add(next(k for k, l, _ in fields if l == label))
+        lines.append("")
+
+    _section("RETURNS", RETURNS)
+    _section("RISK", RISK)
+    _section("TRADE STATISTICS", TRADES)
+
+    # Any leftover metrics not in the canonical sets
+    extra = [(k, v) for k, v in metrics.items() if k not in seen and v is not None]
+    if extra:
+        lines.append("  --- ADDITIONAL METRICS ---")
+        for k, v in extra:
+            lines.append(f"  {k:<26} {v}")
 
     return "\n".join(lines)
 
@@ -267,30 +361,117 @@ def synthesizer_node(state: dict) -> dict:
     }
 
 
+def _render_synthesis_result(result) -> str:
+    """Render a SynthesisResult Pydantic object into well-formatted Markdown.
+
+    This is a deterministic rendering step — no LLM involved.  The LLM fills
+    the structured model; this function converts it to the Markdown string that
+    the UI displays.
+
+    Args:
+        result: A ``SynthesisResult`` instance.
+
+    Returns:
+        Markdown string suitable for the stream_client.html renderer.
+    """
+    lines: List[str] = []
+
+    # ── Headline ──────────────────────────────────────────────────────────
+    lines.append(f"## {result.headline}")
+    lines.append("")
+
+    # ── Verdict (backtest) ────────────────────────────────────────────────
+    if result.verdict:
+        is_rec = "NOT" not in result.verdict.upper()
+        icon = "✅" if is_rec else "❌"
+        lines.append(f"**Verdict: {icon} {result.verdict}**")
+        lines.append("")
+
+    # ── Summary quote (backtest) ──────────────────────────────────────────
+    if result.summary_quote:
+        lines.append(f"> {result.summary_quote}")
+        lines.append("")
+
+    # ── Overall signal (quant) ────────────────────────────────────────────
+    if result.overall_signal:
+        signal_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(
+            result.overall_signal.upper(), "⚪"
+        )
+        lines.append(
+            f"**Signal: {signal_emoji} {result.overall_signal}**"
+            + (f"  |  **Confidence: {result.signal_confidence}**" if result.signal_confidence else "")
+        )
+        lines.append("")
+
+    # ── Sections ──────────────────────────────────────────────────────────
+    for section in result.sections:
+        lines.append(f"### {section.title}")
+        lines.append("")
+
+        if section.table:
+            lines.append("| Metric | Value |")
+            lines.append("|--------|------:|")
+            for row in section.table:
+                lines.append(f"| {row.metric} | {row.value} |")
+            lines.append("")
+
+        if section.bullets:
+            for bullet in section.bullets:
+                lines.append(f"- {bullet}")
+            lines.append("")
+
+        if section.note:
+            lines.append(f"*{section.note}*")
+            lines.append("")
+
+    # ── Takeaway ──────────────────────────────────────────────────────────
+    if result.takeaway:
+        lines.append(f"> **Bottom line:** {result.takeaway}")
+        lines.append("")
+
+    # ── Footer ────────────────────────────────────────────────────────────
+    footer_parts: List[str] = []
+    if result.agents_used:
+        footer_parts.append(f"Agents: {', '.join(result.agents_used)}")
+    if result.error_note:
+        footer_parts.append(f"Note: {result.error_note}")
+    if footer_parts:
+        lines.append("---")
+        lines.append("  \n".join(f"*{p}*" for p in footer_parts))
+
+    return "\n".join(lines)
+
+
 def _call_llm(state: dict) -> str:
-    """Call gpt-5-mini to synthesize final response from state.
+    """Call gpt-5-mini with structured output to synthesize final response from state.
+
+    Uses ``with_structured_output(SynthesisResult)`` so the LLM fills a typed
+    Pydantic model instead of producing free-form Markdown.  The model is then
+    rendered to Markdown by ``_render_synthesis_result``.
 
     Args:
         state: Current GraphState dict.
 
     Returns:
-        Synthesized response string.
+        Synthesized response as a Markdown string.
     """
     try:
         from langchain_openai import ChatOpenAI
         from src.common.utils import secrets
+        from src.semi_auto.models.responses import SynthesisResult
 
         llm = ChatOpenAI(
             model="gpt-5-mini",
             temperature=0.2,
             api_key=secrets.get("openai.api_key"),
         )
+        structured_llm = llm.with_structured_output(SynthesisResult)
         prompt = _build_synthesis_prompt(state)
-        response = llm.invoke([
+        result: SynthesisResult = structured_llm.invoke([
             {"role": "system", "content": _SYNTHESIZER_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ])
-        return response.content
+        return _render_synthesis_result(result)
     except Exception as exc:
         logger.warning(f"[synthesizer] LLM call failed: {exc}")
         # Graceful degradation

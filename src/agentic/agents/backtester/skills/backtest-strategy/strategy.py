@@ -118,10 +118,44 @@ def backtest_strategy_core(
         alpaca_dao.close()
 
         if bars_df.empty:
-            return {
-                "error": f"No historical data available for {ticker} from {start_date} to {end_date}",
-                "suggestion": "Ingest market data for this symbol and date range first"
-            }
+            logger.info(f"[SKILL] No local data for {ticker} — attempting auto-fetch from Alpaca API")
+            try:
+                from src.agentic.agents.portfolio.skills.datamanagement.data import fetch_historical_data_core
+                fetch_result = fetch_historical_data_core(
+                    symbol=ticker,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeframe="1Min",
+                )
+                if fetch_result.get("status") != "success":
+                    return {
+                        "status": "failed",
+                        "error": f"No data for {ticker} ({start_date} → {end_date}) and auto-fetch failed: "
+                                 f"{fetch_result.get('error', fetch_result.get('message', 'unknown'))}",
+                        "suggestion": "Verify symbol and date range are valid Alpaca market data.",
+                    }
+                logger.info(f"[SKILL] Auto-fetched {fetch_result.get('bars_fetched', '?')} bars for {ticker}")
+            except Exception as fetch_exc:
+                return {
+                    "status": "failed",
+                    "error": f"No data for {ticker} and auto-fetch raised: {fetch_exc}",
+                }
+            # Re-open DAO and retry the bar query
+            alpaca_dao = AlpacaDAO()
+            bars_df = alpaca_dao.get_bars(
+                symbol=ticker,
+                start=start_datetime,
+                end=end_datetime,
+                timeframe="1Min",
+            )
+            alpaca_dao.close()
+            if bars_df.empty:
+                return {
+                    "status": "failed",
+                    "error": f"Auto-fetch succeeded but bars still empty for {ticker} — "
+                             "data may be outside market hours or symbol is invalid.",
+                }
+        # DAO already closed above; no else-close needed here
 
         logger.info(f"[SKILL] Fetched {len(bars_df)} bars for {ticker}")
 

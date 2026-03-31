@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Portfolio Manager</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -153,7 +154,45 @@
         }
 
         /* Text content area */
-        .text-content { margin-top: 4px; }
+        .text-content { margin-top: 6px; line-height: 1.55; }
+
+        /* Markdown rendering inside chat bubbles */
+        .text-content h1, .text-content h2 {
+            font-size: 13px; font-weight: 700; color: #a78bfa;
+            margin: 10px 0 4px; padding-bottom: 3px;
+            border-bottom: 1px solid #3a3a4a;
+        }
+        .text-content h3 {
+            font-size: 12px; font-weight: 600; color: #c4b5fd;
+            margin: 8px 0 3px;
+        }
+        .text-content p { margin: 4px 0; }
+        .text-content strong { color: #e2e8f0; }
+        .text-content em { color: #94a3b8; }
+        .text-content hr { border: none; border-top: 1px solid #333; margin: 8px 0; }
+        .text-content ul, .text-content ol { padding-left: 18px; margin: 4px 0; }
+        .text-content li { margin: 2px 0; }
+        .text-content blockquote {
+            border-left: 3px solid #a78bfa; padding-left: 10px;
+            color: #94a3b8; margin: 6px 0; font-style: italic;
+        }
+        .text-content table {
+            border-collapse: collapse; width: 100%;
+            font-size: 12px; margin: 6px 0;
+        }
+        .text-content th {
+            background: #2c2c3a; color: #a78bfa;
+            padding: 5px 10px; text-align: left;
+            border: 1px solid #3a3a4a; font-weight: 600;
+        }
+        .text-content td {
+            padding: 4px 10px; border: 1px solid #2a2a3a;
+        }
+        .text-content tr:nth-child(even) td { background: #1e1e28; }
+        .text-content code {
+            background: #2c2c3a; padding: 1px 5px; border-radius: 3px;
+            font-family: monospace; font-size: 11px; color: #e2e8f0;
+        }
 
         /* Spinner */
         .spinner {
@@ -432,6 +471,203 @@
         .esstatus.success { color: #6ee7b7; }
         .esstatus.error { color: #f87171; }
         .esstatus.skipped { color: #888; }
+
+        /* ── Health badge ── */
+        .health-section {
+            margin-top: 8px;
+            padding: 9px 12px;
+            background: #111a11;
+            border: 1px solid #1a3a1a;
+            border-radius: 7px;
+            font-size: 12px;
+        }
+        .health-section-header {
+            font-weight: 600;
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 6px;
+        }
+        .health-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            border: 1px solid;
+            font-weight: 700;
+            font-size: 11px;
+            letter-spacing: 0.06em;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        .health-metrics {
+            margin-top: 6px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px 14px;
+            font-family: monospace;
+            font-size: 11px;
+        }
+        .health-metrics .hm-row { display: flex; gap: 4px; }
+        .health-metrics .hm-key { color: #666; }
+        .health-metrics .hm-val { color: #bbb; }
+
+        /* ── Portfolio stats cards ── */
+        .stats-section {
+            margin-top: 8px;
+            padding: 9px 12px;
+            background: #0f1829;
+            border: 1px solid #1e3a5f;
+            border-radius: 7px;
+            font-size: 12px;
+        }
+        .stats-section-header {
+            font-weight: 600;
+            color: #888;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 8px;
+        }
+        .stats-cards {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .stat-card {
+            background: #132035;
+            border: 1px solid #1e3a5f;
+            border-radius: 6px;
+            padding: 7px 12px;
+            min-width: 100px;
+        }
+        .stat-card .sc-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 0.04em; }
+        .stat-card .sc-value { font-size: 16px; font-weight: 600; color: #7cb9ff; margin-top: 2px; }
+        .stat-card .sc-value.positive { color: #6ee7b7; }
+        .stat-card .sc-value.negative { color: #f87171; }
+
+        /* ── Trades table ── */
+        .trades-section {
+            margin-top: 8px;
+        }
+        details.trades-detail {
+            background: #161600;
+            border: 1px solid #4d4400;
+            border-radius: 7px;
+            overflow: hidden;
+        }
+        details.trades-detail summary {
+            padding: 7px 12px;
+            font-size: 12px;
+            color: #fde68a;
+            cursor: pointer;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-weight: 600;
+        }
+        details.trades-detail summary::-webkit-details-marker { display: none; }
+        details.trades-detail summary::before { content: '▶'; font-size: 9px; transition: transform 0.2s; }
+        details[open].trades-detail summary::before { transform: rotate(90deg); }
+        .trades-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            font-family: monospace;
+        }
+        .trades-table th {
+            text-align: left;
+            color: #666;
+            padding: 4px 8px;
+            border-bottom: 1px solid #2a2a00;
+            font-weight: 500;
+        }
+        .trades-table td {
+            padding: 3px 8px;
+            color: #ccc;
+            border-bottom: 1px solid #1e1e00;
+        }
+        .trades-table tr:last-child td { border-bottom: none; }
+        .trade-buy { color: #6ee7b7; }
+        .trade-sell { color: #f87171; }
+        .trade-pnl-pos { color: #6ee7b7; }
+        .trade-pnl-neg { color: #f87171; }
+        /* Sub-section headers separating BUY entries from SELL exits */
+        .trades-sub-header {
+            padding: 5px 12px 4px;
+            font-size: 11px;
+            font-family: monospace;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-top: 1px solid #2a2a00;
+        }
+        .trades-sub-header:first-of-type { border-top: none; }
+        .trade-buy-header { color: #6ee7b7; background: rgba(110,231,183,0.04); }
+        .trade-sell-header { color: #f87171; background: rgba(248,113,113,0.04); }
+        .trades-count {
+            font-size: 10px;
+            font-weight: 400;
+            color: #666;
+            margin-left: auto;
+        }
+        .trades-open-note {
+            padding: 5px 12px;
+            font-size: 10.5px;
+            font-family: monospace;
+            color: #a78bfa;
+            border-top: 1px solid #2a2a00;
+        }
+        .trades-table .tc-num { color: #555; width: 28px; }
+        .trades-table .tc-signal { color: #888; font-size: 10px; }
+
+        /* ── Telemetry panel ── */
+        details.telemetry-detail {
+            margin-top: 8px;
+            background: #0f0f0f;
+            border: 1px solid #2a2a2a;
+            border-radius: 7px;
+            overflow: hidden;
+        }
+        details.telemetry-detail summary {
+            padding: 7px 12px;
+            font-size: 11px;
+            color: #666;
+            cursor: pointer;
+            user-select: none;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        details.telemetry-detail summary::-webkit-details-marker { display: none; }
+        details.telemetry-detail summary::before { content: '▶'; font-size: 8px; }
+        details[open].telemetry-detail summary::before { transform: rotate(90deg); display: inline-block; }
+        .telemetry-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 10.5px;
+            font-family: monospace;
+        }
+        .telemetry-table th {
+            text-align: left;
+            color: #555;
+            padding: 3px 8px;
+            border-bottom: 1px solid #222;
+            font-weight: 500;
+        }
+        .telemetry-table td {
+            padding: 2px 8px;
+            color: #888;
+            border-bottom: 1px solid #1a1a1a;
+        }
+        .telemetry-table tr:last-child td { border-bottom: none; }
+        .telemetry-table .tc-fn { color: #aaa; }
+        .telemetry-table .tc-dur { color: #7cb9ff; }
     </style>
 </head>
 <body>
@@ -752,7 +988,12 @@
             div.className = 'text-content';
             bubble.appendChild(div);
         }
-        div.textContent += text;
+        // Render markdown if marked.js is available, otherwise plain text
+        if (typeof marked !== 'undefined') {
+            div.innerHTML += marked.parse(String(text), { breaks: true, gfm: true });
+        } else {
+            div.textContent += text;
+        }
     }
 
     function addError(bubble, msg) {
@@ -1075,9 +1316,13 @@
                 }
                 const result = await res.json();
 
-                // Replace preview with execution summary + final response
+                // Replace preview with execution summary + rich UI panels + final response
                 preview.remove();
                 addExecSummary(bubble, result.execution_results || []);
+                addHealthSection(bubble, result.execution_results || []);
+                addPortfolioStats(bubble, result.execution_results || []);
+                addTradesSection(bubble, result.execution_results || []);
+                addTelemetryPanel(bubble, result.execution_results || []);
                 addText(bubble, result.final_response || '(no response)');
                 scrollMessages();
             } catch (e) {
@@ -1103,6 +1348,375 @@
             isStreaming = false;
             document.getElementById('sendBtn').disabled = false;
         };
+    }
+
+    // ── Post-approval rich UI panels ─────────────────────────
+
+    function addHealthSection(bubble, execResults) {
+        const healthResult = execResults.find(
+            r => r.function_name === 'check_portfolio_health' && r.status === 'success' && r.result
+        );
+        if (!healthResult) return;
+        const h = healthResult.result;
+        const overall = (h.overall_status || h.status || h.health_status || 'unknown').toLowerCase();
+
+        const colorMap = {
+            healthy: { fg: '#6ee7b7', bg: '#0a2a1a' },
+            ok:      { fg: '#6ee7b7', bg: '#0a2a1a' },
+            warning: { fg: '#fde68a', bg: '#2a1a00' },
+            critical:{ fg: '#f87171', bg: '#2d1515' },
+            unknown: { fg: '#888',    bg: '#1a1a1a' },
+        };
+        const col = colorMap[overall] || colorMap.unknown;
+
+        const section = document.createElement('div');
+        section.className = 'health-section';
+        section.style.borderColor = col.fg + '44';
+        section.style.background = col.bg;
+
+        const hdr = document.createElement('div');
+        hdr.className = 'health-section-header';
+        hdr.textContent = 'Portfolio Health';
+        section.appendChild(hdr);
+
+        const badgeRow = document.createElement('div');
+        const badge = document.createElement('span');
+        badge.className = 'health-badge';
+        badge.style.cssText = `color:${col.fg};border-color:${col.fg}66;background:${col.fg}18`;
+        badge.textContent = overall.toUpperCase();
+        badgeRow.appendChild(badge);
+
+        // Show reason / description if available
+        const desc = h.reason || h.description || h.message || '';
+        if (desc) {
+            const d = document.createElement('span');
+            d.style.cssText = 'font-size:12px;color:#aaa;';
+            d.textContent = escHtml(String(desc).slice(0, 120));
+            badgeRow.appendChild(d);
+        }
+        section.appendChild(badgeRow);
+
+        // Key metrics grid
+        const metricKeys = [
+            ['equity', 'Equity'], ['cash', 'Cash'], ['buying_power', 'Buying Power'],
+            ['position_count', 'Positions'], ['risk_score', 'Risk Score'],
+            ['max_drawdown', 'Max Drawdown'], ['daily_pnl', 'Daily P&L'],
+        ];
+        const metricsDiv = document.createElement('div');
+        metricsDiv.className = 'health-metrics';
+        let shown = 0;
+        for (const [k, label] of metricKeys) {
+            if (h[k] !== undefined && shown < 6) {
+                const row = document.createElement('div');
+                row.className = 'hm-row';
+                row.innerHTML = `<span class="hm-key">${label}:</span><span class="hm-val">${escHtml(String(h[k]))}</span>`;
+                metricsDiv.appendChild(row);
+                shown++;
+            }
+        }
+        if (shown > 0) section.appendChild(metricsDiv);
+
+        bubble.appendChild(section);
+    }
+
+    function addPortfolioStats(bubble, execResults) {
+        // Pull from get_portfolio_status or get_positions_summary result
+        const statusResult = execResults.find(
+            r => (r.function_name === 'get_portfolio_status' || r.function_name === 'get_positions_summary')
+                && r.status === 'success' && r.result
+        );
+        if (!statusResult) return;
+        const d = statusResult.result;
+
+        // Collect any numeric stats available
+        const statDefs = [
+            { key: 'equity',         label: 'Equity' },
+            { key: 'cash',           label: 'Cash' },
+            { key: 'unrealized_pl',  label: 'Unrealized P&L' },
+            { key: 'realized_pl',    label: 'Realized P&L' },
+            { key: 'daily_change',   label: 'Daily Change' },
+            { key: 'total_return',   label: 'Total Return' },
+            { key: 'sharpe_ratio',   label: 'Sharpe Ratio' },
+            { key: 'max_drawdown',   label: 'Max Drawdown' },
+            { key: 'win_rate',       label: 'Win Rate' },
+            { key: 'position_count', label: 'Positions' },
+        ];
+        const available = statDefs.filter(s => d[s.key] !== undefined);
+        if (available.length === 0) return;
+
+        const section = document.createElement('div');
+        section.className = 'stats-section';
+
+        const hdr = document.createElement('div');
+        hdr.className = 'stats-section-header';
+        hdr.textContent = 'Portfolio Stats';
+        section.appendChild(hdr);
+
+        const cards = document.createElement('div');
+        cards.className = 'stats-cards';
+        for (const { key, label } of available.slice(0, 8)) {
+            const val = d[key];
+            const numVal = typeof val === 'number' ? val : parseFloat(val);
+            const isPositive = !isNaN(numVal) && numVal > 0;
+            const isNegative = !isNaN(numVal) && numVal < 0;
+            const formatted = typeof val === 'number'
+                ? (Math.abs(val) >= 1000 ? '$' + val.toLocaleString(undefined, {maximumFractionDigits: 0})
+                                         : val.toFixed(2))
+                : String(val);
+            const card = document.createElement('div');
+            card.className = 'stat-card';
+            card.innerHTML = `<div class="sc-label">${label}</div><div class="sc-value ${isPositive ? 'positive' : isNegative ? 'negative' : ''}">${escHtml(formatted)}</div>`;
+            cards.appendChild(card);
+        }
+        section.appendChild(cards);
+        bubble.appendChild(section);
+    }
+
+    function addTradesSection(bubble, execResults) {
+        // Find backtest_strategy results that have a trades list
+        const btResults = execResults.filter(
+            r => r.function_name === 'backtest_strategy' && r.status === 'success' && r.result
+        );
+        if (btResults.length === 0) return;
+
+        const section = document.createElement('div');
+        section.className = 'trades-section';
+
+        for (const btRes of btResults) {
+            const d = btRes.result;
+            // trades may be at d.trades or d.result.trades
+            const trades = d.trades || (d.result && d.result.trades) || [];
+            const strategy = d.strategy || d.strategy_name || btRes.task_id || 'backtest';
+            const symbol = d.symbol || d.ticker || '';
+            const closedTrades = trades.filter(t => t.status === 'closed' || (t.exit_date !== undefined && t.exit_date !== null));
+            const openTrades   = trades.filter(t => t.status === 'open'   || (t.exit_date === undefined || t.exit_date === null));
+            const perfKeys = ['total_return_pct', 'sharpe_ratio', 'max_drawdown_pct', 'win_rate', 'final_capital'];
+
+            const det = document.createElement('details');
+            det.className = 'trades-detail';
+
+            const sumEl = document.createElement('summary');
+            sumEl.innerHTML = `📈 Trades &mdash; ${escHtml(strategy)}${symbol ? ' &middot; ' + escHtml(symbol) : ''} `
+                + `<span style="color:#6ee7b7;font-weight:400;font-size:10px">${trades.length} entries</span>`
+                + `&nbsp;<span style="color:#f87171;font-weight:400;font-size:10px">${closedTrades.length} exits</span>`
+                + (openTrades.length ? `&nbsp;<span style="color:#a78bfa;font-weight:400;font-size:10px">${openTrades.length} open</span>` : '');
+            det.appendChild(sumEl);
+
+            // Performance summary bar (from metrics dict if available)
+            const metrics = d.metrics || {};
+            const perfBarItems = [
+                ['Return',     metrics.total_return_pct  !== undefined ? (parseFloat(metrics.total_return_pct) >= 0 ? '+' : '') + parseFloat(metrics.total_return_pct).toFixed(2) + '%' : null, true],
+                ['Sharpe',     metrics.sharpe_ratio      !== undefined ? parseFloat(metrics.sharpe_ratio).toFixed(3)    : null, false],
+                ['Max DD',     metrics.max_drawdown_pct  !== undefined ? parseFloat(metrics.max_drawdown_pct).toFixed(2) + '%' : null, true],
+                ['Win Rate',   metrics.win_rate          !== undefined ? (parseFloat(metrics.win_rate) * (parseFloat(metrics.win_rate) <= 1 ? 100 : 1)).toFixed(1) + '%' : null, false],
+                ['Final Cap',  d.final_capital           !== undefined ? '$' + Number(d.final_capital).toLocaleString('en-US', {maximumFractionDigits: 0}) : null, false],
+            ];
+            const perfDiv = document.createElement('div');
+            perfDiv.style.cssText = 'padding:5px 12px 5px;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;font-family:monospace;border-bottom:1px solid #2a2a00;';
+            let perfHasContent = false;
+            for (const [label, val, signed] of perfBarItems) {
+                if (val === null || val === undefined) continue;
+                const numV = parseFloat(val);
+                const isPos = !isNaN(numV) && numV > 0;
+                const isNeg = !isNaN(numV) && numV < 0;
+                const color = signed ? (isPos ? '#6ee7b7' : isNeg ? '#f87171' : '#bbb') : '#bbb';
+                perfDiv.innerHTML += `<span><span style="color:#555">${label}:</span> <span style="color:${color}">${escHtml(String(val))}</span></span>`;
+                perfHasContent = true;
+            }
+            if (perfHasContent) det.appendChild(perfDiv);
+
+            if (trades.length === 0) {
+                const empty = document.createElement('div');
+                empty.style.cssText = 'padding:8px 12px;font-size:11px;color:#555;';
+                empty.textContent = 'No trade records in result.';
+                det.appendChild(empty);
+                section.appendChild(det);
+                continue;
+            }
+
+            // ── helper: resolve a trade field ──────────────────────────────
+            function fmtPrice(v) { return v !== undefined && v !== null ? Number(v).toFixed(2) : '—'; }
+            function fmtShares(t) {
+                const v = t.quantity !== undefined ? t.quantity : t.shares !== undefined ? t.shares : t.qty;
+                return v !== undefined ? String(v) : '—';
+            }
+            function fmtDate(v) { return v !== undefined && v !== null ? String(v).substring(0, 10) : '—'; }
+            function fmtTime(v) {
+                if (!v) return '—';
+                const s = String(v);
+                // pick out HH:MM from timestamp string
+                const m = s.match(/T?(\d{2}:\d{2})/);
+                return m ? m[1] : s.substring(11, 16) || s.substring(0, 10);
+            }
+            function signalLabel(sig) {
+                if (!sig || typeof sig !== 'object') return '—';
+                return sig.signal || sig.type || Object.keys(sig)[0] || '—';
+            }
+
+            // ── 📥 Entries (BUY) section ───────────────────────────────────
+            const buyHeader = document.createElement('div');
+            buyHeader.className = 'trades-sub-header trade-buy-header';
+            buyHeader.innerHTML = `📥 Entries <span class="trades-count">${trades.length} buy${trades.length !== 1 ? 's' : ''}</span>`;
+            det.appendChild(buyHeader);
+
+            const buyTbl = document.createElement('table');
+            buyTbl.className = 'trades-table';
+            buyTbl.innerHTML = `<thead><tr>
+                <th class="tc-num">#</th>
+                <th>Date</th>
+                <th>Time</th>
+                <th style="text-align:right">Buy Price</th>
+                <th style="text-align:right">Shares</th>
+                <th>Signal</th>
+                <th>Status</th>
+            </tr></thead>`;
+            const buyTbody = document.createElement('tbody');
+            for (const [i, trade] of trades.slice(0, 100).entries()) {
+                const isOpen = trade.status === 'open' || !trade.exit_date;
+                const entryDate = fmtDate(trade.entry_date || trade.date || trade.timestamp);
+                const entryTime = fmtTime(trade.entry_time || trade.timestamp);
+                const entryPrice = fmtPrice(trade.entry_price !== undefined ? trade.entry_price : trade.price);
+                const shares = fmtShares(trade);
+                const signal = signalLabel(trade.entry_signal);
+                const statusCell = isOpen
+                    ? `<span style="color:#a78bfa">OPEN</span>`
+                    : `<span style="color:#888">CLOSED</span>`;
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="tc-num">${i + 1}</td>
+                    <td>${escHtml(entryDate)}</td>
+                    <td style="color:#888">${escHtml(entryTime)}</td>
+                    <td style="text-align:right;color:#6ee7b7">$${escHtml(entryPrice)}</td>
+                    <td style="text-align:right">${escHtml(shares)}</td>
+                    <td class="tc-signal">${escHtml(signal)}</td>
+                    <td style="font-size:10px">${statusCell}</td>`;
+                buyTbody.appendChild(tr);
+            }
+            buyTbl.appendChild(buyTbody);
+            det.appendChild(buyTbl);
+            if (trades.length > 100) {
+                const note = document.createElement('div');
+                note.style.cssText = 'padding:2px 8px 4px;font-size:10px;color:#555;font-family:monospace;';
+                note.textContent = `… ${trades.length - 100} more entries not shown`;
+                det.appendChild(note);
+            }
+
+            // ── 📤 Exits (SELL) section ────────────────────────────────────
+            const sellHeader = document.createElement('div');
+            sellHeader.className = 'trades-sub-header trade-sell-header';
+            sellHeader.innerHTML = `📤 Exits <span class="trades-count">${closedTrades.length} sell${closedTrades.length !== 1 ? 's' : ''}</span>`;
+            det.appendChild(sellHeader);
+
+            if (closedTrades.length === 0) {
+                const noSells = document.createElement('div');
+                noSells.style.cssText = 'padding:6px 12px;font-size:11px;color:#555;';
+                noSells.textContent = 'No completed exits yet.';
+                det.appendChild(noSells);
+            } else {
+                const sellTbl = document.createElement('table');
+                sellTbl.className = 'trades-table';
+                sellTbl.innerHTML = `<thead><tr>
+                    <th class="tc-num">#</th>
+                    <th>Entry Date</th>
+                    <th>Exit Date</th>
+                    <th style="text-align:right">Entry $</th>
+                    <th style="text-align:right">Exit $</th>
+                    <th style="text-align:right">Shares</th>
+                    <th>Exit Reason</th>
+                    <th style="text-align:right">P&amp;L $</th>
+                    <th style="text-align:right">P&amp;L %</th>
+                </tr></thead>`;
+                const sellTbody = document.createElement('tbody');
+                let n = 0;
+                for (const trade of closedTrades.slice(0, 100)) {
+                    n++;
+                    const entryDate = fmtDate(trade.entry_date || trade.date);
+                    const exitDate  = fmtDate(trade.exit_date);
+                    const entryPrice = fmtPrice(trade.entry_price !== undefined ? trade.entry_price : trade.price);
+                    const exitPrice  = fmtPrice(trade.exit_price);
+                    const shares = fmtShares(trade);
+
+                    const rawReason = trade.exit_reason || trade.reason || '—';
+                    const reasonLabel = String(rawReason).replace(/_/g, ' ');
+
+                    const pnl    = trade.pnl !== undefined ? trade.pnl : (trade.profit_loss !== undefined ? trade.profit_loss : null);
+                    const pnlPct = trade.pnl_pct !== undefined ? trade.pnl_pct : null;
+                    const pnlNum = pnl !== null ? parseFloat(pnl) : null;
+                    const pnlPctNum = pnlPct !== null ? parseFloat(pnlPct) : null;
+                    const pnlClass = pnlNum !== null ? (pnlNum >= 0 ? 'trade-pnl-pos' : 'trade-pnl-neg') : '';
+                    const pnlStr = pnlNum !== null ? (pnlNum >= 0 ? '+$' : '-$') + Math.abs(pnlNum).toFixed(2) : '—';
+                    const pnlPctStr = pnlPctNum !== null
+                        ? (pnlPctNum >= 0 ? '+' : '') + pnlPctNum.toFixed(2) + '%'
+                        : '—';
+
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td class="tc-num">${n}</td>
+                        <td>${escHtml(entryDate)}</td>
+                        <td>${escHtml(exitDate)}</td>
+                        <td style="text-align:right;color:#6ee7b7">$${escHtml(entryPrice)}</td>
+                        <td style="text-align:right;color:#f87171">$${escHtml(exitPrice)}</td>
+                        <td style="text-align:right">${escHtml(shares)}</td>
+                        <td style="font-size:10px;color:#888">${escHtml(reasonLabel)}</td>
+                        <td style="text-align:right" class="${pnlClass}">${escHtml(pnlStr)}</td>
+                        <td style="text-align:right" class="${pnlClass}">${escHtml(pnlPctStr)}</td>`;
+                    sellTbody.appendChild(tr);
+                }
+                sellTbl.appendChild(sellTbody);
+                det.appendChild(sellTbl);
+                if (closedTrades.length > 100) {
+                    const note = document.createElement('div');
+                    note.style.cssText = 'padding:2px 8px 4px;font-size:10px;color:#555;font-family:monospace;';
+                    note.textContent = `… ${closedTrades.length - 100} more exits not shown`;
+                    det.appendChild(note);
+                }
+            }
+
+            // ── open positions footer ──────────────────────────────────────
+            if (openTrades.length > 0) {
+                const openNote = document.createElement('div');
+                openNote.className = 'trades-open-note';
+                openNote.textContent = `⏳ ${openTrades.length} position${openTrades.length !== 1 ? 's' : ''} still open at end of backtest`;
+                det.appendChild(openNote);
+            }
+
+            section.appendChild(det);
+        }
+        bubble.appendChild(section);
+    }
+
+    function addTelemetryPanel(bubble, execResults) {
+        if (!execResults || execResults.length === 0) return;
+
+        // Calculate total duration
+        const totalMs = execResults.reduce((s, r) => s + (r.duration_ms || 0), 0);
+        const successCount = execResults.filter(r => r.status === 'success').length;
+        const errorCount = execResults.filter(r => r.status === 'error').length;
+
+        const det = document.createElement('details');
+        det.className = 'telemetry-detail';
+        const sumEl = document.createElement('summary');
+        sumEl.innerHTML = `⏱ Telemetry — ${execResults.length} tasks · ${totalMs}ms total`
+            + (errorCount > 0 ? ` · <span style="color:#f87171">${errorCount} errors</span>` : '');
+        det.appendChild(sumEl);
+
+        const tbl = document.createElement('table');
+        tbl.className = 'telemetry-table';
+        tbl.innerHTML = `<thead><tr><th>Task ID</th><th>Function</th><th>Status</th><th>Duration</th></tr></thead>`;
+        const tbody = document.createElement('tbody');
+        for (const r of execResults) {
+            const tr = document.createElement('tr');
+            const statusColor = r.status === 'success' ? '#6ee7b7' : r.status === 'error' ? '#f87171' : '#888';
+            tr.innerHTML = `
+                <td style="color:#666">${escHtml(r.task_id || '?')}</td>
+                <td class="tc-fn">${escHtml(r.function_name || '?')}</td>
+                <td style="color:${statusColor}">${escHtml(r.status || '?')}</td>
+                <td class="tc-dur">${r.duration_ms !== undefined ? r.duration_ms + 'ms' : '—'}</td>`;
+            tbody.appendChild(tr);
+        }
+        tbl.appendChild(tbody);
+        det.appendChild(tbl);
+        bubble.appendChild(det);
     }
 
     function addExecSummary(bubble, execResults) {

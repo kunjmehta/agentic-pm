@@ -227,7 +227,8 @@ class BacktestDAO(BaseDAO):
         entry_price: float,
         quantity: int,
         side: str,
-        entry_signal: Dict
+        entry_signal: Dict,
+        action: str = "buy",
     ) -> int:
         """Save a simulated trade entry.
 
@@ -238,8 +239,10 @@ class BacktestDAO(BaseDAO):
             entry_time: Entry timestamp
             entry_price: Entry price
             quantity: Number of shares
-            side: 'long' or 'short'
+            side: Position direction — 'long' or 'short'
             entry_signal: Dict with signal indicators that triggered entry
+            action: Trade action — 'buy', 'sell', 'short', or 'cover'.
+                Defaults to ``'buy'``.
 
         Returns:
             trade_id: Database row ID for the trade
@@ -248,9 +251,9 @@ class BacktestDAO(BaseDAO):
         query = """
             INSERT INTO backtest_trades (
                 run_id, symbol, entry_date, entry_time, entry_price,
-                quantity, side, entry_signal, created_at
+                quantity, side, action, entry_signal, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
         params = (
@@ -261,6 +264,7 @@ class BacktestDAO(BaseDAO):
             entry_price,
             quantity,
             side,
+            action,
             json.dumps(entry_signal),
             datetime.now()
         )

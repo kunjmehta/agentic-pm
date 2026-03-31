@@ -114,6 +114,30 @@ def _run_task(task: Dict[str, Any], extra_params: Dict[str, Any]) -> Dict[str, A
         result = fn(**params)
         duration_ms = int((time.monotonic() - start_time) * 1000)
         native_result = _to_native(result)
+
+        # Detect skill-level failures returned as dicts instead of exceptions.
+        # Functions like backtest_strategy_core return {"status": "failed", "error": "..."}.
+        # The executor must surface these as task errors so the synthesizer can
+        # distinguish them from genuine successes.
+        result_failed = (
+            isinstance(native_result, dict)
+            and (
+                native_result.get("status") in ("failed", "error")
+                or ("error" in native_result and native_result.get("status") not in ("completed", "success", None))
+            )
+        )
+        if result_failed:
+            err_msg = native_result.get("error") or native_result.get("message") or "skill returned failure status"
+            logger.warning(f"[executor] {fn_name} returned failure result: {err_msg}")
+            return {
+                "task_id": task_id,
+                "function_name": fn_name,
+                "status": "error",
+                "result": native_result,
+                "error": err_msg,
+                "timing": {"tool": fn_name, "duration_ms": duration_ms, "status": "error"},
+            }
+
         logger.info(f"[executor] {fn_name} completed in {duration_ms}ms")
         return {
             "task_id": task_id,

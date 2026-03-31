@@ -141,6 +141,106 @@ class SemiAutoQueryRequest(BaseModel):
     stream_reasoning: bool = False
 
 
+# ===========================================================================
+# Synthesizer Structured Output — SynthesisResult
+# ===========================================================================
+
+class MetricRow(BaseModel):
+    """A single row in a structured metrics table.
+
+    Attributes:
+        metric: Human-readable metric label.
+        value: Pre-formatted value string (percentage, dollar, ratio, etc.).
+    """
+
+    metric: str = Field(description="Human-readable metric label")
+    value: str = Field(description="Pre-formatted value string")
+
+
+class ContentSection(BaseModel):
+    """A named section of the synthesis output.
+
+    Each section has a title and may contain any combination of a metrics table,
+    bullet-point observations, and an optional italic footnote.
+
+    Attributes:
+        title: Section heading, e.g. ``"Returns"``, ``"Signals"``.
+        table: Ordered list of MetricRow items for tabular numeric data.
+        bullets: Short qualitative observations.
+        note: Single italic note (e.g. for caveats or missing data).
+    """
+
+    title: str = Field(description="Section heading")
+    table: List[MetricRow] = Field(
+        default_factory=list, description="Ordered metric rows for table rendering"
+    )
+    bullets: List[str] = Field(
+        default_factory=list, description="Short qualitative observations"
+    )
+    note: Optional[str] = Field(
+        default=None, description="Optional italic caveat or footnote"
+    )
+
+
+class SynthesisResult(BaseModel):
+    """Structured synthesis output produced by the synthesizer LLM via ``with_structured_output``.
+
+    This model replaces free-form markdown generation — the LLM fills in each
+    structured field and the synthesizer then renders them deterministically into
+    well-formatted Markdown for the UI.
+
+    Attributes:
+        headline: Short descriptive title, e.g. ``"AAPL — Mean-Reversion Backtest"``.
+        intent: Analysis type — ``"backtest"`` | ``"quant"`` | ``"portfolio"`` | ``"mixed"``.
+        verdict: Backtest-only verdict: ``"RECOMMENDED"`` or ``"NOT RECOMMENDED"``.
+        summary_quote: Verbatim one-sentence summary from backtest result.
+        overall_signal: Quant-only top-level signal: ``"BUY"`` | ``"SELL"`` | ``"HOLD"``.
+        signal_confidence: Quant signal confidence: ``"High"`` | ``"Medium"`` | ``"Low"``.
+        sections: Ordered list of ContentSection (Returns, Risk, Trade Stats, Signals, etc.).
+        takeaway: One-sentence bottom-line conclusion shown as a blockquote.
+        agents_used: Agents that contributed, e.g. ``["PM", "Quant"]``.
+        error_note: Brief note when some tasks failed or data was unavailable.
+    """
+
+    headline: str = Field(
+        description="Short title — symbol + analysis type, e.g. 'AAPL — Mean-Reversion Backtest'"
+    )
+    intent: str = Field(
+        description="Analysis type: 'backtest' | 'quant' | 'portfolio' | 'mixed'"
+    )
+    verdict: Optional[str] = Field(
+        default=None,
+        description="Backtest only: 'RECOMMENDED' or 'NOT RECOMMENDED'",
+    )
+    summary_quote: Optional[str] = Field(
+        default=None,
+        description="Verbatim one-sentence backtest summary to render as a blockquote",
+    )
+    overall_signal: Optional[str] = Field(
+        default=None,
+        description="Quant only: 'BUY' | 'SELL' | 'HOLD'",
+    )
+    signal_confidence: Optional[str] = Field(
+        default=None,
+        description="Quant signal confidence: 'High' | 'Medium' | 'Low'",
+    )
+    sections: List[ContentSection] = Field(
+        default_factory=list,
+        description="Ordered content sections (Returns, Risk, Trade Stats, Signals, etc.)",
+    )
+    takeaway: str = Field(
+        description="One-sentence bottom-line conclusion rendered as a blockquote"
+    )
+    agents_used: List[str] = Field(
+        default_factory=list,
+        description="Contributing agents, e.g. ['PM', 'Quant', 'Backtester']",
+    )
+    error_note: Optional[str] = Field(
+        default=None,
+        description="Brief note about failed tasks or unavailable data",
+    )
+
+
 if __name__ == "__main__":
     """Smoke test: instantiate all response models."""
     print("=" * 60)
@@ -192,5 +292,57 @@ if __name__ == "__main__":
     assert req.backtest_mode is True
     assert req.thread_id is None
     print("[OK] SemiAutoQueryRequest")
+
+    # SynthesisResult — backtest shape
+    sr = SynthesisResult(
+        headline="AAPL — Mean-Reversion Backtest",
+        intent="backtest",
+        verdict="RECOMMENDED",
+        summary_quote="Strategy generated 12.5% return with controlled drawdown.",
+        sections=[
+            ContentSection(
+                title="Returns",
+                table=[
+                    MetricRow(metric="Total Return", value="+12.50%"),
+                    MetricRow(metric="Sharpe Ratio", value="1.340"),
+                ],
+                bullets=["Outperformed buy-and-hold by 4%"],
+            ),
+            ContentSection(
+                title="Risk",
+                table=[MetricRow(metric="Max Drawdown", value="-8.20%")],
+                note="Sortino unavailable due to no negative-return days in dataset",
+            ),
+        ],
+        takeaway="The mean-reversion strategy on AAPL delivered solid risk-adjusted returns for the period.",
+        agents_used=["PM", "Backtester"],
+    )
+    assert sr.verdict == "RECOMMENDED"
+    assert len(sr.sections) == 2
+    assert sr.sections[0].table[0].metric == "Total Return"
+    print("[OK] SynthesisResult (backtest shape)")
+
+    # SynthesisResult — quant shape
+    sq = SynthesisResult(
+        headline="AAPL Technical Analysis",
+        intent="quant",
+        overall_signal="BUY",
+        signal_confidence="Medium",
+        sections=[
+            ContentSection(
+                title="Momentum",
+                table=[
+                    MetricRow(metric="RSI (14)", value="58.3"),
+                    MetricRow(metric="MACD Histogram", value="+0.42"),
+                ],
+                bullets=["MACD crossed signal line bullishly 3 days ago"],
+            ),
+        ],
+        takeaway="Momentum and volume point to a short-term BUY entry with medium conviction.",
+        agents_used=["PM", "Quant"],
+    )
+    assert sq.overall_signal == "BUY"
+    assert sq.verdict is None
+    print("[OK] SynthesisResult (quant shape)")
 
     print("\n[ALL OK] models/responses.py smoke tests passed")

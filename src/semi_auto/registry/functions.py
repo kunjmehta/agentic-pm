@@ -17,12 +17,23 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.semi_auto.models.skills import (
+    BacktestInput,
+    CandleInput,
+    DataAvailabilityInput,
+    HistoricalDataInput,
+    MeanReversionInput,
+    MomentumInput,
+    VolatilityInput,
+    VolumeInput,
+)
 
 logger = get_logger(__name__)
 
 # ── Portfolio skills ───────────────────────────────────────────────────────────
 
 from src.semi_auto.skills.portfolio.skills import (
+    portfolio_skills as _portfolio_skills,
     get_portfolio_status_core,
     get_positions_summary_core,
     check_portfolio_health_core,
@@ -33,16 +44,29 @@ from src.semi_auto.skills.portfolio.skills import (
 # ── Quant skills ──────────────────────────────────────────────────────────────
 
 from src.semi_auto.skills.quant.skills import (
+    momentum_skill as _momentum_skill,
+    volatility_skill as _volatility_skill,
+    volume_skill as _volume_skill,
+    candlestick_skill as _candlestick_skill,
+    mean_reversion_skill as _mean_reversion_skill,
+    # Legacy function aliases (used by _calc_*_wrapped helpers below)
     calc_momentum_package as _calc_momentum_raw,
     calc_volatility_bands as _calc_volatility_raw,
     calc_volume_flow as _calc_volume_raw,
     analyze_candle_structure as _analyze_candles_raw,
-    MeanReversionStrategy as _MeanReversionStrategy,
 )
 
 # ── Backtester skills ─────────────────────────────────────────────────────────
 
-from src.semi_auto.skills.backtester.skills import backtest_strategy_core as _backtest_strategy_raw
+from src.semi_auto.skills.backtester.skills import (
+    backtest_skill as _backtest_skill,
+    snapshot_skill as _snapshot_skill,
+    swap_skill as _swap_skill,
+    backtest_strategy_core as _backtest_strategy_raw,
+    save_eod_snapshot_core as _save_eod_snapshot_raw,
+    snapshot_worth_core as _snapshot_worth_raw,
+    swap_positions_core as _swap_positions_raw,
+)
 
 
 # ── Wrapper helpers ───────────────────────────────────────────────────────────
@@ -74,100 +98,287 @@ def _fetch_bars_for_symbol(symbol: str, timeframe: str = "1Day", lookback_days: 
         return None
 
 
-def _calc_momentum_wrapped(symbol: str, timeframe: str = "1Day", lookback_days: int = 90) -> Dict:
-    """Fetch bars then compute MACD + RSI momentum indicators.
+def _fetch_bars_range(
+    skill_name: str,
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    timeframe: str,
+):
+    """Fetch bars from AlpacaDAO for an explicit date range.
+
+    Args:
+        skill_name: Caller label for logging.
+        symbol: Stock ticker.
+        start_date: Start date string "YYYY-MM-DD".
+        end_date: End date string "YYYY-MM-DD".
+        timeframe: AlpacaDAO canonical timeframe string.
+
+    Returns:
+        pandas DataFrame or None on failure.
+    """
+    try:
+        from datetime import datetime as _dt
+        from src.common.dao import AlpacaDAO
+        dao = AlpacaDAO()
+        df = dao.get_bars(
+            symbol,
+            _dt.fromisoformat(start_date),
+            _dt.fromisoformat(end_date),
+            timeframe,
+        )
+        dao.close()
+        if df is None or df.empty:
+            logger.warning(f"[{skill_name}] no bars for {symbol}/{timeframe} {start_date}–{end_date}")
+            return None
+        return df
+    except Exception as exc:
+        logger.warning(f"[{skill_name}] bar fetch failed for {symbol}: {exc}")
+        return None
+
+
+def _calc_momentum_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 90,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,  # absorb LLM-injected fields (task_id, note, etc.)
+) -> Dict:
+    """Compute MACD + RSI signals.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Input is validated and normalised via :class:`~src.semi_auto.models.skills.MomentumInput`
+    before the skill is called (symbols are upper-cased, timeframe aliases are resolved, and
+    date-pair consistency is enforced).
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar timeframe (alias-aware, e.g. "1d" → "1Day").
+        lookback_days: Calendar days to look back (live mode only).
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Dict with macd, rsi, symbol, timeframe, timestamp — or error dict.
+    """
+    try:
+        inp = MomentumInput(
+            symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+            start_date=start_date, end_date=end_date,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] MomentumInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for calc_momentum: {exc}"}
+
+    if inp.is_historical:
+        df = _fetch_bars_range("calc_momentum", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
+        if df is None:
+            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+        result = _momentum_skill.analyze_bars(df)
+        result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
+                       "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
+        return result
+    return _momentum_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
+
+
+def _calc_volatility_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 90,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Compute Bollinger Band signals.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Input is validated and normalised via :class:`~src.semi_auto.models.skills.VolatilityInput`.
 
     Args:
         symbol: Stock ticker.
         timeframe: Bar timeframe.
-        lookback_days: Lookback period in calendar days.
+        lookback_days: Calendar days to look back (live mode only).
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
 
     Returns:
-        Dict with macd and rsi fields, or error dict.
+        Dict with upper, middle, lower, bandwidth — or error dict.
     """
-    if _calc_momentum_raw is None:
-        return {"error": "momentum skill not available"}
-    df = _fetch_bars_for_symbol(symbol, timeframe, lookback_days)
-    if df is None:
-        return {"error": f"No data for {symbol}/{timeframe}"}
-    return _calc_momentum_raw(df)
+    try:
+        inp = VolatilityInput(
+            symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+            start_date=start_date, end_date=end_date,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] VolatilityInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for calc_volatility_bands: {exc}"}
+
+    if inp.is_historical:
+        df = _fetch_bars_range("calc_volatility_bands", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
+        if df is None:
+            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+        result = _volatility_skill.analyze_bars(df)
+        result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
+                       "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
+        return result
+    return _volatility_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
 
 
-def _calc_volatility_wrapped(symbol: str, timeframe: str = "1Day", lookback_days: int = 90) -> Dict:
-    """Fetch bars then compute Bollinger Bands volatility indicators.
+def _calc_volume_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 90,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Compute OBV + volume flow signals.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Input is validated and normalised via :class:`~src.semi_auto.models.skills.VolumeInput`.
 
     Args:
         symbol: Stock ticker.
         timeframe: Bar timeframe.
-        lookback_days: Lookback period in calendar days.
+        lookback_days: Calendar days to look back (live mode only).
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
 
     Returns:
-        Dict with upper, middle, lower, bandwidth, or error dict.
+        Dict with obv, volume_trend, avg_volume_10d, current_vs_avg — or error dict.
     """
-    if _calc_volatility_raw is None:
-        return {"error": "volatility skill not available"}
-    df = _fetch_bars_for_symbol(symbol, timeframe, lookback_days)
-    if df is None:
-        return {"error": f"No data for {symbol}/{timeframe}"}
-    return _calc_volatility_raw(df)
+    try:
+        inp = VolumeInput(
+            symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+            start_date=start_date, end_date=end_date,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] VolumeInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for calc_volume_flow: {exc}"}
+
+    if inp.is_historical:
+        df = _fetch_bars_range("calc_volume_flow", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
+        if df is None:
+            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+        result = _volume_skill.analyze_bars(df)
+        result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
+                       "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
+        return result
+    return _volume_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
 
 
-def _calc_volume_wrapped(symbol: str, timeframe: str = "1Day", lookback_days: int = 90) -> Dict:
-    """Fetch bars then compute OBV and volume flow indicators.
+def _analyze_candles_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 30,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Detect candlestick patterns.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Input is validated and normalised via :class:`~src.semi_auto.models.skills.CandleInput`.
 
     Args:
         symbol: Stock ticker.
         timeframe: Bar timeframe.
-        lookback_days: Lookback period in calendar days.
+        lookback_days: Calendar days to look back (live mode only).
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
 
     Returns:
-        Dict with obv, volume_trend, avg_volume_10d, current_vs_avg, or error dict.
+        Dict with patterns, last_candle_type, last_body_pct, pattern_count — or error dict.
     """
-    if _calc_volume_raw is None:
-        return {"error": "volume skill not available"}
-    df = _fetch_bars_for_symbol(symbol, timeframe, lookback_days)
-    if df is None:
-        return {"error": f"No data for {symbol}/{timeframe}"}
-    return _calc_volume_raw(df)
+    try:
+        inp = CandleInput(
+            symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+            start_date=start_date, end_date=end_date,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] CandleInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for analyze_candle_structure: {exc}"}
+
+    if inp.is_historical:
+        df = _fetch_bars_range("analyze_candle_structure", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
+        if df is None:
+            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+        result = _candlestick_skill.analyze_bars(df)
+        result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
+                       "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
+        return result
+    return _candlestick_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
 
 
-def _analyze_candles_wrapped(symbol: str, timeframe: str = "1Day", lookback_days: int = 30) -> Dict:
-    """Fetch bars then detect candlestick patterns.
+def _mean_reversion_analyze(
+    symbol: str,
+    lookback: int = 60,
+    threshold: float = 2.0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    timeframe: str = "1Day",
+    **_extra,
+) -> Dict:
+    """Run full mean-reversion analysis — Z-score, Bollinger, signal, recommendation.
 
-    Args:
-        symbol: Stock ticker.
-        timeframe: Bar timeframe.
-        lookback_days: Lookback period in calendar days.
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars from today back ``lookback`` bars.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
 
-    Returns:
-        Dict with patterns, last_candle_type, etc., or error dict.
-    """
-    if _analyze_candles_raw is None:
-        return {"error": "candlestick skill not available"}
-    df = _fetch_bars_for_symbol(symbol, timeframe, lookback_days)
-    if df is None:
-        return {"error": f"No data for {symbol}/{timeframe}"}
-    return _analyze_candles_raw(df)
-
-
-def _mean_reversion_analyze(symbol: str, lookback: int = 60, threshold: float = 2.0) -> Dict:
-    """Run MeanReversionStrategy.analyze() for the given symbol.
+    Input is validated and normalised via :class:`~src.semi_auto.models.skills.MeanReversionInput`.
 
     Args:
         symbol: Stock ticker.
         lookback: Lookback period in trading days.
         threshold: Z-score threshold for entry signal.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+        timeframe: Bar timeframe (historical mode only; live always uses default).
 
     Returns:
-        Analysis dict from MeanReversionStrategy.analyze(), or error dict.
+        Full analysis dict with statistics, signals, trade_recommendation — or error dict.
     """
-    if _MeanReversionStrategy is None:
-        return {"error": "mean_reversion skill not available"}
     try:
-        strategy = _MeanReversionStrategy(symbol=symbol, lookback=lookback, threshold=threshold)
-        return strategy.analyze()
+        inp = MeanReversionInput(
+            symbol=symbol, lookback=lookback, threshold=threshold,
+            start_date=start_date, end_date=end_date, timeframe=timeframe,
+        )
     except Exception as exc:
-        logger.warning(f"[registry] mean_reversion_analyze failed for {symbol}: {exc}")
+        logger.warning(f"[registry] MeanReversionInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for mean_reversion_analyze: {exc}"}
+
+    try:
+        if inp.is_historical:
+            df = _fetch_bars_range("mean_reversion_analyze", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
+            if df is None:
+                return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+            result = _mean_reversion_skill.analyze_bars(df, threshold=inp.threshold, lookback=inp.lookback)
+            result.update({"symbol": inp.symbol, "start_date": inp.start_date,
+                           "end_date": inp.end_date, "mode": "historical"})
+            return result
+        return _mean_reversion_skill.generate_signals(
+            symbol=inp.symbol, lookback=inp.lookback, threshold=inp.threshold
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] mean_reversion_analyze failed for {inp.symbol}: {exc}")
         return {"error": str(exc)}
 
 
@@ -191,6 +402,9 @@ def _backtest_strategy(
     Accepts ``symbol`` as an alias for ``ticker`` so the LLM can use either.
     Extra kwargs (task_id, workflow_type, note, metrics_requested) are silently
     absorbed — they come from LLM planning but are not used by the core skill.
+
+    Input is validated and normalised via :class:`~src.semi_auto.models.skills.BacktestInput`
+    (strategy names are lower-cased and validated, ticker is upper-cased).
 
     Args:
         ticker: Stock ticker (or use symbol).
@@ -219,24 +433,87 @@ def _backtest_strategy(
         if not resolved_params:
             resolved_params = strategy.get("params")
 
-    if _backtest_strategy_raw is None:
-        return {"error": "backtest_strategy skill not available"}
+    # Validate inputs via Pydantic
     try:
-        return _backtest_strategy_raw(
+        inp = BacktestInput(
             ticker=resolved_ticker,
             start_date=start_date,
             end_date=end_date,
             strategy=resolved_strategy,
             initial_capital=initial_capital,
             strategy_params=resolved_params,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] BacktestInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for backtest_strategy: {exc}"}
+
+    if _backtest_strategy_raw is None:
+        return {"error": "backtest_strategy skill not available"}
+    try:
+        return _backtest_strategy_raw(
+            ticker=inp.ticker,
+            start_date=inp.start_date,
+            end_date=inp.end_date,
+            strategy=inp.strategy,
+            initial_capital=inp.initial_capital,
+            strategy_params=inp.strategy_params,
             save_to_db=True,
         )
     except Exception as exc:
-        logger.warning(f"[registry] backtest_strategy failed for {resolved_ticker}: {exc}")
+        logger.warning(f"[registry] backtest_strategy failed for {inp.ticker}: {exc}")
         return {"error": str(exc)}
 
 
 # ── DAO wrapper helpers ───────────────────────────────────────────────────────
+
+def _to_native(obj: Any) -> Any:
+    """Recursively convert non-JSON-serialisable types to native Python equivalents.
+
+    Handles numpy scalar types, pandas Timestamps, Decimals, and nested
+    containers so that results from DAO layers can be safely JSON-serialised
+    or passed as plain dicts to the executor/synthesizer.
+
+    Args:
+        obj: Any Python object — scalar, dict, list, or nested structure.
+
+    Returns:
+        Object with all non-native types replaced by their Python equivalents.
+    """
+    import decimal
+    if obj is None:
+        return None
+    # numpy integer / float scalars
+    try:
+        import numpy as np  # only imported on demand to avoid hard dependency
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return [_to_native(v) for v in obj.tolist()]
+    except ImportError:
+        pass
+    # pandas Timestamp
+    try:
+        import pandas as pd
+        if isinstance(obj, pd.Timestamp):
+            return obj.isoformat()
+    except ImportError:
+        pass
+    # Decimal
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    # datetime
+    from datetime import date, datetime
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    # containers
+    if isinstance(obj, dict):
+        return {str(k): _to_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_native(v) for v in obj]
+    return obj
+
 
 def _df_to_records(df) -> list:
     """Convert a DataFrame to a list of native dicts. Returns [] if empty/None."""
@@ -291,6 +568,9 @@ def _check_data_availability_wrapped(
     The LLM sometimes emits 'ticker' (matching backtest_strategy) for this
     function which expects 'symbol'. This wrapper normalises either form.
 
+    Input is validated via :class:`~src.semi_auto.models.skills.DataAvailabilityInput`
+    which also normalises timeframe aliases (e.g. "1d" → "1Day").
+
     Args:
         symbol: Stock ticker (canonical param name).
         ticker: Alias accepted for LLM compatibility — mapped to symbol.
@@ -309,14 +589,21 @@ def _check_data_availability_wrapped(
     if ticker and not symbol:
         logger.info(f"[registry] check_data_availability: mapped 'ticker' → 'symbol' ({ticker})")
     try:
-        return check_data_availability_core(
-            symbol=resolved_symbol,
-            start_date=start_date,
-            end_date=end_date,
-            timeframe=timeframe,
+        inp = DataAvailabilityInput(
+            symbol=resolved_symbol, start_date=start_date, end_date=end_date, timeframe=timeframe,
         )
     except Exception as exc:
-        logger.warning(f"[registry] check_data_availability failed for {resolved_symbol}: {exc}")
+        logger.warning(f"[registry] DataAvailabilityInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for check_data_availability: {exc}"}
+    try:
+        return check_data_availability_core(
+            symbol=inp.symbol,
+            start_date=inp.start_date,
+            end_date=inp.end_date,
+            timeframe=inp.timeframe,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] check_data_availability failed for {inp.symbol}: {exc}")
         return {"error": str(exc)}
 
 
@@ -329,8 +616,9 @@ def _fetch_historical_data_wrapped(
 ) -> Dict:
     """Normalising wrapper around fetch_historical_data_core.
 
-    Converts LLM-emitted timeframe aliases (e.g. "1d") to canonical form
-    before calling the underlying skill.
+    Input is validated via :class:`~src.semi_auto.models.skills.HistoricalDataInput`
+    which converts LLM-emitted timeframe aliases (e.g. "1d") to canonical form
+    and upper-cases the symbol before calling the underlying skill.
 
     Args:
         symbol: Stock ticker.
@@ -343,18 +631,24 @@ def _fetch_historical_data_wrapped(
     """
     if fetch_historical_data_core is None:
         return {"error": "fetch_historical_data skill not available"}
-    tf = _normalize_timeframe(timeframe, default="1Min")
-    if tf != timeframe:
-        logger.info(f"[registry] fetch_historical_data: normalised timeframe '{timeframe}' → '{tf}'")
     try:
-        return fetch_historical_data_core(
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-            timeframe=tf,
+        inp = HistoricalDataInput(
+            symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe,
         )
     except Exception as exc:
-        logger.warning(f"[registry] fetch_historical_data failed for {symbol}: {exc}")
+        logger.warning(f"[registry] HistoricalDataInput validation failed: {exc}")
+        return {"error": f"Invalid parameters for fetch_historical_data: {exc}"}
+    if inp.timeframe != timeframe:
+        logger.info(f"[registry] fetch_historical_data: normalised timeframe '{timeframe}' → '{inp.timeframe}'")
+    try:
+        return fetch_historical_data_core(
+            symbol=inp.symbol,
+            start_date=inp.start_date,
+            end_date=inp.end_date,
+            timeframe=inp.timeframe,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] fetch_historical_data failed for {inp.symbol}: {exc}")
         return {"error": str(exc)}
 
 
@@ -984,6 +1278,10 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "get_portfolio_snapshot":  _get_portfolio_snapshot,
     "get_portfolio_snapshot_history": _get_portfolio_snapshot_history,
     "get_risk_parameters":     _get_risk_parameters,
+    # ── Backtester workflow B & C ─────────────────────────────────────────────
+    "save_eod_snapshot":       _save_eod_snapshot_raw,
+    "snapshot_worth":          _snapshot_worth_raw,
+    "swap_positions":          _swap_positions_raw,
 }
 
 # Filter out None entries at load time so executor can detect unavailable fns
@@ -1212,11 +1510,11 @@ if __name__ == "__main__":
         status = "[OK]" if fn is not None else "[WARN] not available"
         print(f"  {status}  {name}")
 
-    assert len(FUNCTION_REGISTRY) == 38, f"Expected 38 functions, got {len(FUNCTION_REGISTRY)}"
-    print("\n[OK] All 38 functions registered")
+    assert len(FUNCTION_REGISTRY) == 41, f"Expected 41 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
+    print("\n[OK] All 41 functions registered")
 
     schema = get_registry_schema()
-    assert len(schema) == 38, f"Expected 38 schema entries, got {len(schema)}"
+    assert len(schema) == 41, f"Expected 41 schema entries, got {len(schema)}"
     print("[OK] Registry schema returned")
 
     print("\n[ALL OK] registry/functions.py smoke test passed")
