@@ -107,7 +107,7 @@ def portfolio_reasoning_node(state: dict) -> dict:
     try:
         from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets
+        from src.common.utils import secrets, config
 
         query: str = state.get("query", "")
         intent: str = state.get("intent", "portfolio")
@@ -128,8 +128,8 @@ def portfolio_reasoning_node(state: dict) -> dict:
         )
 
         llm = ChatOpenAI(
-            model="gpt-5-mini",
-            temperature=0,
+            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
+            temperature=config.get("graph_api.model_temperature", 0.0),
             api_key=secrets.get("openai.api_key"),
         )
         structured_llm = llm.with_structured_output(AgentOutput, method="function_calling")

@@ -21,44 +21,43 @@ from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
-_SYNTHESIZER_SYSTEM_PROMPT = """You are a Portfolio Manager AI. Your job is to synthesize multi-agent analysis results into a structured SynthesisResult.
-
-Fill in each field accurately given the reasoning traces and execution results provided.
+_SYNTHESIZER_SYSTEM_PROMPT = """You are a Portfolio Manager AI synthesizing multi-agent results into a compact SynthesisResult.
 
 FIELD GUIDANCE:
 
-headline — concise title, e.g. "AAPL — Mean-Reversion Backtest" or "MSFT Technical Analysis (Live)" or "Portfolio Status"
+headline — concise title: e.g. "AAPL — Mean-Reversion Backtest", "MSFT Technical Analysis", "Portfolio Status"
 
 intent — one of: "backtest" | "quant" | "portfolio" | "mixed"
 
-verdict — BACKTEST ONLY: "RECOMMENDED" or "NOT RECOMMENDED" — based on the recommendation field in results
+verdict — BACKTEST ONLY: "RECOMMENDED" or "NOT RECOMMENDED"
 
-summary_quote — BACKTEST ONLY: copy the verbatim summary sentence from the backtest result (one sentence)
+summary_quote — BACKTEST ONLY: one verbatim sentence from the backtest summary field
 
-overall_signal — QUANT ONLY: the top-level signal "BUY", "SELL", or "HOLD" — synthesize from all indicators
+overall_signal — QUANT ONLY: "BUY", "SELL", or "HOLD"
 
-signal_confidence — QUANT ONLY: "High" (≥2 confirming indicators), "Medium" (split signals), "Low" (insufficient data)
+signal_confidence — QUANT ONLY: "High" (≥2 confirming), "Medium" (split), "Low" (insufficient data)
 
-sections — structured content blocks. Use these standard section titles:
+sections — use minimal sections:
   * Backtest: "Returns", "Risk", "Trade Statistics"
-  * Quant: "Momentum", "Volatility", "Volume", "Candlestick Patterns", "Signals Summary"
-  * Portfolio: "Account Summary", "Positions", "Health"
-  Each section has:
-    - table: list of {metric, value} rows for all numeric data — use pre-formatted strings ("+12.50%", "$100,000", "1.340")
-    - bullets: 1-3 short qualitative observations per section (not for every section — only where insight adds value)
-    - note: single italic sentence for caveats or missing data (optional)
+  * Quant: "Momentum", "Volatility", "Volume" (only if data exists per indicator)
+  * Portfolio: ONE section titled "Portfolio" — consolidate ALL metrics (account + positions + health) into one table
+  Each section:
+    - table: {metric, value} rows for numeric data only — pre-format values ("+12.50%", "$100,000")
+    - bullets: ONLY if the observation adds genuine insight NOT already visible in the table. Max 1 bullet/section. OMIT bullets for portfolio sections unless a position needs highlighting.
+    - note: ONLY for actual errors, missing data, or real warnings. Leave empty otherwise.
 
-takeaway — ONE sentence that summarises the bottom-line conclusion (will be shown as a blockquote)
+takeaway — ONE short sentence: the single most actionable conclusion
 
-agents_used — list the agents that actually ran, e.g. ["PM"], ["PM", "Quant"], ["PM", "Backtester", "Quant"]
+agents_used — only agents that actually ran
 
-error_note — if any tasks errored or returned no data, briefly note what is missing (keep to one line)
+error_note — only if a task failed or returned no data; leave empty if everything succeeded
 
 RULES:
-- Never invent metrics that are not present in the execution results
-- If the backtest includes multiple strategies, create one section group per strategy using title "Strategy: <name>"
-- For portfolio positions, put each position as a bullet in the Positions section
-- Omit sections/tables that have no data rather than showing empty rows
+- Never repeat table data as a bullet (if the table shows equity=$100k, do NOT add a bullet saying 'Equity is $100k')
+- Never invent or estimate metrics not present in the results
+- For portfolio with no open positions: table shows zeros; one bullet max; skip the note
+- If backtest has multiple strategies, one "Strategy: <name>" section group per strategy
+- Omit empty sections/tables entirely
 """
 
 
@@ -317,7 +316,7 @@ def _persist_turn(state: dict, final_response: str, start_time: float) -> None:
             tool_timings=tool_timings,
             delegated_to=",".join(
                 a for a in ("quant", "backtester")
-                if state.get(f"_{a}_task_queue" if a == "quant" else "_delegate_backtester")
+                if state.get(f"_delegate_{a}")
             ),
             delegation_result=f"{success_count}/{len(exec_results)} tasks succeeded",
         )
@@ -406,23 +405,23 @@ def _render_synthesis_result(result) -> str:
     # ── Sections ──────────────────────────────────────────────────────────
     for section in result.sections:
         lines.append(f"### {section.title}")
-        lines.append("")
 
         if section.table:
             lines.append("| Metric | Value |")
             lines.append("|--------|------:|")
             for row in section.table:
                 lines.append(f"| {row.metric} | {row.value} |")
-            lines.append("")
 
         if section.bullets:
+            lines.append("")
             for bullet in section.bullets:
                 lines.append(f"- {bullet}")
-            lines.append("")
 
         if section.note:
+            lines.append(f"")
             lines.append(f"*{section.note}*")
-            lines.append("")
+
+        lines.append("")
 
     # ── Takeaway ──────────────────────────────────────────────────────────
     if result.takeaway:
@@ -434,10 +433,10 @@ def _render_synthesis_result(result) -> str:
     if result.agents_used:
         footer_parts.append(f"Agents: {', '.join(result.agents_used)}")
     if result.error_note:
-        footer_parts.append(f"Note: {result.error_note}")
+        footer_parts.append(f"⚠ {result.error_note}")
     if footer_parts:
         lines.append("---")
-        lines.append("  \n".join(f"*{p}*" for p in footer_parts))
+        lines.append(" · ".join(f"*{p}*" for p in footer_parts))
 
     return "\n".join(lines)
 
@@ -457,12 +456,12 @@ def _call_llm(state: dict) -> str:
     """
     try:
         from langchain_openai import ChatOpenAI
-        from src.common.utils import secrets
+        from src.common.utils import secrets, config
         from src.semi_auto.models.responses import SynthesisResult
 
         llm = ChatOpenAI(
-            model="gpt-5-mini",
-            temperature=0.2,
+            model=config.get("graph_api.routing_model", "gpt-4o-mini"),
+            temperature=config.get("graph_api.synthesizer_temperature", 0.2),
             api_key=secrets.get("openai.api_key"),
         )
         structured_llm = llm.with_structured_output(SynthesisResult)

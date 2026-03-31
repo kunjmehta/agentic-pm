@@ -37,25 +37,25 @@ DATA MODE — choose the correct mode based on the user's request:
 
 TECHNICAL INDICATOR FUNCTIONS:
 - calc_momentum
-  LIVE:       params={{symbol, timeframe="1Day", lookback_days=90}}
-  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Day"}}
+  LIVE:       params={{symbol, timeframe="1Min", lookback_days=90}}
+  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Computes: MACD (value, signal, histogram) and RSI
   Recommendation: RSI > 70 = overbought, RSI < 30 = oversold
 
 - calc_volatility_bands
-  LIVE:       params={{symbol, timeframe="1Day", lookback_days=90}}
-  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Day"}}
+  LIVE:       params={{symbol, timeframe="1Min", lookback_days=90}}
+  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Computes: Bollinger Bands (upper, middle, lower, bandwidth)
   Recommendation: price above upper = extended, below lower = compressed
 
 - calc_volume_flow
-  LIVE:       params={{symbol, timeframe="1Day", lookback_days=90}}
-  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Day"}}
+  LIVE:       params={{symbol, timeframe="1Min", lookback_days=90}}
+  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Computes: OBV and volume trend (increasing/decreasing/stable)
 
 - analyze_candle_structure
-  LIVE:       params={{symbol, timeframe="1Day", lookback_days=30}}
-  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Day"}}
+  LIVE:       params={{symbol, timeframe="1Min", lookback_days=30}}
+  HISTORICAL: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Detects: Engulfing, Doji, Hammer, Hanging Man patterns
 
 - mean_reversion_analyze
@@ -65,11 +65,11 @@ TECHNICAL INDICATOR FUNCTIONS:
     + full trade_recommendation (entry_price, stop_loss, take_profit, confidence)
 
 MARKET DATA FUNCTIONS:
-- get_market_bars: params={{symbol, start_date, end_date, timeframe="1Day"}}
+- get_market_bars: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Fetch raw OHLCV bars from DB for a date range
-- get_latest_price: params={{symbol, timeframe="1Day"}}
+- get_latest_price: params={{symbol, timeframe="1Min"}}
   Get most recent bar (open, high, low, close, volume)
-- get_precomputed_indicators: params={{symbol, start_date, end_date, timeframe="1Day"}}
+- get_precomputed_indicators: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Retrieve pre-computed technical indicators stored in DB
 
 FUNDAMENTAL DATA FUNCTIONS:
@@ -79,13 +79,11 @@ FUNDAMENTAL DATA FUNCTIONS:
   Historical earnings: reported vs estimated EPS, surprise %
 
 ANALYST & SIGNAL FUNCTIONS:
-- get_latest_eod: params={{symbol}}
-  Most recent end-of-day analyst summary for the symbol
-- get_latest_signal: params={{symbol, strategy_name}}
-  Most recent strategy signal (buy/sell/hold) with confidence score
-- get_recent_signals: params={{symbol, strategy_name=None, limit=10}}
-  Recent signals from StrategyDAO (pass strategy_name to filter)
-- get_actionable_signals: params={{symbol=None, min_confidence=0.6}}
+- get_eod_summaries: params={{symbol, start_date, end_date}}
+  End-of-day analyst summaries for a date range; use limit=1 for the most recent
+- get_recent_signals: params={{symbol, strategy_name, limit=10}}
+  Recent signals from StrategyDAO (strategy_name is required)
+- get_actionable_signals: params={{min_confidence=0.6}}
   Returns high-confidence signals across all strategies (current/live)
 
 SELECTION RULES:
@@ -137,7 +135,7 @@ def quant_reasoning_node(state: dict) -> dict:
     try:
         from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets
+        from src.common.utils import secrets, config
 
         # Support both Send payload (partial) and full state
         query: str = (
@@ -195,8 +193,8 @@ def quant_reasoning_node(state: dict) -> dict:
                 )
 
         llm = ChatOpenAI(
-            model="gpt-5-mini",
-            temperature=0,
+            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
+            temperature=config.get("graph_api.model_temperature", 0.0),
             api_key=secrets.get("openai.api_key"),
         )
         structured_llm = llm.with_structured_output(AgentPlan, method="function_calling")

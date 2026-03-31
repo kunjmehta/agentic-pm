@@ -68,9 +68,10 @@
   "graph_api": {
     "host": "0.0.0.0",
     "port": 8001,
-    "model": "gpt-4o-mini",
-    "model_temperature": 0.2,
-    "classifier_temperature": 0.0,
+    "reasoning_model": "gpt-5-mini",
+    "routing_model": "gpt-4o-mini",
+    "model_temperature": 0.0,
+    "synthesizer_temperature": 0.2,
     "max_tokens": 2048
   }
 }

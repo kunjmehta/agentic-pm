@@ -31,20 +31,17 @@ Given the backtest request, output a TaskList of function calls.
 BACKTEST CORE FUNCTIONS:
 - check_data_availability: params={{symbol, start_date, end_date}}
   Use FIRST to verify data exists before backtesting. Priority=1.
-  IMPORTANT: use "symbol" — NOT "ticker".
 - fetch_historical_data: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Use if data is missing. Priority=3 (write to DuckDB — runs sequentially).
-  IMPORTANT: use "symbol" — NOT "ticker".
-- backtest_strategy: params={{ticker, start_date, end_date, strategy, initial_capital=100000.0}}
+- backtest_strategy: params={{symbol, start_date, end_date, strategy, initial_capital=100000.0}}
   Run the actual backtest. Priority=2 if depends on fetch_historical_data, else 1.
-  IMPORTANT: use "ticker" (NOT "symbol") for this function only.
   strategy options: "buy-and-hold", "mean-reversion", "momentum", "value"
   DEFAULT: For workflow A, use "mean-reversion" unless user explicitly requests another strategy.
 
 MARKET DATA FUNCTIONS:
-- get_market_bars: params={{symbol, start_date, end_date, timeframe="1Day"}}
+- get_market_bars: params={{symbol, start_date, end_date, timeframe="1Min"}}
   Fetch raw OHLCV bars from DB for custom analysis
-- get_latest_price: params={{symbol, timeframe="1Day"}}
+- get_latest_price: params={{symbol, timeframe="1Min"}}
   Get most recent bar for reference pricing
 - get_intraday_stats: params={{symbol, date}}
   Intraday statistics (VWAP, high/low range, trade count) for a specific date
@@ -103,7 +100,7 @@ def backtester_reasoning_node(state: dict) -> dict:
     try:
         from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets
+        from src.common.utils import secrets, config
 
         # Support both Send payload (partial) and full state
         query: str = (
@@ -167,8 +164,8 @@ def backtester_reasoning_node(state: dict) -> dict:
                 )
 
         llm = ChatOpenAI(
-            model="gpt-5-mini",
-            temperature=0,
+            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
+            temperature=config.get("graph_api.model_temperature", 0.0),
             api_key=secrets.get("openai.api_key"),
         )
         structured_llm = llm.with_structured_output(AgentPlan, method="function_calling")

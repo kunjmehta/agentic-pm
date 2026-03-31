@@ -52,7 +52,8 @@ from src.semi_auto.models.responses import (
     TaskPreviewResponse,
 )
 from src.semi_auto.registry.functions import get_registry_schema
-from src.common.utils import get_logger
+from src.common.utils import get_logger, config as app_config
+from src.common.data_gatherer.data_coordinator import DataCoordinator
 
 logger = get_logger(__name__)
 
@@ -63,6 +64,30 @@ CONVERSATIONS_DIR = Path("data/conversations")
 # ── Shared state ───────────────────────────────────────────────────────────────
 
 _graph = None
+_data_coordinator: DataCoordinator | None = None
+_stream_task: asyncio.Task | None = None
+
+
+async def _run_live_streams(coordinator: DataCoordinator) -> None:
+    """Start live market data streams for all watchlist symbols.
+
+    Runs streaming only (no historical backfill) so the API starts fast.
+    Handlers write directly to market_data.duckdb via db_stream_handlers.
+    """
+    symbols = coordinator.symbols
+    logger.info(f"[streams] starting live streams for {symbols}")
+    try:
+        for symbol in symbols:
+            await coordinator.start_streaming(symbol)
+        shutdown_flag = [False]
+        await coordinator.run_streaming_loop(shutdown_flag)
+    except asyncio.CancelledError:
+        logger.info("[streams] stream loop cancelled — shutting down")
+    except Exception as exc:
+        logger.error(f"[streams] unexpected error: {exc}", exc_info=True)
+    finally:
+        coordinator.stop_all_streaming()
+        coordinator.close()
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -71,7 +96,7 @@ _graph = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
-    global _graph
+    global _graph, _data_coordinator, _stream_task
 
     logger.info("=" * 70)
     logger.info("Starting Semi-Auto Portfolio Manager API (port 8000)...")
@@ -81,6 +106,18 @@ async def lifespan(app: FastAPI):
     _graph = build_graph()
     logger.info("[OK] Graph compiled with HITL interrupt_before=['executor_node']")
 
+    # ── Live market data streams ───────────────────────────────────────────
+    try:
+        watchlist = app_config.get("watchlist", default=["AAPL"])
+        _data_coordinator = DataCoordinator(symbols=watchlist)
+        _stream_task = asyncio.create_task(
+            _run_live_streams(_data_coordinator),
+            name="live-market-streams",
+        )
+        logger.info(f"[OK] Live streaming task started for watchlist: {watchlist}")
+    except Exception as exc:
+        logger.warning(f"[streams] failed to start — continuing without live data: {exc}")
+
     logger.info("=" * 70)
     logger.info("API Server: http://localhost:8000")
     logger.info("Interactive Docs: http://localhost:8000/docs")
@@ -89,6 +126,13 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down Semi-Auto API...")
+    if _stream_task and not _stream_task.done():
+        _stream_task.cancel()
+        try:
+            await asyncio.wait_for(_stream_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    logger.info("[OK] Live streams stopped")
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -246,7 +290,7 @@ async def root():
         "name": "Semi-Auto Portfolio Manager",
         "version": "1.0.0",
         "description": "LangGraph multi-agent with reasoning agents + HITL task approval",
-        "port": 8002,
+        "port": app_config.get("graph_api.port", 8001),
         "endpoints": {
             "POST /v1/query": "Phase 1: reasoning → HITL interrupt (returns task preview)",
             "POST /v1/approve/{thread_id}": "Phase 2: approve tasks → execute → synthesize",
@@ -556,6 +600,17 @@ async def query_stream(request: SemiAutoQueryRequest):
 
             # Guard short-circuit (market closed, routing_error, etc.)
             if "executor_node" not in next_nodes:
+                turns = _load_conversation(thread_id)
+                turns.append({
+                    "turn_number": snapshot.get("turn_number", len(turns) + 1),
+                    "query": request.query,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "status": "complete",
+                    "intent": snapshot.get("intent"),
+                    "symbol": snapshot.get("symbol"),
+                    "final_response": snapshot.get("final_response"),
+                })
+                _save_conversation(thread_id, turns)
                 yield _format_event({
                     "type": "text",
                     "content": snapshot.get("final_response", "(no response)"),
@@ -564,6 +619,23 @@ async def query_stream(request: SemiAutoQueryRequest):
                 return
 
             # Interrupted before executor_node → HITL approval
+            turns = _load_conversation(thread_id)
+            turns.append({
+                "turn_number": snapshot.get("turn_number", len(turns) + 1),
+                "query": request.query,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": "pending_approval",
+                "intent": snapshot.get("intent"),
+                "symbol": snapshot.get("symbol"),
+                "portfolio_reasoning": snapshot.get("portfolio_reasoning"),
+                "quant_reasoning": snapshot.get("quant_reasoning"),
+                "backtester_reasoning": snapshot.get("backtester_reasoning"),
+                "pm_review_notes": snapshot.get("pm_review_notes"),
+                "portfolio_tasks": snapshot.get("portfolio_task_queue") or [],
+                "quant_tasks": snapshot.get("quant_task_queue") or [],
+                "backtester_tasks": snapshot.get("backtester_task_queue") or [],
+            })
+            _save_conversation(thread_id, turns)
             yield _format_event({
                 "type": "interrupt",
                 "message": "Reasoning complete. Call POST /v1/approve/{thread_id} to execute.",
@@ -614,7 +686,8 @@ async def get_registry():
     Returns:
         Dict of function_name → parameter documentation.
     """
-    return {"registry": get_registry_schema(), "count": 11}
+    schema = get_registry_schema()
+    return {"registry": schema, "count": len(schema)}
 
 
 @app.get("/v1/portfolio/status")

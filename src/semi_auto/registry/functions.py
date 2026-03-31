@@ -26,6 +26,21 @@ from src.semi_auto.models.skills import (
     MomentumInput,
     VolatilityInput,
     VolumeInput,
+    # Output models
+    BacktestOutput,
+    CandleOutput,
+    DataAvailabilityOutput,
+    FetchHistoricalDataOutput,
+    HealthCheckOutput,
+    MeanReversionOutput,
+    MomentumOutput,
+    PortfolioStatusOutput,
+    PositionsSummaryOutput,
+    SnapshotSaveOutput,
+    SnapshotWorthOutput,
+    SwapPositionsOutput,
+    VolatilityOutput,
+    VolumeOutput,
 )
 
 logger = get_logger(__name__)
@@ -71,7 +86,7 @@ from src.semi_auto.skills.backtester.skills import (
 
 # ── Wrapper helpers ───────────────────────────────────────────────────────────
 
-def _fetch_bars_for_symbol(symbol: str, timeframe: str = "1Day", lookback_days: int = 90):
+def _fetch_bars_for_symbol(symbol: str, timeframe: str = "1Min", lookback_days: int = 90):
     """Fetch OHLCV bars from AlpacaDAO for a symbol.
 
     Args:
@@ -139,7 +154,7 @@ def _fetch_bars_range(
 
 def _calc_momentum_wrapped(
     symbol: str,
-    timeframe: str = "1Day",
+    timeframe: str = "1Min",
     lookback_days: int = 90,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -178,17 +193,17 @@ def _calc_momentum_wrapped(
     if inp.is_historical:
         df = _fetch_bars_range("calc_momentum", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
         if df is None:
-            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+            return _out(MomentumOutput, {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}\u2013{inp.end_date}", "symbol": inp.symbol})
         result = _momentum_skill.analyze_bars(df)
         result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
                        "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
-        return result
-    return _momentum_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
+        return _out(MomentumOutput, result)
+    return _out(MomentumOutput, _momentum_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days))
 
 
 def _calc_volatility_wrapped(
     symbol: str,
-    timeframe: str = "1Day",
+    timeframe: str = "1Min",
     lookback_days: int = 90,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -225,17 +240,17 @@ def _calc_volatility_wrapped(
     if inp.is_historical:
         df = _fetch_bars_range("calc_volatility_bands", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
         if df is None:
-            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+            return _out(VolatilityOutput, {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}\u2013{inp.end_date}", "symbol": inp.symbol})
         result = _volatility_skill.analyze_bars(df)
         result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
                        "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
-        return result
-    return _volatility_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
+        return _out(VolatilityOutput, result)
+    return _out(VolatilityOutput, _volatility_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days))
 
 
 def _calc_volume_wrapped(
     symbol: str,
-    timeframe: str = "1Day",
+    timeframe: str = "1Min",
     lookback_days: int = 90,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -272,17 +287,17 @@ def _calc_volume_wrapped(
     if inp.is_historical:
         df = _fetch_bars_range("calc_volume_flow", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
         if df is None:
-            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+            return _out(VolumeOutput, {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}\u2013{inp.end_date}", "symbol": inp.symbol})
         result = _volume_skill.analyze_bars(df)
         result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
                        "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
-        return result
-    return _volume_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
+        return _out(VolumeOutput, result)
+    return _out(VolumeOutput, _volume_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days))
 
 
 def _analyze_candles_wrapped(
     symbol: str,
-    timeframe: str = "1Day",
+    timeframe: str = "1Min",
     lookback_days: int = 30,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
@@ -319,12 +334,12 @@ def _analyze_candles_wrapped(
     if inp.is_historical:
         df = _fetch_bars_range("analyze_candle_structure", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
         if df is None:
-            return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+            return _out(CandleOutput, {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}\u2013{inp.end_date}", "symbol": inp.symbol})
         result = _candlestick_skill.analyze_bars(df)
         result.update({"symbol": inp.symbol, "timeframe": inp.timeframe,
                        "start_date": inp.start_date, "end_date": inp.end_date, "mode": "historical"})
-        return result
-    return _candlestick_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days)
+        return _out(CandleOutput, result)
+    return _out(CandleOutput, _candlestick_skill.generate_signals(inp.symbol, timeframe=inp.timeframe, lookback_days=inp.lookback_days))
 
 
 def _mean_reversion_analyze(
@@ -333,7 +348,7 @@ def _mean_reversion_analyze(
     threshold: float = 2.0,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    timeframe: str = "1Day",
+    timeframe: str = "1Min",
     **_extra,
 ) -> Dict:
     """Run full mean-reversion analysis — Z-score, Bollinger, signal, recommendation.
@@ -369,46 +384,46 @@ def _mean_reversion_analyze(
         if inp.is_historical:
             df = _fetch_bars_range("mean_reversion_analyze", inp.symbol, inp.start_date, inp.end_date, inp.timeframe)
             if df is None:
-                return {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}–{inp.end_date}"}
+                return _out(MeanReversionOutput, {"error": f"No data for {inp.symbol}/{inp.timeframe} in range {inp.start_date}\u2013{inp.end_date}", "symbol": inp.symbol})
             result = _mean_reversion_skill.analyze_bars(df, threshold=inp.threshold, lookback=inp.lookback)
             result.update({"symbol": inp.symbol, "start_date": inp.start_date,
                            "end_date": inp.end_date, "mode": "historical"})
-            return result
-        return _mean_reversion_skill.generate_signals(
+            return _out(MeanReversionOutput, result)
+        return _out(MeanReversionOutput, _mean_reversion_skill.generate_signals(
             symbol=inp.symbol, lookback=inp.lookback, threshold=inp.threshold
-        )
+        ))
     except Exception as exc:
         logger.warning(f"[registry] mean_reversion_analyze failed for {inp.symbol}: {exc}")
-        return {"error": str(exc)}
+        return _out(MeanReversionOutput, {"error": str(exc), "symbol": inp.symbol})
 
 
 def _backtest_strategy(
-    ticker: str = None,
+    symbol: str = None,
     start_date: str = None,
     end_date: str = None,
     strategy: str = "mean-reversion",
     initial_capital: float = 100000.0,
     strategy_params: Dict = None,
     # LLM may pass these — accepted and ignored
-    symbol: str = None,
+    ticker: str = None,
     task_id: str = None,
     workflow_type: str = None,
     note: str = None,
     metrics_requested: list = None,
     **kwargs,
 ) -> Dict:
-    """Run backtest_strategy_core for the given ticker and strategy.
+    """Run backtest_strategy_core for the given symbol and strategy.
 
-    Accepts ``symbol`` as an alias for ``ticker`` so the LLM can use either.
+    ``ticker`` is accepted as a legacy alias but ``symbol`` is the canonical param.
     Extra kwargs (task_id, workflow_type, note, metrics_requested) are silently
     absorbed — they come from LLM planning but are not used by the core skill.
 
     Input is validated and normalised via :class:`~src.semi_auto.models.skills.BacktestInput`
-    (strategy names are lower-cased and validated, ticker is upper-cased).
+    (strategy names are lower-cased and validated, symbol is upper-cased).
 
     Args:
-        ticker: Stock ticker (or use symbol).
-        symbol: Alias for ticker.
+        symbol: Stock symbol (canonical param name).
+        ticker: Legacy alias for symbol.
         start_date: Start date string "YYYY-MM-DD".
         end_date: End date string "YYYY-MM-DD".
         strategy: One of "buy-and-hold", "mean-reversion", "momentum", "value".
@@ -418,10 +433,10 @@ def _backtest_strategy(
     Returns:
         Backtest result dict, or error dict.
     """
-    # Resolve ticker — accept either 'ticker' or 'symbol'
-    resolved_ticker = ticker or symbol
+    # Resolve symbol — accept either 'symbol' or legacy 'ticker'
+    resolved_ticker = symbol or ticker
     if not resolved_ticker:
-        return {"error": "backtest_strategy requires 'ticker' or 'symbol'"}
+        return {"error": "backtest_strategy requires 'symbol'"}
     if not start_date or not end_date:
         return {"error": "backtest_strategy requires 'start_date' and 'end_date'"}
 
@@ -450,7 +465,7 @@ def _backtest_strategy(
     if _backtest_strategy_raw is None:
         return {"error": "backtest_strategy skill not available"}
     try:
-        return _backtest_strategy_raw(
+        result = _backtest_strategy_raw(
             ticker=inp.ticker,
             start_date=inp.start_date,
             end_date=inp.end_date,
@@ -459,9 +474,12 @@ def _backtest_strategy(
             strategy_params=inp.strategy_params,
             save_to_db=True,
         )
+        return _out(BacktestOutput, result)
     except Exception as exc:
         logger.warning(f"[registry] backtest_strategy failed for {inp.ticker}: {exc}")
-        return {"error": str(exc)}
+        return _out(BacktestOutput, {"status": "failed", "error": str(exc),
+                                     "strategy": inp.strategy, "ticker": inp.ticker,
+                                     "start_date": inp.start_date, "end_date": inp.end_date})
 
 
 # ── DAO wrapper helpers ───────────────────────────────────────────────────────
@@ -523,6 +541,27 @@ def _df_to_records(df) -> list:
         return _to_native(df.to_dict("records"))
     except Exception:
         return []
+
+
+def _out(model_cls, raw: Dict) -> Dict:
+    """Validate a raw skill result through its Pydantic output model.
+
+    All output models use ``extra="allow"`` so extra fields pass through
+    unchanged.  On unexpected validation failure the raw dict is returned
+    as-is so the executor is never blocked.
+
+    Args:
+        model_cls: A Pydantic BaseModel subclass with ``extra="allow"``.
+        raw: Raw dict returned by a skill function.
+
+    Returns:
+        Validated and coerced dict (defaults filled, types coerced).
+    """
+    try:
+        return model_cls.model_validate(raw).model_dump()
+    except Exception as exc:
+        logger.debug(f"[registry._out] output validation skipped ({model_cls.__name__}): {exc}")
+        return raw
 
 
 # ── AlpacaDAO wrappers ────────────────────────────────────────────────────────
@@ -596,15 +635,16 @@ def _check_data_availability_wrapped(
         logger.warning(f"[registry] DataAvailabilityInput validation failed: {exc}")
         return {"error": f"Invalid parameters for check_data_availability: {exc}"}
     try:
-        return check_data_availability_core(
+        result = check_data_availability_core(
             symbol=inp.symbol,
             start_date=inp.start_date,
             end_date=inp.end_date,
             timeframe=inp.timeframe,
         )
+        return _out(DataAvailabilityOutput, result)
     except Exception as exc:
         logger.warning(f"[registry] check_data_availability failed for {inp.symbol}: {exc}")
-        return {"error": str(exc)}
+        return _out(DataAvailabilityOutput, {"error": str(exc)})
 
 
 def _fetch_historical_data_wrapped(
@@ -641,18 +681,19 @@ def _fetch_historical_data_wrapped(
     if inp.timeframe != timeframe:
         logger.info(f"[registry] fetch_historical_data: normalised timeframe '{timeframe}' → '{inp.timeframe}'")
     try:
-        return fetch_historical_data_core(
+        result = fetch_historical_data_core(
             symbol=inp.symbol,
             start_date=inp.start_date,
             end_date=inp.end_date,
             timeframe=inp.timeframe,
         )
+        return _out(FetchHistoricalDataOutput, result)
     except Exception as exc:
         logger.warning(f"[registry] fetch_historical_data failed for {inp.symbol}: {exc}")
-        return {"error": str(exc)}
+        return _out(FetchHistoricalDataOutput, {"error": str(exc)})
 
 
-def _get_market_bars(symbol: str, start_date: str, end_date: str, timeframe: str = "1Day") -> list:
+def _get_market_bars(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> list:
     """Fetch raw OHLCV bars from DB for a symbol and date range.
 
     Args:
@@ -676,7 +717,127 @@ def _get_market_bars(symbol: str, start_date: str, end_date: str, timeframe: str
         return {"error": str(exc)}
 
 
-def _get_latest_price(symbol: str, timeframe: str = "1Day") -> dict:
+
+# ── Portfolio + Backtester thin wrappers (Pydantic-validated output) ─────────
+
+
+def _get_portfolio_status_wrapped(**kwargs) -> Dict:
+    """Wrap get_portfolio_status_core with PortfolioStatusOutput validation."""
+    try:
+        result = get_portfolio_status_core()
+        return _out(PortfolioStatusOutput, result)
+    except Exception as exc:
+        logger.warning(f"[registry] get_portfolio_status failed: {exc}")
+        return _out(PortfolioStatusOutput, {"error": str(exc)})
+
+
+def _get_positions_summary_wrapped(**kwargs) -> Dict:
+    """Wrap get_positions_summary_core with PositionsSummaryOutput validation."""
+    try:
+        result = get_positions_summary_core()
+        return _out(PositionsSummaryOutput, result)
+    except Exception as exc:
+        logger.warning(f"[registry] get_positions_summary failed: {exc}")
+        return _out(PositionsSummaryOutput, {"error": str(exc)})
+
+
+def _check_portfolio_health_wrapped(
+    portfolio_status: "Optional[Dict]" = None,
+    positions_data: "Optional[Dict]" = None,
+    **kwargs,
+) -> Dict:
+    """Wrap check_portfolio_health_core with HealthCheckOutput validation.
+
+    Auto-fetches portfolio_status and positions_data if not provided.
+    """
+    try:
+        if portfolio_status is None:
+            portfolio_status = get_portfolio_status_core()
+        if positions_data is None:
+            positions_data = get_positions_summary_core()
+        result = check_portfolio_health_core(
+            portfolio_status=portfolio_status,
+            positions_data=positions_data,
+        )
+        return _out(HealthCheckOutput, result)
+    except Exception as exc:
+        logger.warning(f"[registry] check_portfolio_health failed: {exc}")
+        return _out(HealthCheckOutput, {"error": str(exc)})
+
+
+def _save_eod_snapshot_wrapped(
+    timestamp: "Optional[str]" = None,
+    equity: float = 0.0,
+    cash: float = 0.0,
+    buying_power: float = 0.0,
+    positions: "Optional[list]" = None,
+    daily_pnl: "Optional[float]" = None,
+    total_pnl: "Optional[float]" = None,
+    daily_pnl_percent: "Optional[float]" = None,
+    snapshot_source: str = "manual",
+    **kwargs,
+) -> Dict:
+    """Wrap save_eod_snapshot_core with SnapshotSaveOutput validation."""
+    try:
+        from datetime import datetime as _dt
+        result = _save_eod_snapshot_raw(
+            timestamp=timestamp or _dt.now().isoformat(),
+            equity=equity,
+            cash=cash,
+            buying_power=buying_power,
+            positions=positions or [],
+            daily_pnl=daily_pnl,
+            total_pnl=total_pnl,
+            daily_pnl_percent=daily_pnl_percent,
+            snapshot_source=snapshot_source,
+        )
+        return _out(SnapshotSaveOutput, result)
+    except Exception as exc:
+        logger.warning(f"[registry] save_eod_snapshot failed: {exc}")
+        return _out(SnapshotSaveOutput, {"status": "error", "error": str(exc)})
+
+
+def _snapshot_worth_wrapped(
+    snapshot_date: "Optional[str]" = None,
+    end_date: "Optional[str]" = None,
+    **kwargs,
+) -> Dict:
+    """Wrap snapshot_worth_core with SnapshotWorthOutput validation."""
+    if not snapshot_date or not end_date:
+        return _out(SnapshotWorthOutput, {
+            "error": "snapshot_worth requires 'snapshot_date' and 'end_date'"
+        })
+    try:
+        result = _snapshot_worth_raw(snapshot_date=snapshot_date, end_date=end_date)
+        return _out(SnapshotWorthOutput, result)
+    except Exception as exc:
+        logger.warning(f"[registry] snapshot_worth failed: {exc}")
+        return _out(SnapshotWorthOutput, {"error": str(exc)})
+
+
+def _swap_positions_wrapped(
+    snapshot_date: "Optional[str]" = None,
+    end_date: "Optional[str]" = None,
+    tickers: "Optional[Dict]" = None,
+    **kwargs,
+) -> Dict:
+    """Wrap swap_positions_core with SwapPositionsOutput validation."""
+    if not snapshot_date or not end_date:
+        return _out(SwapPositionsOutput, {
+            "error": "swap_positions requires 'snapshot_date' and 'end_date'"
+        })
+    if not tickers:
+        return _out(SwapPositionsOutput, {"error": "swap_positions requires 'tickers' mapping"})
+    try:
+        result = _swap_positions_raw(
+            snapshot_date=snapshot_date, end_date=end_date, tickers=tickers
+        )
+        return _out(SwapPositionsOutput, result)
+    except Exception as exc:
+        logger.warning(f"[registry] swap_positions failed: {exc}")
+        return _out(SwapPositionsOutput, {"error": str(exc)})
+
+def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
     """Get the most recent bar for a symbol.
 
     Args:
@@ -697,7 +858,7 @@ def _get_latest_price(symbol: str, timeframe: str = "1Day") -> dict:
         return {"error": str(exc)}
 
 
-def _get_precomputed_indicators(symbol: str, start_date: str, end_date: str, timeframe: str = "1Day") -> list:
+def _get_precomputed_indicators(symbol: str, start_date: str, end_date: str, timeframe: str = "1Min") -> list:
     """Retrieve pre-computed technical indicators stored in DB.
 
     Args:
@@ -980,48 +1141,7 @@ def _get_eod_summaries(symbol: str, start_date: str, end_date: str) -> list:
         return {"error": str(exc)}
 
 
-def _get_latest_eod(symbol: str) -> dict:
-    """Get the most recent EOD analyst summary for a symbol.
-
-    Args:
-        symbol: Stock ticker.
-
-    Returns:
-        EOD summary dict or error dict.
-    """
-    try:
-        from src.common.dao import AnalystDAO
-        dao = AnalystDAO()
-        result = dao.get_latest_eod(symbol)
-        dao.close()
-        return _to_native(result) if result else {"error": f"No EOD summary found for {symbol}"}
-    except Exception as exc:
-        logger.warning(f"[registry] get_latest_eod failed for {symbol}: {exc}")
-        return {"error": str(exc)}
-
-
 # ── StrategyDAO wrappers ──────────────────────────────────────────────────────
-
-def _get_latest_signal(symbol: str, strategy_name: str) -> dict:
-    """Get the most recent strategy signal for a symbol.
-
-    Args:
-        symbol: Stock ticker.
-        strategy_name: Name of the strategy (e.g. "mean-reversion").
-
-    Returns:
-        Signal dict with action, confidence, timestamp or error dict.
-    """
-    try:
-        from src.common.dao import StrategyDAO
-        dao = StrategyDAO()
-        result = dao.get_latest_signal(symbol, strategy_name)
-        dao.close()
-        return _to_native(result) if result else {"error": f"No signal found for {symbol}/{strategy_name}"}
-    except Exception as exc:
-        logger.warning(f"[registry] get_latest_signal failed for {symbol}: {exc}")
-        return {"error": str(exc)}
-
 
 def _get_recent_signals(symbol: str, strategy_name: str, limit: int = 10) -> list:
     """Get recent strategy signals for a symbol.
@@ -1172,23 +1292,6 @@ def _get_backtest_performance(run_id: str) -> list:
 
 # ── PortfolioDAO wrappers ─────────────────────────────────────────────────────
 
-def _get_portfolio_snapshot() -> dict:
-    """Get the most recent portfolio snapshot (equity, positions, P&L).
-
-    Returns:
-        Portfolio snapshot dict or error dict.
-    """
-    try:
-        from src.common.dao import PortfolioDAO
-        dao = PortfolioDAO()
-        result = dao.get_latest_snapshot()
-        dao.close()
-        return _to_native(result) if result else {"error": "No portfolio snapshot found"}
-    except Exception as exc:
-        logger.warning(f"[registry] get_portfolio_snapshot failed: {exc}")
-        return {"error": str(exc)}
-
-
 def _get_portfolio_snapshot_history(start_date: str, end_date: str) -> list:
     """Get historical portfolio snapshots for a date range.
 
@@ -1232,9 +1335,9 @@ def _get_risk_parameters() -> dict:
 
 FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     # ── Portfolio core ────────────────────────────────────────────────────────
-    "get_portfolio_status":    get_portfolio_status_core,
-    "get_positions_summary":   get_positions_summary_core,
-    "check_portfolio_health":  check_portfolio_health_core,
+    "get_portfolio_status":    _get_portfolio_status_wrapped,
+    "get_positions_summary":   _get_positions_summary_wrapped,
+    "check_portfolio_health":  _check_portfolio_health_wrapped,
     "fetch_historical_data":   _fetch_historical_data_wrapped,
     "check_data_availability": _check_data_availability_wrapped,
     # ── Quant indicators (wrapped to fetch bars internally) ───────────────────
@@ -1263,9 +1366,7 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "get_all_fundamentals":    _get_all_fundamentals,
     # ── AnalystDAO ────────────────────────────────────────────────────────────
     "get_eod_summaries":       _get_eod_summaries,
-    "get_latest_eod":          _get_latest_eod,
     # ── StrategyDAO ───────────────────────────────────────────────────────────
-    "get_latest_signal":       _get_latest_signal,
     "get_recent_signals":      _get_recent_signals,
     "get_actionable_signals":  _get_actionable_signals,
     "get_strategy_performance": _get_strategy_performance,
@@ -1275,13 +1376,12 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "get_backtest_trades":     _get_backtest_trades,
     "get_backtest_performance": _get_backtest_performance,
     # ── PortfolioDAO ──────────────────────────────────────────────────────────
-    "get_portfolio_snapshot":  _get_portfolio_snapshot,
     "get_portfolio_snapshot_history": _get_portfolio_snapshot_history,
     "get_risk_parameters":     _get_risk_parameters,
     # ── Backtester workflow B & C ─────────────────────────────────────────────
-    "save_eod_snapshot":       _save_eod_snapshot_raw,
-    "snapshot_worth":          _snapshot_worth_raw,
-    "swap_positions":          _swap_positions_raw,
+    "save_eod_snapshot":       _save_eod_snapshot_wrapped,
+    "snapshot_worth":          _snapshot_worth_wrapped,
+    "swap_positions":          _swap_positions_wrapped,
 }
 
 # Filter out None entries at load time so executor can detect unavailable fns
@@ -1334,7 +1434,7 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Compute MACD and RSI momentum indicators.",
             "params": {
                 "symbol": "str",
-                "timeframe": "str — default '1Day'",
+                "timeframe": "str — default '1Min'",
                 "lookback_days": "int — default 90",
             },
         },
@@ -1342,7 +1442,7 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Compute Bollinger Bands (upper, middle, lower, bandwidth).",
             "params": {
                 "symbol": "str",
-                "timeframe": "str — default '1Day'",
+                "timeframe": "str — default '1Min'",
                 "lookback_days": "int — default 90",
             },
         },
@@ -1350,7 +1450,7 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Compute OBV and volume trend indicators.",
             "params": {
                 "symbol": "str",
-                "timeframe": "str — default '1Day'",
+                "timeframe": "str — default '1Min'",
                 "lookback_days": "int — default 90",
             },
         },
@@ -1358,7 +1458,7 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Detect candlestick patterns (engulfing, doji, hammer, etc.).",
             "params": {
                 "symbol": "str",
-                "timeframe": "str — default '1Day'",
+                "timeframe": "str — default '1Min'",
                 "lookback_days": "int — default 30",
             },
         },
@@ -1383,15 +1483,15 @@ def get_registry_schema() -> Dict[str, Any]:
         # ── AlpacaDAO ─────────────────────────────────────────────────────────
         "get_market_bars": {
             "description": "Fetch raw OHLCV bars from DB for a symbol and date range.",
-            "params": {"symbol": "str", "start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD", "timeframe": "str — default '1Day'"},
+            "params": {"symbol": "str", "start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD", "timeframe": "str — default '1Min'"},
         },
         "get_latest_price": {
             "description": "Get the most recent bar for a symbol (open/high/low/close/volume).",
-            "params": {"symbol": "str", "timeframe": "str — default '1Day'"},
+            "params": {"symbol": "str", "timeframe": "str — default '1Min'"},
         },
         "get_precomputed_indicators": {
             "description": "Retrieve pre-computed technical indicators stored in DB.",
-            "params": {"symbol": "str", "start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD", "timeframe": "str — default '1Day'"},
+            "params": {"symbol": "str", "start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD", "timeframe": "str — default '1Min'"},
         },
         "get_tick_trades": {
             "description": "Retrieve historical tick-level trades for a symbol.",
@@ -1443,15 +1543,7 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Get end-of-day analyst summaries for a symbol in a date range.",
             "params": {"symbol": "str", "start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD"},
         },
-        "get_latest_eod": {
-            "description": "Get the most recent EOD analyst summary for a symbol.",
-            "params": {"symbol": "str"},
-        },
         # ── StrategyDAO ───────────────────────────────────────────────────────
-        "get_latest_signal": {
-            "description": "Get the most recent strategy signal (buy/sell/hold + confidence) for a symbol.",
-            "params": {"symbol": "str", "strategy_name": "str"},
-        },
         "get_recent_signals": {
             "description": "Get recent strategy signals for a symbol.",
             "params": {"symbol": "str", "strategy_name": "str", "limit": "int — default 10"},
@@ -1482,10 +1574,6 @@ def get_registry_schema() -> Dict[str, Any]:
             "params": {"run_id": "str"},
         },
         # ── PortfolioDAO ──────────────────────────────────────────────────────
-        "get_portfolio_snapshot": {
-            "description": "Get the most recent portfolio snapshot (equity, positions, unrealized P&L).",
-            "params": {},
-        },
         "get_portfolio_snapshot_history": {
             "description": "Get historical portfolio value snapshots for a date range.",
             "params": {"start_date": "str — YYYY-MM-DD", "end_date": "str — YYYY-MM-DD"},
@@ -1537,11 +1625,11 @@ if __name__ == "__main__":
         status = "[OK]" if fn is not None else "[WARN] not available"
         print(f"  {status}  {name}")
 
-    assert len(FUNCTION_REGISTRY) == 41, f"Expected 41 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
-    print("\n[OK] All 41 functions registered")
+    assert len(FUNCTION_REGISTRY) == 38, f"Expected 38 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
+    print("\n[OK] All 38 functions registered")
 
     schema = get_registry_schema()
-    assert len(schema) == 41, f"Expected 41 schema entries, got {len(schema)}"
+    assert len(schema) == 38, f"Expected 38 schema entries, got {len(schema)}"
     print("[OK] Registry schema returned")
 
     print("\n[ALL OK] registry/functions.py smoke test passed")

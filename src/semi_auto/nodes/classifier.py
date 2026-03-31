@@ -145,10 +145,10 @@ def classify_intent(state: dict) -> dict:
     query_intent: Optional[QueryIntent] = None
     try:
         from langchain_openai import ChatOpenAI
-        from src.common.utils import secrets
+        from src.common.utils import secrets, config
 
         llm = ChatOpenAI(
-            model="gpt-4o-mini",
+            model=config.get("graph_api.routing_model", "gpt-4o-mini"),
             temperature=0,
             api_key=secrets.get("openai.api_key"),
         ).with_structured_output(QueryIntent, method="function_calling")

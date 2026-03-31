@@ -68,42 +68,42 @@ All five indicator functions support two data modes:
   HISTORICAL mode — provide start_date + end_date; omit lookback_days
 
 calc_momentum
-  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=90]
-  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  LIVE       : symbol (str)  [timeframe="1Min"]  [lookback_days=90]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Min"]
   Computes   : MACD (value, signal, histogram) + RSI
 
 calc_volatility_bands
-  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=90]
-  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  LIVE       : symbol (str)  [timeframe="1Min"]  [lookback_days=90]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Min"]
   Computes   : Bollinger Bands (upper, middle, lower, bandwidth)
 
 calc_volume_flow
-  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=90]
-  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  LIVE       : symbol (str)  [timeframe="1Min"]  [lookback_days=90]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Min"]
   Computes   : OBV + volume trend (increasing/decreasing/stable)
 
 analyze_candle_structure
-  LIVE       : symbol (str)  [timeframe="1Day"]  [lookback_days=30]   ← default 30, not 90
-  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Day"]
+  LIVE       : symbol (str)  [timeframe="1Min"]  [lookback_days=30]   ← default 30, not 90
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [timeframe="1Min"]
   Detects    : Engulfing, Doji, Hammer, Hanging Man
 
 mean_reversion_analyze
   LIVE       : symbol (str)  [lookback=60]  [threshold=2.0]
-  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [threshold=2.0]  [timeframe="1Day"]
+  HISTORICAL : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)  [threshold=2.0]  [timeframe="1Min"]
   Note       : timeframe is valid ONLY in HISTORICAL mode
   Computes   : Z-score, Bollinger, moving averages, buy/sell/hold signal + trade_recommendation
 
 get_market_bars
   Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
-  Optional : timeframe="1Day"
+  Optional : timeframe="1Min"
 
 get_latest_price
   Required : symbol (str)
-  Optional : timeframe="1Day"
+  Optional : timeframe="1Min"
 
 get_precomputed_indicators
   Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
-  Optional : timeframe="1Day"
+  Optional : timeframe="1Min"
 
 get_company_fundamentals
   Required : symbol (str)
@@ -113,20 +113,16 @@ get_earnings_history
   Required : symbol (str)
   Optional : quarterly=True  limit=4
 
-get_latest_eod
-  Required : symbol (str)
-  No optional params
-
-get_latest_signal
-  Required : symbol (str)  strategy_name (str)
-  No optional params
+get_eod_summaries
+  Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
+  Use limit=1 for the most recent summary
 
 get_recent_signals
-  Required : symbol (str)
-  Optional : strategy_name=None  limit=10
+  Required : symbol (str)  strategy_name (str)
+  Optional : limit=10
 
 get_actionable_signals
-  Optional : symbol=None  min_confidence=0.6
+  Optional : min_confidence=0.6
   Returns  : high-confidence signals across all strategies
 
 ───────────────────────────────────────────────────────────
@@ -143,9 +139,8 @@ fetch_historical_data      ← Only if data is missing (bt_002, priority=3)
   ⚠ param name is "symbol" — NOT "ticker"
 
 backtest_strategy          ← Last task (depends_on=[bt_002] if fetch was added)
-  Required : ticker (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
+  Required : symbol (str)  start_date (YYYY-MM-DD)  end_date (YYYY-MM-DD)
   Optional : strategy="mean-reversion"  initial_capital=100000.0
-  ⚠ param name is "ticker" — NOT "symbol" (only exception across all functions)
   Valid strategies: "buy-and-hold" | "mean-reversion" | "momentum" | "value"
   DEFAULT STRATEGY: always "mean-reversion" for workflow A unless user specified otherwise
 
@@ -181,20 +176,19 @@ get_strategy_performance
 ───────────────────────────────────────────────────────────
 CRITICAL PARAM RULES — violations must be corrected with update_params edits
 ───────────────────────────────────────────────────────────
-1.  check_data_availability / fetch_historical_data → "symbol" key, NEVER "ticker"
-2.  backtest_strategy → "ticker" key, NEVER "symbol"
-3.  Timeframe strings must be canonical ("1Day" not "1d"; "1Min" not "1min")
-4.  fetch_historical_data default timeframe is "1Min" (granular intraday), not "1Day"
-5.  mean_reversion_analyze in LIVE mode has NO timeframe — remove it if present in live calls
+1.  All functions use "symbol" — "ticker" is NEVER a valid param name
+2.  Timeframe strings must be canonical ("1Day" not "1d"; "1Min" not "1min")
+3.  fetch_historical_data default timeframe is "1Min" (granular intraday), not "1Day"
+4.  mean_reversion_analyze in LIVE mode has NO timeframe — remove it if present in live calls
     In HISTORICAL mode (start_date + end_date present) timeframe IS valid — leave it
-6.  initial_capital must be a float (100000.0) — reject integer-only "100000"
-7.  Do NOT change dates the agents set unless they are clearly invalid (e.g. end < start)
-8.  Do NOT change lookback_days / lookback / threshold unless clearly out of range
-9.  task_id / priority / depends_on are TOP-LEVEL task fields — they must NEVER appear
+5.  initial_capital must be a float (100000.0) — reject integer-only "100000"
+6.  Do NOT change dates the agents set unless they are clearly invalid (e.g. end < start)
+7.  Do NOT change lookback_days / lookback / threshold unless clearly out of range
+8.  task_id / priority / depends_on are TOP-LEVEL task fields — they must NEVER appear
     inside the params dict. If you see them in params, emit an update_params edit that
     removes them (rebuild params without those keys). The executor will error if they
     are left in params.
-10. NEVER allow both start_date/end_date and lookback_days in the same indicator call.
+9.  NEVER allow both start_date/end_date and lookback_days in the same indicator call.
     If both are present, keep start_date/end_date and remove lookback_days (historical
     mode takes precedence when a date range was explicitly provided by the user).
 ───────────────────────────────────────────────────────────"""
@@ -288,7 +282,7 @@ def pm_review_node(state: dict) -> dict:
     try:
         from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets
+        from src.common.utils import secrets, config
 
         query: str = state.get("query", "")
         intent: str = state.get("intent", "unknown")
@@ -330,8 +324,8 @@ def pm_review_node(state: dict) -> dict:
         )
 
         llm = ChatOpenAI(
-            model="gpt-5-mini",
-            temperature=0,
+            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
+            temperature=config.get("graph_api.model_temperature", 0.0),
             api_key=secrets.get("openai.api_key"),
         )
         structured_llm = llm.with_structured_output(PMFeedback, method="function_calling")

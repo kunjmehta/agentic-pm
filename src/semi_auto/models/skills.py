@@ -314,7 +314,7 @@ class MomentumOutput(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    symbol: str
+    symbol: str = ""
     macd: MACDOutput = Field(default_factory=MACDOutput)
     rsi: Optional[float] = None
     timeframe: str = "1Day"
@@ -338,7 +338,7 @@ class VolatilityOutput(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    symbol: str
+    symbol: str = ""
     upper: Optional[float] = None
     middle: Optional[float] = None
     lower: Optional[float] = None
@@ -365,7 +365,7 @@ class VolumeOutput(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    symbol: str
+    symbol: str = ""
     obv: Optional[float] = None
     volume_trend: Optional[str] = None
     avg_volume_10d: Optional[float] = None
@@ -392,7 +392,7 @@ class CandleOutput(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    symbol: str
+    symbol: str = ""
     patterns: List[str] = Field(default_factory=list)
     last_candle_type: Optional[str] = None
     last_body_pct: Optional[float] = None
@@ -470,6 +470,303 @@ class BacktestOutput(BaseModel):
     recommendation: Optional[str] = None
     trades_count: Optional[int] = None
     error: Optional[str] = None
+
+
+# ===========================================================================
+# MeanReversion Skill — Output Models
+# ===========================================================================
+
+
+class MeanReversionStatistics(BaseModel):
+    """Statistics sub-object for MeanReversionOutput."""
+
+    model_config = ConfigDict(extra="allow")
+
+    mean: Optional[float] = None
+    std_dev: Optional[float] = None
+    z_score: Optional[float] = None
+    percentile: Optional[float] = None
+    vwap: Optional[float] = None
+
+
+class MeanReversionMovingAverages(BaseModel):
+    """Moving averages sub-object for MeanReversionOutput."""
+
+    model_config = ConfigDict(extra="allow")
+
+    sma_20: Optional[float] = None
+    sma_50: Optional[float] = None
+    ema_20: Optional[float] = None
+
+
+class MeanReversionSignals(BaseModel):
+    """Signals sub-object for MeanReversionOutput."""
+
+    model_config = ConfigDict(extra="allow")
+
+    current_state: str = "unknown"
+    z_score_signal: str = "unknown"
+    ma_cross_signal: str = "unknown"
+    bollinger_signal: str = "unknown"
+    overall_signal: str = "hold"
+
+
+class MeanReversionLevels(BaseModel):
+    """Price levels sub-object for MeanReversionOutput."""
+
+    model_config = ConfigDict(extra="allow")
+
+    resistance: Optional[float] = None
+    support: Optional[float] = None
+    upper_band: Optional[float] = None
+    lower_band: Optional[float] = None
+
+
+class MeanReversionRecommendation(BaseModel):
+    """Trade recommendation sub-object for MeanReversionOutput."""
+
+    model_config = ConfigDict(extra="allow")
+
+    action: str = "hold"
+    confidence: float = 0.0
+    reason: str = ""
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+class MeanReversionOutput(BaseModel):
+    """Validated output from ``mean_reversion_analyze``.
+
+    Attributes:
+        symbol: Stock ticker.
+        current_price: Latest close price.
+        statistics: Z-score, mean, std-dev, percentile, optional VWAP.
+        moving_averages: SMA-20, SMA-50, EMA-20.
+        signals: Per-indicator signals and combined overall_signal.
+        levels: Support, resistance, Bollinger band bounds.
+        trade_recommendation: action, confidence, entry/stop/target levels.
+        parameters: Lookback, threshold, ma_period used.
+        error: Error message on failure.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str = ""
+    current_price: Optional[float] = None
+    statistics: Optional[MeanReversionStatistics] = None
+    moving_averages: Optional[MeanReversionMovingAverages] = None
+    signals: Optional[MeanReversionSignals] = None
+    levels: Optional[MeanReversionLevels] = None
+    trade_recommendation: Optional[MeanReversionRecommendation] = None
+    parameters: Optional[Dict[str, Any]] = None
+    timeframe: str = "1Day"
+    timestamp: str = ""
+    error: Optional[str] = None
+
+
+# ===========================================================================
+# Portfolio Skill — Output Models
+# ===========================================================================
+
+
+class PortfolioStatusOutput(BaseModel):
+    """Validated output from ``get_portfolio_status``.
+
+    Attributes:
+        equity: Total portfolio value.
+        cash: Available cash balance.
+        buying_power: Margin buying power.
+        long_positions: Number of long positions.
+        short_positions: Number of short positions.
+        portfolio_value: Portfolio market value.
+        last_equity: Previous equity value.
+        timestamp: ISO timestamp of the snapshot.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    equity: float = 0.0
+    cash: float = 0.0
+    buying_power: float = 0.0
+    long_positions: int = 0
+    short_positions: int = 0
+    portfolio_value: float = 0.0
+    last_equity: float = 0.0
+    timestamp: str = ""
+    error: Optional[str] = None
+
+
+class PositionsSummaryOutput(BaseModel):
+    """Validated output from ``get_positions_summary``.
+
+    Attributes:
+        positions: List of position dicts from Alpaca.
+        count: Number of open positions.
+        total_market_value: Sum of market values across all positions.
+        total_unrealized_pl: Sum of unrealized P&L across all positions.
+        timestamp: ISO timestamp.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    positions: List[Dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    total_market_value: float = 0.0
+    total_unrealized_pl: float = 0.0
+    timestamp: str = ""
+    error: Optional[str] = None
+
+
+class HealthViolation(BaseModel):
+    """A single risk-rule violation or warning."""
+
+    model_config = ConfigDict(extra="allow")
+
+    rule: str = ""
+    symbol: Optional[str] = None
+    current: Optional[float] = None
+    limit: Optional[float] = None
+    message: str = ""
+
+
+class HealthRiskParams(BaseModel):
+    """Risk parameters used during portfolio health check."""
+
+    model_config = ConfigDict(extra="allow")
+
+    position_limit_percent: Optional[float] = None
+    max_position_size: Optional[float] = None
+    daily_loss_limit: Optional[float] = None
+
+
+class HealthCheckOutput(BaseModel):
+    """Validated output from ``check_portfolio_health``.
+
+    Attributes:
+        health_status: ``"healthy"`` | ``"warning"`` | ``"unhealthy"``.
+        violations: Hard risk-rule breaches.
+        warnings: Soft risk-rule warnings.
+        checks_performed: Names of checks that were run.
+        risk_parameters_used: Thresholds used for evaluation.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    health_status: str = "healthy"
+    violations: List[HealthViolation] = Field(default_factory=list)
+    warnings: List[HealthViolation] = Field(default_factory=list)
+    checks_performed: List[str] = Field(default_factory=list)
+    risk_parameters_used: Optional[HealthRiskParams] = None
+    timestamp: str = ""
+    error: Optional[str] = None
+
+
+class FetchHistoricalDataOutput(BaseModel):
+    """Validated output from ``fetch_historical_data``.
+
+    Attributes:
+        status: ``"success"`` | ``"error"``.
+        bars_fetched: Number of bars fetched or found in cache.
+        data_source: ``"alpaca_api"`` | ``"database_cache"`` | None.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str = "success"
+    bars_fetched: Optional[int] = None
+    symbol: Optional[str] = None
+    date_range: Optional[str] = None
+    timeframe: Optional[str] = None
+    message: Optional[str] = None
+    data_source: Optional[str] = None
+    error: Optional[str] = None
+    suggestion: Optional[str] = None
+
+
+class DataAvailabilityOutput(BaseModel):
+    """Validated output from ``check_data_availability``.
+
+    Attributes:
+        available: ``True`` (full coverage), ``False`` (no data),
+            or ``"partial"`` (< 80% coverage).
+        bar_count: Bars found in the database.
+        expected_bars: Expected bar count for the date range.
+        coverage_pct: Percentage of expected bars found.
+        action_needed: Suggested follow-up action.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    available: Any = False
+    bar_count: int = 0
+    expected_bars: Optional[int] = None
+    coverage_pct: Optional[float] = None
+    symbol: Optional[str] = None
+    date_range: Optional[str] = None
+    message: Optional[str] = None
+    action_needed: Optional[str] = None
+    error: Optional[str] = None
+
+
+# ===========================================================================
+# Backtester Skill — Snapshot + Swap Output Models
+# ===========================================================================
+
+
+class SnapshotSaveOutput(BaseModel):
+    """Validated output from ``save_eod_snapshot``.
+
+    Attributes:
+        status: ``"success"`` | ``"error"``.
+        snapshot_id: DB row ID of the saved snapshot.
+        positions_count: Number of positions in the snapshot.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str = "success"
+    message: Optional[str] = None
+    snapshot_id: Optional[Any] = None
+    date: Optional[str] = None
+    positions_count: Optional[int] = None
+    long_positions: Optional[int] = None
+    short_positions: Optional[int] = None
+    error: Optional[str] = None
+
+
+class SimulationOutput(BaseModel):
+    """Shared base for snapshot-worth and swap-simulation results.
+
+    Attributes:
+        initial_worth: Portfolio value at the snapshot date.
+        final_worth: Portfolio value at end_date.
+        return_pct: Percentage return over the period.
+        return_dollars: Dollar return over the period.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    snapshot_date: Optional[str] = None
+    end_date: Optional[str] = None
+    initial_worth: Optional[float] = None
+    final_worth: Optional[float] = None
+    return_pct: Optional[float] = None
+    return_dollars: Optional[float] = None
+    positions_at_end: Optional[Dict[str, Any]] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SnapshotWorthOutput(SimulationOutput):
+    """Validated output from ``snapshot_worth`` — no position swaps applied."""
+
+
+class SwapPositionsOutput(SimulationOutput):
+    """Validated output from ``swap_positions`` — includes swap metadata."""
+
+    swaps_applied: Optional[Dict[str, Any]] = None
+    initial_worth_before_swap: Optional[float] = None
 
 
 # ===========================================================================
