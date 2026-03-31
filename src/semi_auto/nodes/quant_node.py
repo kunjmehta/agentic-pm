@@ -134,6 +134,15 @@ def quant_reasoning_node(state: dict) -> dict:
             f"Plan the minimum set of indicator functions needed to answer this request."
         )
 
+        prior_turns = state.get("prior_turns") or []
+        if prior_turns:
+            turns_str = "\n".join(
+                f"  [{t.get('turn_number', i+1)}] {str(t.get('user_query', ''))[:60]}"
+                f" → {str(t.get('agent_response', ''))[:80]}"
+                for i, t in enumerate(prior_turns[-3:])
+            )
+            user_message += f"\n\nPRIOR CONTEXT (last {min(len(prior_turns), 3)} turns):\n{turns_str}"
+
         if review_iteration > 0:
             edits_payload = state.get("pm_review_edits") or {}
             quant_edits = edits_payload.get("quant_edits") or []

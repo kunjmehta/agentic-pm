@@ -129,6 +129,16 @@ def classify_intent(state: dict) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     default_start = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
 
+    # Replay detection: substitute last query for "run again" / "repeat" commands
+    _REPLAY_PATTERNS = {"run again", "repeat", "do it again", "same query", "redo", "run it again"}
+    if any(p in query.lower() for p in _REPLAY_PATTERNS):
+        prior = state.get("prior_turns") or []
+        if prior:
+            last_query = prior[-1].get("user_query", "")
+            if last_query:
+                logger.info(f"[classifier] replay detected — substituting last query: '{last_query[:60]}'")
+                query = last_query
+
     logger.info(f"[classifier] query='{query[:80]}'")
 
     query_intent: Optional[QueryIntent] = None
