@@ -395,6 +395,58 @@ def delegate_to_quant_analyst(query: str, thread_id: str = "default") -> str:
         })
 
 
+@tool
+def delegate_to_backtester(query: str, thread_id: str = "default") -> str:
+    """Delegate backtesting to the Backtester agent.
+
+    Use this when the user asks for:
+    - Strategy backtesting
+    - Historical performance analysis
+    - "What if" simulations on past data
+    - Validating trading strategies before deployment
+
+    Args:
+        query: The backtest query to pass to Backtester
+        thread_id: Conversation thread ID (preserve context)
+
+    Returns:
+        JSON string with backtest results or error with fallback
+    """
+    logger.info(f"[DELEGATION] Portfolio Manager -> Backtester: {query}")
+
+    try:
+        # Import Backtester (from Phase 4)
+        from src.agents.backtester.backtester import Backtester
+
+        # Create Backtester instance
+        backtester = Backtester(model="gpt-4o-mini")
+
+        # Invoke with same thread_id for conversation continuity
+        result = backtester.invoke(query, thread_id=thread_id, apply_middleware=True)
+
+        logger.info("[DELEGATION] Backtester completed analysis")
+
+        return json.dumps({
+            "status": "success",
+            "response": result["response"],
+            "delegated_to": "backtester",
+            "timestamp": result.get("timestamp", datetime.now().isoformat())
+        })
+
+    except Exception as e:
+        logger.error(f"[DELEGATION] Backtester delegation failed: {e}", exc_info=True)
+
+        # Graceful degradation
+        return json.dumps({
+            "status": "error",
+            "error": "Backtester temporarily unavailable",
+            "fallback_action": "Unable to run backtest simulation at this time",
+            "recommendation": "Try again later or check data availability",
+            "details": str(e),
+            "timestamp": datetime.now().isoformat()
+        })
+
+
 # =============================================================================
 # Utility Functions
 # =============================================================================

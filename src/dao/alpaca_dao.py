@@ -336,15 +336,15 @@ class AlpacaDAO(BaseDAO):
             ORDER BY timestamp ASC
         """
 
-        if limit is not None:  
-            try:  
-                limit_int = int(limit)  
-            except (TypeError, ValueError):  
-                raise ValueError("limit must be an integer")  # Prevent SQL injection via LIMIT clause  
+        if limit is not None:
+            try:
+                limit_int = int(limit)
+            except (TypeError, ValueError):
+                raise ValueError("limit must be an integer")  # Prevent SQL injection via LIMIT clause
 
-            # Only apply LIMIT for positive integers; for zero/negative, behave like no limit.  
-            if limit_int > 0:  
-                query += f" LIMIT {limit_int}"  
+            # Only apply LIMIT for positive integers; for zero/negative, behave like no limit.
+            if limit_int > 0:
+                query += f" LIMIT {limit_int}"
 
         return self.fetch_df(query, (symbol, start, end))  
 

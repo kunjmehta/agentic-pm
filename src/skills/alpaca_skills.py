@@ -289,7 +289,7 @@ if __name__ == "__main__":
     # Test 2: Fetch historical trades
     print(f"\n2. Fetching historical trades for {test_symbol}...")
     try:
-        trades_df = fetch_historical_trades(test_symbol, test_start, test_end, limit=100)
+        trades_df = fetch_historical_trades(test_symbol, test_start, test_end)
         print(f"   ✓ Fetched {len(trades_df)} trades")
         print(f"   Sample data:\n{trades_df.head()}")
     except Exception as e:
