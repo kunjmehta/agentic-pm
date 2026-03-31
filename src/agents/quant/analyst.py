@@ -32,7 +32,7 @@ from src.agents.quant_tools import (
     save_eod_summary,
     save_strategy_result_tool
 )
-from src.agents.middleware import create_middleware_stack, ToolTracingCallback
+from src.core.middleware import create_middleware_stack, ToolTracingCallback
 from src.utils import get_logger
 
 logger = get_logger(__name__)

@@ -6,9 +6,10 @@ This module provides DAO classes for database operations:
 - AlpacaDAO: Market data from Alpaca API
 - AnalystDAO: Quant Analyst EOD summaries (Phase 2)
 - StrategyDAO: Trading strategy results and signals (Phase 2)
+- PortfolioDAO: Portfolio snapshots, agent interactions, risk parameters (Phase 3)
 
 Usage:
-    from src.dao import AlphaVantageDAO, AlpacaDAO, AnalystDAO, StrategyDAO
+    from src.dao import AlphaVantageDAO, AlpacaDAO, AnalystDAO, StrategyDAO, PortfolioDAO
 
     # Alpha Vantage fundamentals
     av_dao = AlphaVantageDAO()
@@ -34,6 +35,7 @@ from .alpha_vantage_dao import AlphaVantageDAO
 from .alpaca_dao import AlpacaDAO
 from .analyst_dao import AnalystDAO
 from .strategy_dao import StrategyDAO
+from .portfolio_dao import PortfolioDAO
 
 __all__ = [
     'BaseDAO',
@@ -41,4 +43,5 @@ __all__ = [
     'AlpacaDAO',
     'AnalystDAO',
     'StrategyDAO',
+    'PortfolioDAO',
 ]
