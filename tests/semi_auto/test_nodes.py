@@ -8,7 +8,7 @@ Covers code paths not exercised by test_graph.py:
 - Synthesizer helpers (_format_execution_results, _build_synthesis_prompt, short-circuit)
 - PM review helpers (_apply_edits, _format_calls, auto-approval)
 - Executor additional scenarios (upstream error, queue normalisation, timing)
-- Classifier helpers (_score_intent, _classify_bt_workflow, ticker stop-words, tie-breaking)
+- Classifier helpers (_keyword_fallback — intent, bt_workflow, ticker, strategy extraction)
 - Context node (with PortfolioDAO mocked)
 """
 
@@ -866,82 +866,92 @@ class TestExecutorAdditional:
 
 
 class TestClassifierHelpers:
-    """_score_intent, _classify_bt_workflow, _extract_ticker — isolated."""
+    """_keyword_fallback (new API) — intent, bt_workflow, ticker extraction."""
 
-    def test_score_intent_portfolio_keywords(self):
-        from src.semi_auto.nodes.classifier import _score_intent
-        scores = _score_intent("what is my portfolio status and equity")
-        assert scores["portfolio"] > 0
-        assert scores["backtest"] == 0
+    _TODAY = "2026-03-30"
+    _DEFAULT_START = "2026-03-01"
 
-    def test_score_intent_quant_keywords(self):
-        from src.semi_auto.nodes.classifier import _score_intent
-        scores = _score_intent("analyze aapl rsi macd momentum")
-        assert scores["quant"] > 0
+    def _fb(self, query: str):
+        """Shorthand: call _keyword_fallback and return QueryIntent."""
+        from src.semi_auto.nodes.classifier import _keyword_fallback
+        return _keyword_fallback(query, self._TODAY, self._DEFAULT_START)
 
-    def test_score_intent_backtest_keywords(self):
-        from src.semi_auto.nodes.classifier import _score_intent
-        scores = _score_intent("backtest mean reversion strategy")
-        assert scores["backtest"] > 0
+    def test_portfolio_keywords_detected(self):
+        qi = self._fb("what is my portfolio status and equity")
+        assert qi.intent == "portfolio"
+        assert "portfolio" in qi.agents
 
-    def test_score_intent_all_zero_for_empty(self):
-        from src.semi_auto.nodes.classifier import _score_intent
-        scores = _score_intent("")
-        assert scores == {"backtest": 0, "quant": 0, "portfolio": 0}
+    def test_quant_keywords_detected(self):
+        qi = self._fb("analyze aapl rsi macd momentum")
+        assert qi.intent == "quant"
+        assert "quant" in qi.agents
+
+    def test_backtest_keywords_detected(self):
+        # "backtest" and "historical" are pure BT keywords (no quant overlap)
+        qi = self._fb("run historical backtest on AAPL")
+        assert qi.intent == "backtest"
+        assert "backtester" in qi.agents
+
+    def test_empty_query_defaults_to_portfolio(self):
+        qi = self._fb("")
+        assert qi.intent == "portfolio"
 
     def test_bt_workflow_a_default(self):
-        from src.semi_auto.nodes.classifier import _classify_bt_workflow
-        assert _classify_bt_workflow("backtest mean-reversion strategy on aapl") == "A"
+        qi = self._fb("backtest mean-reversion strategy on aapl")
+        assert qi.bt_workflow == "A"
 
     def test_bt_workflow_b_snapshot(self):
-        from src.semi_auto.nodes.classifier import _classify_bt_workflow
-        assert _classify_bt_workflow("what would aapl be worth if held since 2023") == "B"
+        # "backtest" triggers has_bt; "worth" triggers workflow B
+        qi = self._fb("backtest what aapl would be worth if held since 2023")
+        assert qi.bt_workflow == "B"
 
     def test_bt_workflow_c_swap(self):
-        from src.semi_auto.nodes.classifier import _classify_bt_workflow
-        assert _classify_bt_workflow("what if i swapped aapl for nvda") == "C"
+        qi = self._fb("what if i swapped aapl for nvda")
+        assert qi.bt_workflow == "C"
 
     def test_bt_workflow_c_beats_b(self):
-        """C (swap) takes priority over B (snapshot) when both match."""
-        from src.semi_auto.nodes.classifier import _classify_bt_workflow
-        assert _classify_bt_workflow("swap positions what would be worth") == "C"
+        """swap keyword present → workflow C regardless of worth keyword."""
+        # "backtest" triggers has_bt; "swap" triggers C, "worth" triggers B — C wins
+        qi = self._fb("backtest swap positions what would be worth")
+        assert qi.bt_workflow == "C"
 
     def test_ticker_stop_words_ignored(self):
-        from src.semi_auto.nodes.classifier import _extract_ticker
-        # Common stop words should not be extracted as tickers
-        assert _extract_ticker("RSI analysis for my portfolio") is None or \
-               _extract_ticker("RSI analysis for my portfolio") not in {"RSI", "MY", "FOR"}
+        qi = self._fb("RSI analysis for my portfolio")
+        assert qi.ticker not in {"RSI", "MY", "FOR", None} or qi.ticker is None
 
-    def test_ticker_extraction_two_char_minimum(self):
-        """Single-letter tokens are excluded by len >= 2 check."""
-        from src.semi_auto.nodes.classifier import _extract_ticker
-        result = _extract_ticker("I want to analyze AAPL")
-        assert result == "AAPL"
+    def test_ticker_extracted_from_query(self):
+        qi = self._fb("I want to analyze AAPL")
+        assert qi.ticker == "AAPL"
 
-    def test_ticker_extracts_first_match(self):
-        from src.semi_auto.nodes.classifier import _extract_ticker
-        # AAPL comes before MSFT
-        result = _extract_ticker("Compare AAPL and MSFT momentum")
-        assert result == "AAPL"
+    def test_ticker_first_match_wins(self):
+        qi = self._fb("Compare AAPL and MSFT momentum")
+        assert qi.ticker == "AAPL"
 
     def test_ticker_none_when_no_uppercase(self):
-        from src.semi_auto.nodes.classifier import _extract_ticker
-        result = _extract_ticker("what is my portfolio status")
-        assert result is None
+        qi = self._fb("what is my portfolio status")
+        assert qi.ticker is None
 
-    def test_classify_intent_quant_backtest_tie_with_primary(self):
-        """quant + backtest tie where backtest primary keyword present → 'backtest'."""
-        from src.semi_auto.nodes.classifier import classify_intent
-        # 'backtest' is a primary keyword; 'analyze' is quant
-        result = classify_intent({"query": "backtest analyze AAPL strategy"})
-        assert result["intent"] == "backtest"
+    def test_confidence_is_lower_for_fallback(self):
+        qi = self._fb("backtest AAPL strategy")
+        assert qi.confidence < 1.0
 
-    def test_classify_intent_three_way_tie(self):
-        """All three intent groups score > 0 → full_analysis."""
-        from src.semi_auto.nodes.classifier import classify_intent
-        query = "portfolio positions backtest simulate analyze AAPL momentum"
-        result = classify_intent({"query": query})
-        assert result["intent"] == "full_analysis"
+    def test_default_dates_applied(self):
+        qi = self._fb("backtest AAPL")
+        assert qi.start_date == self._DEFAULT_START
+        assert qi.end_date == self._TODAY
+
+    def test_explicit_dates_extracted(self):
+        qi = self._fb("backtest AAPL from 2026-01-01 to 2026-01-31")
+        assert qi.start_date == "2026-01-01"
+        assert qi.end_date == "2026-01-31"
+
+    def test_strategy_mean_reversion_extracted(self):
+        qi = self._fb("backtest mean reversion on AAPL")
+        assert qi.strategy == "mean-reversion"
+
+    def test_strategy_momentum_extracted(self):
+        qi = self._fb("run momentum backtest on TSLA")
+        assert qi.strategy == "momentum"
 
     def test_classify_intent_bt_workflow_set_for_backtest(self):
         from src.semi_auto.nodes.classifier import classify_intent

@@ -153,9 +153,9 @@ class TestGraphState:
 class TestRegistry:
     """Function registry import and structure."""
 
-    def test_registry_has_42_functions(self):
+    def test_registry_has_38_functions(self):
         from src.semi_auto.registry.functions import FUNCTION_REGISTRY
-        assert len(FUNCTION_REGISTRY) == 41
+        assert len(FUNCTION_REGISTRY) == 38
 
     def test_registry_schema_has_all_keys(self):
         from src.semi_auto.registry.functions import get_registry_schema, FUNCTION_REGISTRY
@@ -169,10 +169,10 @@ class TestRegistry:
             "get_tick_trades", "get_trade_count", "get_intraday_stats", "get_watchlist",
             "get_company_fundamentals", "get_dividends", "get_earnings_history",
             "get_income_statement", "get_balance_sheet", "get_cash_flow", "get_all_fundamentals",
-            "get_eod_summaries", "get_latest_eod", "get_recent_eods", "get_analyst_symbols",
+            "get_eod_summaries", "get_latest_eod",
             "get_latest_signal", "get_recent_signals", "get_actionable_signals", "get_strategy_performance",
             "get_backtest_run", "get_recent_backtest_runs", "get_backtest_trades",
-            "get_backtest_performance", "get_backtest_returns",
+            "get_backtest_performance",
             "get_portfolio_snapshot", "get_portfolio_snapshot_history", "get_risk_parameters",
         ]
         for fn_name in dao_fns:

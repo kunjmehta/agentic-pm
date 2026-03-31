@@ -759,44 +759,6 @@ def _get_latest_eod(symbol: str) -> dict:
         return {"error": str(exc)}
 
 
-def _get_recent_eods(symbol: str, count: int = 5) -> list:
-    """Get the N most recent EOD analyst summaries for a symbol.
-
-    Args:
-        symbol: Stock ticker.
-        count: Number of summaries to return.
-
-    Returns:
-        List of EOD summary dicts.
-    """
-    try:
-        from src.common.dao import AnalystDAO
-        dao = AnalystDAO()
-        result = dao.get_recent_eods(symbol, count=count)
-        dao.close()
-        return _to_native(result) if result else []
-    except Exception as exc:
-        logger.warning(f"[registry] get_recent_eods failed for {symbol}: {exc}")
-        return {"error": str(exc)}
-
-
-def _get_analyst_symbols() -> list:
-    """Get all symbols that have EOD analyst summaries.
-
-    Returns:
-        List of symbol strings.
-    """
-    try:
-        from src.common.dao import AnalystDAO
-        dao = AnalystDAO()
-        result = dao.get_all_symbols()
-        dao.close()
-        return result or []
-    except Exception as exc:
-        logger.warning(f"[registry] get_analyst_symbols failed: {exc}")
-        return {"error": str(exc)}
-
-
 # ── StrategyDAO wrappers ──────────────────────────────────────────────────────
 
 def _get_latest_signal(symbol: str, strategy_name: str) -> dict:
@@ -967,28 +929,6 @@ def _get_backtest_performance(run_id: str) -> list:
         return {"error": str(exc)}
 
 
-def _get_backtest_returns(run_id: str) -> list:
-    """Get daily returns series for a backtest run.
-
-    Args:
-        run_id: Backtest run UUID.
-
-    Returns:
-        List of {date, return} dicts or empty list.
-    """
-    try:
-        from src.common.dao import BacktestDAO
-        dao = BacktestDAO()
-        series = dao.get_daily_returns(run_id)
-        dao.close()
-        if series is None or (hasattr(series, "empty") and series.empty):
-            return []
-        return _to_native([{"date": str(k), "return": v} for k, v in series.items()])
-    except Exception as exc:
-        logger.warning(f"[registry] get_backtest_returns failed for {run_id}: {exc}")
-        return {"error": str(exc)}
-
-
 # ── PortfolioDAO wrappers ─────────────────────────────────────────────────────
 
 def _get_portfolio_snapshot() -> dict:
@@ -1083,8 +1023,6 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     # ── AnalystDAO ────────────────────────────────────────────────────────────
     "get_eod_summaries":       _get_eod_summaries,
     "get_latest_eod":          _get_latest_eod,
-    "get_recent_eods":         _get_recent_eods,
-    "get_analyst_symbols":     _get_analyst_symbols,
     # ── StrategyDAO ───────────────────────────────────────────────────────────
     "get_latest_signal":       _get_latest_signal,
     "get_recent_signals":      _get_recent_signals,
@@ -1095,7 +1033,6 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "get_recent_backtest_runs": _get_recent_backtest_runs,
     "get_backtest_trades":     _get_backtest_trades,
     "get_backtest_performance": _get_backtest_performance,
-    "get_backtest_returns":    _get_backtest_returns,
     # ── PortfolioDAO ──────────────────────────────────────────────────────────
     "get_portfolio_snapshot":  _get_portfolio_snapshot,
     "get_portfolio_snapshot_history": _get_portfolio_snapshot_history,
@@ -1265,14 +1202,6 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Get the most recent EOD analyst summary for a symbol.",
             "params": {"symbol": "str"},
         },
-        "get_recent_eods": {
-            "description": "Get the N most recent EOD analyst summaries for a symbol.",
-            "params": {"symbol": "str", "count": "int — default 5"},
-        },
-        "get_analyst_symbols": {
-            "description": "Get all symbols that have EOD analyst summaries.",
-            "params": {},
-        },
         # ── StrategyDAO ───────────────────────────────────────────────────────
         "get_latest_signal": {
             "description": "Get the most recent strategy signal (buy/sell/hold + confidence) for a symbol.",
@@ -1307,10 +1236,6 @@ def get_registry_schema() -> Dict[str, Any]:
             "description": "Get daily performance history (equity curve) for a backtest run.",
             "params": {"run_id": "str"},
         },
-        "get_backtest_returns": {
-            "description": "Get daily returns series for a backtest run.",
-            "params": {"run_id": "str"},
-        },
         # ── PortfolioDAO ──────────────────────────────────────────────────────
         "get_portfolio_snapshot": {
             "description": "Get the most recent portfolio snapshot (equity, positions, unrealized P&L).",
@@ -1340,11 +1265,11 @@ if __name__ == "__main__":
         status = "[OK]" if fn is not None else "[WARN] not available"
         print(f"  {status}  {name}")
 
-    assert len(FUNCTION_REGISTRY) == 41, f"Expected 41 functions, got {len(FUNCTION_REGISTRY)}"
-    print("\n[OK] All 41 functions registered")
+    assert len(FUNCTION_REGISTRY) == 38, f"Expected 38 functions, got {len(FUNCTION_REGISTRY)}"
+    print("\n[OK] All 38 functions registered")
 
     schema = get_registry_schema()
-    assert len(schema) == 41, f"Expected 41 schema entries, got {len(schema)}"
+    assert len(schema) == 38, f"Expected 38 schema entries, got {len(schema)}"
     print("[OK] Registry schema returned")
 
     print("\n[ALL OK] registry/functions.py smoke test passed")

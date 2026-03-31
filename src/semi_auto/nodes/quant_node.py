@@ -186,11 +186,11 @@ def quant_reasoning_node(state: dict) -> dict:
 
         task_queue = [
             {
-                "task_id": f"qa_{i+1:03d}",
+                "task_id": c.task_id or f"qa_{i+1:03d}",
                 "function_name": c.function_name,
                 "params": c.params,
-                "priority": 1,
-                "depends_on": [],
+                "priority": c.priority,
+                "depends_on": c.depends_on,
             }
             for i, c in enumerate(result.calls)
         ]

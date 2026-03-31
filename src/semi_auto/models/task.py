@@ -6,7 +6,7 @@ PM agent:
   AgentOutput → TaskList + delegation flags
 
 Quant / Backtester agents (simpler):
-  FunctionCall → just (function_name, params)
+  FunctionCall → (task_id, function_name, params, priority, depends_on)
   AgentPlan    → List[FunctionCall] + one-sentence reasoning_summary
 
 PM review (structured edits, no free text):
@@ -77,18 +77,24 @@ class AgentOutput(BaseModel):
 
 
 class FunctionCall(BaseModel):
-    """A single function call: name + keyword params.
+    """A single function call with scheduling metadata.
 
     Used by Quant and Backtester agents as their output unit.
     At execution time, function_name is resolved to a callable via FUNCTION_REGISTRY.
 
     Attributes:
+        task_id: Unique ID for dependency tracking (e.g. "bt_001"). Auto-generated if None.
         function_name: Key in FUNCTION_REGISTRY.
         params: Keyword arguments passed directly to the registered function.
+        priority: Execution priority. 1=high (parallel), 3=sequential write operation.
+        depends_on: task_ids whose results must complete before this task runs.
     """
 
+    task_id: Optional[str] = Field(default=None, description="Unique ID e.g. 'bt_001'. Auto-assigned if None.")
     function_name: str = Field(description="Registry key — must match FUNCTION_REGISTRY exactly")
     params: Dict[str, Any] = Field(default_factory=dict, description="Keyword arguments for the function")
+    priority: int = Field(default=1, ge=1, le=3, description="1=parallel, 3=sequential (write ops)")
+    depends_on: List[str] = Field(default_factory=list, description="task_ids that must complete first")
 
 
 class AgentPlan(BaseModel):

@@ -190,11 +190,11 @@ def backtester_reasoning_node(state: dict) -> dict:
 
         task_queue = [
             {
-                "task_id": c.params.get("task_id") or f"bt_{i+1:03d}",
+                "task_id": c.task_id or f"bt_{i+1:03d}",
                 "function_name": c.function_name,
                 "params": c.params,
-                "priority": c.params.get("priority", 1),
-                "depends_on": c.params.get("depends_on") or [],
+                "priority": c.priority,
+                "depends_on": c.depends_on,
             }
             for i, c in enumerate(result.calls)
         ]
