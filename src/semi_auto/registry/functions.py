@@ -4,11 +4,10 @@ Maps string function names (as output by LLM reasoning agents) to Python callabl
 Quant skill functions require a pandas DataFrame so they are wrapped to fetch bars
 from AlpacaDAO internally before calling the underlying skill.
 
-Hyphenated skill directories are loaded via importlib.util (same pattern as
-src/langgraph/nodes/quant_node.py and src/langgraph/nodes/backtester_node.py).
+Skills are loaded through src/semi_auto/skills/ which isolates all src/agentic/
+imports to a single boundary layer.
 """
 
-import importlib.util
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,81 +20,29 @@ from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
-# ── Skill directory paths ─────────────────────────────────────────────────────
+# ── Portfolio skills ───────────────────────────────────────────────────────────
 
-_QUANT_SKILLS = project_root / "src" / "agentic" / "agents" / "quant" / "skills"
-_BT_SKILLS = project_root / "src" / "agentic" / "agents" / "backtester" / "skills"
+from src.semi_auto.skills.portfolio.skills import (
+    get_portfolio_status_core,
+    get_positions_summary_core,
+    check_portfolio_health_core,
+    fetch_historical_data_core,
+    check_data_availability_core,
+)
 
+# ── Quant skills ──────────────────────────────────────────────────────────────
 
-def _load_skill(base_dir: Path, folder: str, filename: str):
-    """Load a skill module from a potentially hyphenated folder.
+from src.semi_auto.skills.quant.skills import (
+    calc_momentum_package as _calc_momentum_raw,
+    calc_volatility_bands as _calc_volatility_raw,
+    calc_volume_flow as _calc_volume_raw,
+    analyze_candle_structure as _analyze_candles_raw,
+    MeanReversionStrategy as _MeanReversionStrategy,
+)
 
-    Args:
-        base_dir: Parent directory containing skill folders.
-        folder: Skill folder name (may contain hyphens).
-        filename: Python file inside the folder.
+# ── Backtester skills ─────────────────────────────────────────────────────────
 
-    Returns:
-        Loaded module object, or None on failure.
-    """
-    path = base_dir / folder / filename
-    module_name = f"semi_auto_skill_{folder.replace('-', '_')}"
-    try:
-        spec = importlib.util.spec_from_file_location(module_name, path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    except Exception as exc:
-        logger.warning(f"[registry] failed to load {folder}/{filename}: {exc}")
-        return None
-
-
-# ── Portfolio skills (normal Python imports) ──────────────────────────────────
-
-try:
-    from src.agentic.agents.portfolio.skills.portfoliostatus.status import (
-        get_portfolio_status_core,
-        get_positions_summary_core,
-    )
-except Exception as _e:
-    logger.warning(f"[registry] portfolio status skill load failed: {_e}")
-    get_portfolio_status_core = None
-    get_positions_summary_core = None
-
-try:
-    from src.agentic.agents.portfolio.skills.health.health import check_portfolio_health_core
-except Exception as _e:
-    logger.warning(f"[registry] portfolio health skill load failed: {_e}")
-    check_portfolio_health_core = None
-
-try:
-    from src.agentic.agents.portfolio.skills.datamanagement.data import (
-        fetch_historical_data_core,
-        check_data_availability_core,
-    )
-except Exception as _e:
-    logger.warning(f"[registry] portfolio data skill load failed: {_e}")
-    fetch_historical_data_core = None
-    check_data_availability_core = None
-
-# ── Quant skills (hyphenated directories via importlib) ───────────────────────
-
-_momentum_mod = _load_skill(_QUANT_SKILLS, "momentum-indicators", "momentum.py")
-_volatility_mod = _load_skill(_QUANT_SKILLS, "volatility-indicators", "volatility.py")
-_volume_mod = _load_skill(_QUANT_SKILLS, "volume-indicators", "volume.py")
-_candles_mod = _load_skill(_QUANT_SKILLS, "candlestick-patterns", "candles.py")
-_mr_mod = _load_skill(_QUANT_SKILLS, "mean-reversion-strategy", "mean_reversion.py")
-
-_calc_momentum_raw = getattr(_momentum_mod, "calc_momentum_package", None)
-_calc_volatility_raw = getattr(_volatility_mod, "calc_volatility_bands", None)
-_calc_volume_raw = getattr(_volume_mod, "calc_volume_flow", None)
-_analyze_candles_raw = getattr(_candles_mod, "analyze_candle_structure", None)
-_MeanReversionStrategy = getattr(_mr_mod, "MeanReversionStrategy", None)
-
-# ── Backtester skills (hyphenated directories via importlib) ─────────────────
-
-_bt_strategy_mod = _load_skill(_BT_SKILLS, "backtest-strategy", "strategy.py")
-_backtest_strategy_raw = getattr(_bt_strategy_mod, "backtest_strategy_core", None)
+from src.semi_auto.skills.backtester.skills import backtest_strategy_core as _backtest_strategy_raw
 
 
 # ── Wrapper helpers ───────────────────────────────────────────────────────────
