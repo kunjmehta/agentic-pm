@@ -35,6 +35,9 @@ from src.semi_auto.routers.fundamentals import router as fundamentals_router
 from src.semi_auto.routers.analyst import router as analyst_router
 from src.semi_auto.routers.strategy import router as strategy_router
 from src.semi_auto.routers.backtest import router as backtest_router
+from src.semi_auto.routers.orders import router as orders_router
+from src.semi_auto.routers.signals import router as signals_router
+from src.semi_auto.routers.reports import router as reports_router
 from src.common.utils import config as app_config
 from src.semi_auto.models.endpoints import RootResponse
 
@@ -69,6 +72,9 @@ app.include_router(fundamentals_router)
 app.include_router(analyst_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
+app.include_router(orders_router)
+app.include_router(signals_router)
+app.include_router(reports_router)
 
 
 # -- Root ----------------------------------------------------------------------
@@ -88,6 +94,11 @@ async def root():
             "POST /v1/reject/{thread_id}": "Cancel pending execution",
             "GET /v1/registry": "List registered functions",
             "GET /v1/health": "Liveness check",
+            "POST /v1/orders/execute": "Place a market or limit order directly",
+            "POST /v1/orders/scale": "Scale a position to a target portfolio %",
+            "POST /v1/orders/signal": "Execute a strategy signal (buy/sell/hold)",
+            "POST /v1/orders/close/{symbol}": "Close (liquidate) a position",
+            "DELETE /v1/orders/{order_id}": "Cancel an open order",
         },
     }
 

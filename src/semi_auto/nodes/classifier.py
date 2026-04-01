@@ -191,6 +191,17 @@ def classify_intent(state: dict) -> dict:
         logger.warning(f"[classifier] LLM failed ({exc}) — using keyword fallback")
         query_intent = _keyword_fallback(query, today, default_start)
 
+    # If LLM returned backtest intent but no workflow, infer from keywords
+    if query_intent.intent == "backtest" and query_intent.bt_workflow is None:
+        ql = query.lower()
+        if any(kw in ql for kw in {"swap", "replace"}):
+            query_intent.bt_workflow = "C"
+        elif any(kw in ql for kw in {"worth", "held", "holding"}):
+            query_intent.bt_workflow = "B"
+        else:
+            query_intent.bt_workflow = "A"
+        logger.info(f"[classifier] bt_workflow inferred from keywords → {query_intent.bt_workflow!r}")
+
     # Apply defaults for unspecified dates and strategy
     if query_intent.start_date is None:
         query_intent.start_date = default_start

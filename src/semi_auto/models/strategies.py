@@ -34,7 +34,14 @@ _TIMEFRAME_ALIASES: Dict[str, str] = {
     "15m": "15Min", "15min": "15Min",
 }
 
-_VALID_STRATEGIES = {"buy-and-hold", "mean-reversion", "momentum", "value"}
+_VALID_STRATEGIES = {
+    # Existing
+    "buy-and-hold", "mean-reversion", "momentum", "value",
+    # Day trading
+    "vwap-reversion", "opening-range-breakout", "rsi-divergence", "momentum-burst",
+    # Swing
+    "golden-cross", "breakout-52w", "mean-reversion-daily", "earnings-drift",
+}
 
 
 def _normalise_timeframe(v: str) -> str:
@@ -67,7 +74,7 @@ class QuantIndicatorInput(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     symbol: str = Field(description="Stock ticker symbol, e.g. 'AAPL'")
-    timeframe: str = Field(default="1Day", description="AlpacaDAO canonical timeframe")
+    timeframe: str = Field(default="1Min", description="AlpacaDAO canonical timeframe")
     lookback_days: int = Field(
         default=90, ge=1, le=730,
         description="Calendar days to look back (live mode only)",
@@ -251,10 +258,18 @@ class BacktestInput(BaseModel):
         # Fuzzy keyword match — first valid strategy whose name appears as a
         # substring (or whose keywords all appear) in the submitted value
         _FUZZY_MAP = [
-            ("mean-reversion", ["mean", "reversion"]),
-            ("buy-and-hold",   ["buy", "hold"]),
-            ("momentum",       ["momentum"]),
-            ("value",          ["value"]),
+            ("mean-reversion",        ["mean", "reversion"]),
+            ("buy-and-hold",          ["buy", "hold"]),
+            ("momentum",              ["momentum"]),
+            ("value",                 ["value"]),
+            ("vwap-reversion",        ["vwap"]),
+            ("opening-range-breakout",["opening", "range"]),
+            ("rsi-divergence",        ["rsi", "divergence"]),
+            ("momentum-burst",        ["momentum", "burst"]),
+            ("golden-cross",          ["golden", "cross"]),
+            ("breakout-52w",          ["52", "breakout"]),
+            ("mean-reversion-daily",  ["mean", "reversion", "daily"]),
+            ("earnings-drift",        ["earnings", "drift"]),
         ]
         for canonical, keywords in _FUZZY_MAP:
             if all(kw in v_norm for kw in keywords):

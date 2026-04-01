@@ -10,7 +10,7 @@ def test_backtester_initialization():
 
     assert backtester.model == "gpt-5-mini"
     assert backtester.backtest_mode is True
-    assert len(backtester.tools) == 5
+    assert len(backtester.tools) == 6
 
 
 def test_backtester_tools_loaded():

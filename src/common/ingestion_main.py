@@ -37,7 +37,7 @@ def _sync_watchlist() -> List[str]:
         List of ticker strings.
     """
     try:
-        from src.common.skills.alpaca_portfolio_skills import get_all_watchlist_symbols
+        from src.common.external.alpaca_portfolio import get_all_watchlist_symbols
         from src.common.dao import AlpacaDAO
 
         alpaca_symbols = get_all_watchlist_symbols()

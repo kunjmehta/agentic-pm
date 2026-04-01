@@ -10,7 +10,7 @@ import argparse
 from datetime import datetime
 from typing import Dict
 
-from src.common.skills.alpaca_skills import fetch_historical_bars
+from src.common.external.alpaca import fetch_historical_bars
 from src.common.dao import AlpacaDAO
 from src.common.utils import get_logger
 

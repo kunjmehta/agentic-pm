@@ -37,17 +37,17 @@ def mock_secret_file():
             mock_open.return_value = mock_file
 
             # Now import the module after mocking
-            import src.common.skills.alpaca_skills
+            import src.common.external.alpaca
             yield
 
 
 class TestFetchHistoricalBars:
     """Test fetch_historical_bars function."""
 
-    @patch("src.common.skills.alpaca_skills.historical_client")
+    @patch("src.common.external.alpaca.historical_client")
     def test_fetch_bars_success(self, mock_client):
         """Test successful bar data fetch."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         # Mock response
         mock_bars = Mock()
@@ -79,10 +79,10 @@ class TestFetchHistoricalBars:
         assert "volume" in result.columns
         mock_client.get_stock_bars.assert_called_once()
 
-    @patch("src.common.skills.alpaca_skills.historical_client")
+    @patch("src.common.external.alpaca.historical_client")
     def test_fetch_bars_invalid_timeframe(self, mock_client):
         """Test error handling for invalid timeframe."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         with pytest.raises(ValueError, match="Invalid timeframe"):
             fetch_historical_bars(
@@ -92,10 +92,10 @@ class TestFetchHistoricalBars:
                 timeframe="InvalidTimeframe"
             )
 
-    @patch("src.common.skills.alpaca_skills.historical_client")
+    @patch("src.common.external.alpaca.historical_client")
     def test_fetch_bars_api_error(self, mock_client):
         """Test error handling when API fails."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         mock_client.get_stock_bars.side_effect = Exception("API Error")
 
@@ -111,10 +111,10 @@ class TestFetchHistoricalBars:
 class TestFetchHistoricalTrades:
     """Test fetch_historical_trades function."""
 
-    @patch("src.common.skills.alpaca_skills.historical_client")
+    @patch("src.common.external.alpaca.historical_client")
     def test_fetch_trades_success(self, mock_client):
         """Test successful trade data fetch."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Mock response
         mock_trades = Mock()
@@ -147,10 +147,10 @@ class TestFetchHistoricalTrades:
         assert "size" in result.columns
         mock_client.get_stock_trades.assert_called_once()
 
-    @patch("src.common.skills.alpaca_skills.historical_client")
+    @patch("src.common.external.alpaca.historical_client")
     def test_fetch_trades_api_error(self, mock_client):
         """Test error handling when API fails."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         mock_client.get_stock_trades.side_effect = Exception("API Error")
 

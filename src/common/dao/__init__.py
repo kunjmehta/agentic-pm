@@ -44,6 +44,8 @@ from .analyst_dao import AnalystDAO
 from .strategy_dao import StrategyDAO
 from .portfolio_dao import PortfolioDAO
 from .backtest_dao import BacktestDAO
+from .orders_dao import OrdersDAO
+from .reports_dao import ReportsDAO
 
 __all__ = [
     'BaseDAO',
@@ -53,4 +55,6 @@ __all__ = [
     'StrategyDAO',
     'PortfolioDAO',
     'BacktestDAO',
+    'OrdersDAO',
+    'ReportsDAO',
 ]

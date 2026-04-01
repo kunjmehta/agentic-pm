@@ -68,8 +68,9 @@ class TestSortinoRatio:
         returns = pd.Series([0.01, 0.02, 0.015, 0.012])
         sortino = calculate_sortino_ratio(returns, risk_free_rate=0.0)
 
-        # Should return 0 when no downside
-        assert sortino == 0.0
+        # All-positive returns = optimal performance — sentinel value 999.0
+        # (returning 0.0 was wrong; it implied the worst possible risk-adjusted return)
+        assert sortino == 999.0
 
 
 class TestMaxDrawdown:
@@ -165,8 +166,8 @@ class TestProfitFactor:
         trades = [{"pnl": 100.0}, {"pnl": 200.0}]
         pf = calculate_profit_factor(trades)
 
-        # Should return infinity
-        assert pf == float('inf')
+        # Returns a large finite cap (99.0) to avoid DECIMAL column overflow
+        assert pf == 99.0
 
     def test_no_profits(self):
         """Test profit factor with no profits."""

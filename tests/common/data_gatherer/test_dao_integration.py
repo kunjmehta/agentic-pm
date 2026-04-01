@@ -60,10 +60,10 @@ def cleanup_test_db(test_db_path):
 class TestAlpacaSkillsIntegration:
     """Integration tests for Alpaca skills with database persistence."""
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
+    @patch('src.common.external.alpaca.historical_client')
     def test_fetch_historical_bars_saves_to_db(self, mock_client, alpaca_dao):
         """Test that fetch_historical_bars automatically saves to database."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         # Create mock response
         mock_bars_df = pd.DataFrame({
@@ -83,7 +83,7 @@ class TestAlpacaSkillsIntegration:
         mock_client.get_stock_bars.return_value = mock_bars
 
         # Patch AlpacaDAO to use our test DAO
-        with patch('src.common.skills.alpaca_skills.AlpacaDAO', return_value=alpaca_dao):
+        with patch('src.common.external.alpaca.AlpacaDAO', return_value=alpaca_dao):
             # Fetch bars
             result = fetch_historical_bars(
                 symbol="TEST",
@@ -103,10 +103,10 @@ class TestAlpacaSkillsIntegration:
             assert len(saved_bars) == 3
             assert saved_bars.iloc[0]['open'] == 100.0
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
+    @patch('src.common.external.alpaca.historical_client')
     def test_fetch_historical_trades_saves_to_db(self, mock_client, alpaca_dao):
         """Test that fetch_historical_trades automatically saves to database."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Create mock response
         mock_trades_df = pd.DataFrame({
@@ -125,7 +125,7 @@ class TestAlpacaSkillsIntegration:
         mock_client.get_stock_trades.return_value = mock_trades
 
         # Patch AlpacaDAO to use our test DAO
-        with patch('src.common.skills.alpaca_skills.AlpacaDAO', return_value=alpaca_dao):
+        with patch('src.common.external.alpaca.AlpacaDAO', return_value=alpaca_dao):
             # Fetch trades
             result = fetch_historical_trades(
                 symbol="TEST",
@@ -149,10 +149,10 @@ class TestAlpacaSkillsIntegration:
 class TestAlphaVantageSkillsIntegration:
     """Integration tests for Alpha Vantage skills with database persistence."""
 
-    @patch('src.common.skills.alpha_vantage_skills._make_request')
+    @patch('src.common.external.alpha_vantage._make_request')
     def test_fetch_company_overview_saves_to_db(self, mock_request, av_dao):
         """Test that fetch_company_overview automatically saves to database."""
-        from src.common.skills.alpha_vantage_skills import fetch_company_overview
+        from src.common.external.alpha_vantage import fetch_company_overview
 
         # Mock API response
         mock_request.return_value = {
@@ -165,7 +165,7 @@ class TestAlphaVantageSkillsIntegration:
         }
 
         # Patch AlphaVantageDAO to use our test DAO
-        with patch('src.common.skills.alpha_vantage_skills.AlphaVantageDAO', return_value=av_dao):
+        with patch('src.common.external.alpha_vantage.AlphaVantageDAO', return_value=av_dao):
             # Fetch overview
             result = fetch_company_overview("TEST")
 
@@ -177,10 +177,10 @@ class TestAlphaVantageSkillsIntegration:
             assert saved_overview is not None
             assert saved_overview['name'] == 'Test Company'
 
-    @patch('src.common.skills.alpha_vantage_skills._make_request')
+    @patch('src.common.external.alpha_vantage._make_request')
     def test_fetch_dividends_saves_to_db(self, mock_request, av_dao):
         """Test that fetch_dividend_history automatically saves to database."""
-        from src.common.skills.alpha_vantage_skills import fetch_dividend_history
+        from src.common.external.alpha_vantage import fetch_dividend_history
 
         # Mock API response
         mock_request.return_value = {
@@ -197,7 +197,7 @@ class TestAlphaVantageSkillsIntegration:
         }
 
         # Patch AlphaVantageDAO to use our test DAO
-        with patch('src.common.skills.alpha_vantage_skills.AlphaVantageDAO', return_value=av_dao):
+        with patch('src.common.external.alpha_vantage.AlphaVantageDAO', return_value=av_dao):
             # Fetch dividends
             result = fetch_dividend_history("TEST")
 

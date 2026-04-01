@@ -14,7 +14,7 @@ import argparse
 from datetime import datetime
 from typing import Dict
 
-from src.common.skills.alpaca_portfolio_skills import fetch_account_info, fetch_positions
+from src.common.external.alpaca_portfolio import fetch_account_info, fetch_positions
 from src.common.dao import PortfolioDAO
 from src.common.utils import get_logger
 

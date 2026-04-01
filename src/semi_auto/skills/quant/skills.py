@@ -10,18 +10,28 @@ One class per indicator/strategy, each with two methods:
                                    analyze_bars. Used by the signal-generation
                                    workflow that runs on live / recent data.
 
-Classes:
-    MomentumSkill         — MACD + RSI
-    VolatilitySkill       — Bollinger Bands
-    VolumeSkill           — OBV + volume flow
-    CandlestickSkill      — candlestick pattern detection
-    MeanReversionSkill    — Z-score / MA / Bollinger mean-reversion signals
+Core indicator classes (defined here):
+    MomentumSkill              — MACD + RSI
+    VolatilitySkill            — Bollinger Bands
+    VolumeSkill                — OBV + volume flow
+    CandlestickSkill           — candlestick pattern detection
+    MeanReversionSkill         — Z-score / MA / Bollinger mean-reversion signals
+
+Strategy classes (re-exported from individual modules):
+    vwap_reversion             — VWAPReversionSkill
+    opening_range_breakout     — OpeningRangeBreakoutSkill
+    rsi_divergence_scalp       — RSIDivergenceScalpSkill
+    momentum_burst             — MomentumBurstSkill
+    golden_cross               — GoldenCrossSkill
+    breakout_52w               — Breakout52WeekSkill
+    mean_reversion_daily       — MeanReversionDailySkill
+    earnings_drift             — EarningsDriftSkill
 """
 
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -30,39 +40,9 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.semi_auto.skills.quant._utils import _fetch_bars  # noqa: F401 (shared helper)
 
 logger = get_logger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Shared bar-fetch helper
-# ---------------------------------------------------------------------------
-
-def _fetch_bars(symbol: str, timeframe: str = "1Day", lookback_days: int = 90) -> Optional[pd.DataFrame]:
-    """Fetch OHLCV bars from AlpacaDAO.
-
-    Args:
-        symbol: Stock ticker.
-        timeframe: AlpacaDAO canonical timeframe (e.g. "1Day", "1Min").
-        lookback_days: Calendar days to look back from now.
-
-    Returns:
-        DataFrame or None if unavailable.
-    """
-    try:
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        end = datetime.now()
-        start = end - timedelta(days=lookback_days)
-        df = dao.get_bars(symbol, start=start, end=end, timeframe=timeframe)
-        dao.close()
-        if df is None or df.empty:
-            logger.warning(f"[quant.skills] No bars for {symbol}/{timeframe}")
-            return None
-        return df
-    except Exception as exc:
-        logger.warning(f"[quant.skills] Bar fetch failed for {symbol}: {exc}")
-        return None
 
 
 # =============================================================================
@@ -103,8 +83,11 @@ class MomentumSkill:
         rsi = None
         if len(df) >= 14:
             delta = df["close"].diff()
-            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            # Wilder's SMMA smoothing via EWM (alpha = 1/14), not simple moving
+            # average.  This matches RSI as computed by TradingView / Bloomberg
+            # and every major charting platform.
+            gain = delta.where(delta > 0, 0.0).ewm(alpha=1 / 14, adjust=False).mean()
+            loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1 / 14, adjust=False).mean()
             rs = gain / loss.replace(0, np.nan)
             rsi_series = 100 - (100 / (1 + rs))
             rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else None
@@ -179,7 +162,7 @@ class VolatilitySkill:
             return {"upper": None, "middle": None, "lower": None, "bandwidth": None}
 
         middle = df["close"].rolling(window=period).mean()
-        std = df["close"].rolling(window=period).std()
+        std = df["close"].rolling(window=period).std(ddof=0)
         upper = middle + std * num_std
         lower = middle - std * num_std
         bandwidth = (upper - lower) / middle * 100
@@ -480,7 +463,9 @@ class MeanReversionSkill:
 
         if stats:
             signals = self._generate_signals(current_price, stats, ma, bands, threshold)
-            recommendation = self._generate_recommendation(current_price, signals, stats, levels)
+            recommendation = self._generate_recommendation(
+                current_price, signals, stats, levels, threshold=threshold
+            )
         else:
             signals = {
                 "current_state": "unknown",
@@ -574,7 +559,7 @@ class MeanReversionSkill:
         prices = df["close"].tail(lookback)
         current = float(prices.iloc[-1])
         mean = float(prices.mean())
-        std = float(prices.std())
+        std = float(prices.std(ddof=0))
         z = (current - mean) / std if std > 0 else 0.0
         pct = float((prices <= current).sum() / len(prices) * 100)
 
@@ -632,7 +617,8 @@ class MeanReversionSkill:
             return {}
         prices = df["close"].tail(lookback)
         sma = prices.rolling(ma_period).mean()
-        std = prices.rolling(ma_period).std()
+        # Population std (ddof=0) matches J. Bollinger's original definition
+        std = prices.rolling(ma_period).std(ddof=0)
         return {
             "upper_band": round(float((sma + std * 2).iloc[-1]), 2),
             "middle_band": round(float(sma.iloc[-1]), 2),
@@ -726,6 +712,7 @@ class MeanReversionSkill:
         signals: Dict,
         stats: Dict,
         levels: Dict,
+        threshold: float = 2.0,
     ) -> Dict:
         """Generate a trade recommendation with entry / stop-loss / take-profit.
 
@@ -734,6 +721,10 @@ class MeanReversionSkill:
             signals: Signals dict from ``_generate_signals``.
             stats: Statistics dict (used for z_score, mean, vwap).
             levels: Levels dict (used for support / resistance).
+            threshold: Z-score threshold used by the caller. Confidence is
+                computed as ``abs(z) / threshold`` so it scales correctly
+                relative to the active threshold and never exceeds 1.0 before
+                the VWAP bump is applied.
 
         Returns:
             Dict with action, confidence, reason, entry_price, stop_loss,
@@ -742,7 +733,6 @@ class MeanReversionSkill:
         signal = signals["overall_signal"]
         z = stats.get("z_score", 0)
         vwap = stats.get("vwap")
-        threshold = 2.0  # default — matches analyze_bars default
 
         confidence = min(abs(z) / threshold, 1.0)
         vwap_note = ""
@@ -815,11 +805,59 @@ class MeanReversionSkill:
 
 
 # =============================================================================
-# Module-level singleton instances
+# Module-level singleton instances (core indicators)
 # =============================================================================
 
 momentum_skill = MomentumSkill()
 volatility_skill = VolatilitySkill()
+
+# =============================================================================
+# Re-export strategy skill classes from sub-modules
+# (keeps all imports from src.semi_auto.skills.quant.skills working)
+# =============================================================================
+
+from src.semi_auto.skills.quant.vwap_reversion import (  # noqa: E402
+    VWAPReversionSkill,
+    vwap_reversion_skill,
+    make_vwap_reversion_signals,
+)
+from src.semi_auto.skills.quant.opening_range_breakout import (  # noqa: E402
+    OpeningRangeBreakoutSkill,
+    opening_range_breakout_skill,
+    make_opening_range_breakout_signals,
+)
+from src.semi_auto.skills.quant.rsi_divergence_scalp import (  # noqa: E402
+    RSIDivergenceScalpSkill,
+    rsi_divergence_scalp_skill,
+    make_rsi_divergence_signals,
+)
+from src.semi_auto.skills.quant.momentum_burst import (  # noqa: E402
+    MomentumBurstSkill,
+    momentum_burst_skill,
+    make_momentum_burst_signals,
+)
+from src.semi_auto.skills.quant.golden_cross import (  # noqa: E402
+    GoldenCrossSkill,
+    golden_cross_skill,
+    make_golden_cross_signals,
+)
+from src.semi_auto.skills.quant.breakout_52w import (  # noqa: E402
+    Breakout52WeekSkill,
+    breakout_52w_skill,
+    make_breakout_52w_signals,
+)
+from src.semi_auto.skills.quant.mean_reversion_daily import (  # noqa: E402
+    MeanReversionDailySkill,
+    mean_reversion_daily_skill,
+    make_mean_reversion_daily_signals,
+)
+from src.semi_auto.skills.quant.earnings_drift import (  # noqa: E402
+    EarningsDriftSkill,
+    earnings_drift_skill,
+    make_earnings_drift_signals,
+)
+
+
 volume_skill = VolumeSkill()
 candlestick_skill = CandlestickSkill()
 mean_reversion_skill = MeanReversionSkill()
@@ -852,18 +890,46 @@ def analyze_candle_structure(df: pd.DataFrame, lookback: int = 5) -> Dict:
 MeanReversionStrategy = MeanReversionSkill
 
 __all__ = [
-    # Classes
+    # Core indicator classes
     "MomentumSkill",
     "VolatilitySkill",
     "VolumeSkill",
     "CandlestickSkill",
     "MeanReversionSkill",
-    # Singletons
+    # Day trading strategy classes
+    "VWAPReversionSkill",
+    "OpeningRangeBreakoutSkill",
+    "RSIDivergenceScalpSkill",
+    "MomentumBurstSkill",
+    # Swing strategy classes
+    "GoldenCrossSkill",
+    "Breakout52WeekSkill",
+    "MeanReversionDailySkill",
+    "EarningsDriftSkill",
+    # Core singletons
     "momentum_skill",
     "volatility_skill",
     "volume_skill",
     "candlestick_skill",
     "mean_reversion_skill",
+    # New strategy singletons
+    "vwap_reversion_skill",
+    "opening_range_breakout_skill",
+    "rsi_divergence_scalp_skill",
+    "momentum_burst_skill",
+    "golden_cross_skill",
+    "breakout_52w_skill",
+    "mean_reversion_daily_skill",
+    "earnings_drift_skill",
+    # Signal factory functions (backtester compatible)
+    "make_vwap_reversion_signals",
+    "make_opening_range_breakout_signals",
+    "make_rsi_divergence_signals",
+    "make_momentum_burst_signals",
+    "make_golden_cross_signals",
+    "make_breakout_52w_signals",
+    "make_mean_reversion_daily_signals",
+    "make_earnings_drift_signals",
     # Legacy function aliases
     "calc_momentum_package",
     "calc_volatility_bands",

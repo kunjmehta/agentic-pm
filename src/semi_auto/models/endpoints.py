@@ -632,6 +632,85 @@ class RecentSignalsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Strategy HITL — signals review  (Phase 25)
+# ---------------------------------------------------------------------------
+
+
+class PendingSignalsResponse(BaseModel):
+    """Response for GET /v1/strategy/signals/pending.
+
+    Attributes:
+        signals: Rows with ``status='pending_review'``.
+        count: Number of rows.
+    """
+
+    signals: List[Any] = Field(default_factory=list)
+    count: int
+
+
+class SignalReviewResponse(BaseModel):
+    """Response for POST /v1/strategy/signals/{id}/approve|reject.
+
+    Attributes:
+        signal_id: Primary key that was reviewed.
+        status: New status applied — ``'approved'`` | ``'rejected'``.
+        ok: Whether the update succeeded.
+        message: Human-readable confirmation.
+        timestamp: ISO-8601 review timestamp.
+    """
+
+    signal_id: int
+    status: str
+    ok: bool
+    message: str
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class SignalRejectRequest(BaseModel):
+    """Request body for POST /v1/strategy/signals/{id}/reject.
+
+    Attributes:
+        reviewer_note: Optional human-readable reason for rejection.
+    """
+
+    reviewer_note: Optional[str] = Field(None, description="Optional rejection reason")
+
+
+class SignalModifyRequest(BaseModel):
+    """Request body for PATCH /v1/strategy/signals/{id}/modify.
+
+    Attributes:
+        qty_override: Replacement quantity to pass to the order layer.
+        reviewer_note: Optional human note.
+    """
+
+    qty_override: int = Field(..., ge=1, description="Replacement share quantity (≥ 1)")
+    reviewer_note: Optional[str] = Field(None, description="Optional reviewer comment")
+
+
+class SignalModifyResponse(BaseModel):
+    """Response for PATCH /v1/strategy/signals/{id}/modify.
+
+    Attributes:
+        signal_id: Primary key that was modified.
+        new_qty: The qty_override that was stored.
+        ok: Whether the update succeeded.
+        message: Human-readable confirmation.
+        timestamp: ISO-8601 review timestamp.
+    """
+
+    signal_id: int
+    new_qty: int
+    ok: bool
+    message: str
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Backtest  (BacktestDAO)
 # ---------------------------------------------------------------------------
 
@@ -686,6 +765,133 @@ class BacktestPerformanceResponse(BaseModel):
     run_id: str
     performance: List[Any] = Field(default_factory=list)
     count: int
+
+
+# ---------------------------------------------------------------------------
+# Order execution
+# ---------------------------------------------------------------------------
+
+
+class OrderResponse(BaseModel):
+    """Response for a single order submission.
+
+    Attributes:
+        status: "success" | "error".
+        order: Order details dict from Alpaca (id, symbol, qty, side, type, etc.).
+        error: Error message on failure.
+        timestamp: ISO-8601 response timestamp.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    order: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class ScalePositionResponse(BaseModel):
+    """Response for POST /v1/orders/scale.
+
+    Attributes:
+        status: "success" | "error".
+        action: "buy" | "sell" | "hold" | "close".
+        symbol: Stock ticker.
+        current_qty: Shares held before scale.
+        target_qty: Desired shares after scale.
+        delta_qty: Shares to trade (signed).
+        current_pct: Current allocation fraction.
+        target_pct: Requested target fraction.
+        order: Order details (None when action is "hold").
+        error: Error message on failure.
+        timestamp: ISO-8601.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    action: Optional[str] = None
+    symbol: Optional[str] = None
+    current_qty: Optional[int] = None
+    target_qty: Optional[int] = None
+    delta_qty: Optional[int] = None
+    current_pct: Optional[float] = None
+    target_pct: Optional[float] = None
+    order: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class StrategySignalExecutionResponse(BaseModel):
+    """Response for POST /v1/orders/signal.
+
+    Attributes:
+        status: "success" | "error".
+        action: "buy" | "sell" | "hold".
+        symbol: Stock ticker.
+        signal: Original signal value.
+        confidence: Conviction used.
+        target_pct: Allocation target applied.
+        order: Order placed (None for hold).
+        error: Error message on failure.
+        timestamp: ISO-8601.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str
+    action: Optional[str] = None
+    symbol: Optional[str] = None
+    signal: Optional[str] = None
+    confidence: Optional[float] = None
+    target_pct: Optional[float] = None
+    order: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class OrderCancelResponse(BaseModel):
+    """Response for DELETE /v1/orders/{order_id}.
+
+    Attributes:
+        status: "success" | "error".
+        order_id: Cancelled order UUID.
+        message: Human-readable confirmation.
+        error: Error message on failure.
+        timestamp: ISO-8601.
+    """
+
+    status: str
+    order_id: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class OpenOrdersResponse(BaseModel):
+    """Response for GET /v1/orders.
+
+    Attributes:
+        status: "success" | "error".
+        orders: List of open-order dicts.
+        count: Total orders returned.
+        timestamp: ISO-8601.
+    """
+
+    status: str
+    orders: List[Dict[str, Any]] = Field(default_factory=list)
+    count: int = 0
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
 
 # ---------------------------------------------------------------------------

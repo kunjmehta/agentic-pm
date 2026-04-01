@@ -23,7 +23,7 @@ from src.common.skills import alpha_vantage_skills
 class TestAlphaVantageSkills:
     """Test suite for Alpha Vantage API functions."""
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_company_overview_success(self, mock_request):
         """Test successful company overview fetch."""
         # Mock API response
@@ -47,7 +47,7 @@ class TestAlphaVantageSkills:
         assert result["Sector"] == "Technology"
         mock_request.assert_called_once()
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_company_overview_error(self, mock_request):
         """Test error handling in company overview fetch."""
         mock_request.side_effect = Exception("API Error")
@@ -55,7 +55,7 @@ class TestAlphaVantageSkills:
         with pytest.raises(Exception, match="Failed to fetch company overview"):
             alpha_vantage_skills.fetch_company_overview("AAPL")
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_dividend_history_success(self, mock_request):
         """Test successful dividend fetch."""
         # Mock API response
@@ -93,7 +93,7 @@ class TestAlphaVantageSkills:
         assert result.iloc[0]["amount"] == 0.24
         assert result.iloc[0]["symbol"] == "AAPL"
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_dividend_history_empty(self, mock_request):
         """Test dividend fetch with no dividends."""
         mock_request.return_value = {"data": []}
@@ -103,7 +103,7 @@ class TestAlphaVantageSkills:
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 0
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_earnings_history_success(self, mock_request):
         """Test successful earnings fetch."""
         # Mock API response
@@ -132,7 +132,7 @@ class TestAlphaVantageSkills:
         assert len(result) == 2
         assert "reportedEPS" in result.columns
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_income_statement_annual(self, mock_request):
         """Test annual income statement fetch."""
         # Mock API response
@@ -166,7 +166,7 @@ class TestAlphaVantageSkills:
         assert result.iloc[0]["symbol"] == "AAPL"
         assert result.iloc[0]["total_revenue"] == 383000000000
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_income_statement_quarterly(self, mock_request):
         """Test quarterly income statement fetch."""
         # Mock API response
@@ -187,7 +187,7 @@ class TestAlphaVantageSkills:
         assert isinstance(result, pd.DataFrame)
         assert len(result) == 1
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_balance_sheet(self, mock_request):
         """Test balance sheet fetch."""
         # Mock API response
@@ -217,7 +217,7 @@ class TestAlphaVantageSkills:
         assert result.iloc[0]["symbol"] == "AAPL"
         assert result.iloc[0]["total_assets"] == 350000000000
 
-    @patch("src.common.skills.alpha_vantage_skills._make_request")
+    @patch("src.common.external.alpha_vantage._make_request")
     def test_fetch_cash_flow(self, mock_request):
         """Test cash flow fetch."""
         # Mock API response
@@ -247,12 +247,12 @@ class TestAlphaVantageSkills:
         assert result.iloc[0]["symbol"] == "AAPL"
         assert result.iloc[0]["operating_cashflow"] == 110000000000
 
-    @patch("src.common.skills.alpha_vantage_skills.fetch_company_overview")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_dividend_history")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_earnings_history")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_income_statement")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_balance_sheet")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_cash_flow")
+    @patch("src.common.external.alpha_vantage.fetch_company_overview")
+    @patch("src.common.external.alpha_vantage.fetch_dividend_history")
+    @patch("src.common.external.alpha_vantage.fetch_earnings_history")
+    @patch("src.common.external.alpha_vantage.fetch_income_statement")
+    @patch("src.common.external.alpha_vantage.fetch_balance_sheet")
+    @patch("src.common.external.alpha_vantage.fetch_cash_flow")
     def test_fetch_all_success(
         self,
         mock_cash_flow,
@@ -300,12 +300,12 @@ class TestAlphaVantageSkills:
         assert result["cash_flow"] is not None
         assert len(result["errors"]) == 0
 
-    @patch("src.common.skills.alpha_vantage_skills.fetch_company_overview")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_dividend_history")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_earnings_history")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_income_statement")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_balance_sheet")
-    @patch("src.common.skills.alpha_vantage_skills.fetch_cash_flow")
+    @patch("src.common.external.alpha_vantage.fetch_company_overview")
+    @patch("src.common.external.alpha_vantage.fetch_dividend_history")
+    @patch("src.common.external.alpha_vantage.fetch_earnings_history")
+    @patch("src.common.external.alpha_vantage.fetch_income_statement")
+    @patch("src.common.external.alpha_vantage.fetch_balance_sheet")
+    @patch("src.common.external.alpha_vantage.fetch_cash_flow")
     def test_fetch_all_with_errors(
         self,
         mock_cash_flow,
@@ -351,7 +351,7 @@ class TestAlphaVantageSkills:
 class TestMakeRequest:
     """Test the internal _make_request function."""
 
-    @patch("src.common.skills.alpha_vantage_skills.requests.get")
+    @patch("src.common.external.alpha_vantage.requests.get")
     def test_make_request_success(self, mock_get):
         """Test successful API request."""
         # Mock response
@@ -367,7 +367,7 @@ class TestMakeRequest:
         assert result["Symbol"] == "AAPL"
         mock_get.assert_called_once()
 
-    @patch("src.common.skills.alpha_vantage_skills.requests.get")
+    @patch("src.common.external.alpha_vantage.requests.get")
     def test_make_request_api_error(self, mock_get):
         """Test API returns error message."""
         # Mock error response
@@ -380,7 +380,7 @@ class TestMakeRequest:
         with pytest.raises(Exception, match="API Error: Invalid API call"):
             alpha_vantage_skills._make_request({"function": "OVERVIEW", "symbol": "INVALID"})
 
-    @patch("src.common.skills.alpha_vantage_skills.requests.get")
+    @patch("src.common.external.alpha_vantage.requests.get")
     def test_make_request_rate_limit(self, mock_get):
         """Test API rate limit response."""
         # Mock rate limit response
@@ -395,7 +395,7 @@ class TestMakeRequest:
         with pytest.raises(Exception, match="API Rate Limit"):
             alpha_vantage_skills._make_request({"function": "OVERVIEW", "symbol": "AAPL"})
 
-    @patch("src.common.skills.alpha_vantage_skills.requests.get")
+    @patch("src.common.external.alpha_vantage.requests.get")
     def test_make_request_rate_limit_information(self, mock_get):
         """Test API rate limit response with Information key."""
         # Mock rate limit response with Information key

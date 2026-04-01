@@ -15,8 +15,12 @@ from datetime import datetime
 from typing import Optional, List, Dict
 import pandas as pd
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetOrdersRequest
-from alpaca.trading.enums import OrderSide, QueryOrderStatus
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    MarketOrderRequest,
+    LimitOrderRequest,
+)
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from src.common.utils import secrets, get_logger
 
 # Initialize logger
@@ -29,6 +33,38 @@ SECRET_KEY = secrets.get("alpaca.secret_key")
 # Initialize trading client
 trading_client = TradingClient(API_KEY, SECRET_KEY)
 logger.info("Alpaca trading client initialized")
+
+
+# =============================================================================
+# Pre-flight guards
+# =============================================================================
+
+
+class InsufficientFundsError(Exception):
+    """Raised when an order is rejected due to insufficient buying power."""
+
+
+def _assert_trading_allowed() -> None:
+    """Raise RuntimeError if the account is blocked from trading.
+
+    Call this before every order submission to surface account-level
+    restrictions before hitting the broker API.
+
+    Raises:
+        RuntimeError: If ``account.trading_blocked`` is True.
+    """
+    try:
+        account = trading_client.get_account()
+        if account.trading_blocked:
+            raise RuntimeError(
+                "Alpaca account trading is currently blocked — orders cannot be submitted. "
+                "Check account status at alpaca.markets."
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        # If we cannot reach the API, surface the error rather than silently continuing.
+        raise RuntimeError(f"Could not verify account trading status: {exc}") from exc
 
 
 # =============================================================================
@@ -291,6 +327,277 @@ def fetch_orders(
 
     except Exception as e:
         error_msg = f"Failed to fetch orders: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_market_order(symbol: str, qty: float, side: str) -> Dict:
+    """Place a market order via Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+
+    Returns:
+        Dict with order details:
+        - id: Order UUID
+        - symbol: Ticker
+        - qty: Requested quantity
+        - side: "buy" | "sell"
+        - type: "market"
+        - status: Order status from Alpaca
+        - submitted_at: ISO-8601 submission timestamp
+        - client_order_id: Client-side UUID
+
+    Raises:
+        ValueError: If qty <= 0 or side is invalid.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    logger.info(f"[place_market_order] {side.upper()} {qty} {symbol}")
+
+    _assert_trading_allowed()
+
+    try:
+        request = MarketOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_market_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for {side} {qty} {symbol}: {err_str}"
+            ) from e
+        error_msg = f"Failed to place market order ({side} {qty} {symbol}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_limit_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    limit_price: float,
+    time_in_force: str = "day",
+) -> Dict:
+    """Place a limit order via Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+        limit_price: Maximum (buy) or minimum (sell) execution price.
+        time_in_force: "day" | "gtc" | "ioc" | "fok". Default "day".
+
+    Returns:
+        Dict with order details (same shape as place_market_order).
+
+    Raises:
+        ValueError: If qty <= 0 or limit_price <= 0.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    if limit_price <= 0:
+        raise ValueError(f"limit_price must be > 0, got {limit_price}")
+
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    tif_map = {
+        "day": TimeInForce.DAY,
+        "gtc": TimeInForce.GTC,
+        "ioc": TimeInForce.IOC,
+        "fok": TimeInForce.FOK,
+    }
+    tif_enum = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+    logger.info(f"[place_limit_order] {side.upper()} {qty} {symbol} @ ${limit_price:.2f}")
+
+    _assert_trading_allowed()
+
+    try:
+        request = LimitOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            limit_price=limit_price,
+            time_in_force=tif_enum,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "limit_price": float(order.limit_price) if order.limit_price else limit_price,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_limit_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for {side} {qty} {symbol} @ {limit_price}: {err_str}"
+            ) from e
+        error_msg = f"Failed to place limit order ({side} {qty} {symbol} @ {limit_price}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def cancel_order(order_id: str) -> Dict:
+    """Cancel an open order by its UUID.
+
+    Reference: https://docs.alpaca.markets/reference/deleteorderbyorderid-1
+
+    Args:
+        order_id: Alpaca order UUID string.
+
+    Returns:
+        Dict with {"order_id": str, "status": "cancelled", "timestamp": str}.
+
+    Raises:
+        Exception: If the order does not exist or cannot be cancelled.
+    """
+    logger.info(f"[cancel_order] order_id={order_id}")
+    try:
+        trading_client.cancel_order_by_id(order_id)
+        result = {
+            "order_id": order_id,
+            "status": "cancelled",
+            "timestamp": datetime.now().isoformat(),
+        }
+        logger.info(f"[cancel_order] order {order_id} cancelled")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to cancel order {order_id}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def cancel_all_orders() -> Dict:
+    """Cancel all open orders.
+
+    Reference: https://docs.alpaca.markets/reference/deleteallorders-1
+
+    Returns:
+        Dict with {"cancelled_count": int, "status": "all_cancelled", "timestamp": str}.
+
+    Raises:
+        Exception: If Alpaca API request fails.
+    """
+    logger.info("[cancel_all_orders] cancelling all open orders")
+    try:
+        cancel_statuses = trading_client.cancel_orders()
+        count = len(cancel_statuses) if cancel_statuses else 0
+        result = {
+            "cancelled_count": count,
+            "status": "all_cancelled",
+            "timestamp": datetime.now().isoformat(),
+        }
+        logger.info(f"[cancel_all_orders] cancelled {count} orders")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to cancel all orders: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def close_position(symbol: str) -> Dict:
+    """Liquidate an open position for a symbol at market price.
+
+    Reference: https://docs.alpaca.markets/reference/deleteaccessopenposition-1
+
+    Args:
+        symbol: Stock ticker whose position to close.
+
+    Returns:
+        Dict with order details of the closing market order.
+
+    Raises:
+        Exception: If the position does not exist or cannot be closed.
+    """
+    logger.info(f"[close_position] closing position for {symbol}")
+    try:
+        order = trading_client.close_position(symbol.upper())
+        result = {
+            "id": str(order.id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else None,
+            "side": order.side.value,
+            "type": order.type.value,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+        }
+        logger.info(f"[close_position] close order {result['id']} submitted for {symbol}")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to close position for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def close_all_positions(cancel_orders_first: bool = True) -> Dict:
+    """Liquidate all open positions at market price.
+
+    Reference: https://docs.alpaca.markets/reference/deleteallopenpositions-1
+
+    Args:
+        cancel_orders_first: Cancel open orders before closing positions.
+            Default True to avoid partial-fill conflicts.
+
+    Returns:
+        Dict with {"closed_count": int, "status": "all_closed", "timestamp": str}.
+
+    Raises:
+        Exception: If Alpaca API request fails.
+    """
+    logger.info(f"[close_all_positions] cancel_orders_first={cancel_orders_first}")
+    try:
+        close_responses = trading_client.close_all_positions(
+            cancel_orders=cancel_orders_first
+        )
+        count = len(close_responses) if close_responses else 0
+        result = {
+            "closed_count": count,
+            "status": "all_closed",
+            "cancel_orders_first": cancel_orders_first,
+            "timestamp": datetime.now().isoformat(),
+        }
+        logger.info(f"[close_all_positions] submitted close orders for {count} positions")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to close all positions: {str(e)}"
         logger.error(error_msg, exc_info=True)
         raise Exception(error_msg)
 

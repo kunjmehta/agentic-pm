@@ -23,10 +23,10 @@ class TestPagination:
     # fetch_historical_bars Pagination Tests
     # ========================================================================
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
+    @patch('src.common.external.alpaca.historical_client')
     def test_fetch_bars_single_chunk(self, mock_client):
         """Test fetching bars within one chunk (no pagination needed)."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         # Mock response
         mock_bars = Mock()
@@ -58,11 +58,11 @@ class TestPagination:
         # Should call API once
         assert mock_client.get_stock_bars.call_count == 1
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
     def test_fetch_bars_multiple_chunks(self, mock_dao_class, mock_client):
         """Test fetching bars across multiple chunks."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         # Mock DAO
         mock_dao = Mock()
@@ -98,11 +98,11 @@ class TestPagination:
         # Should call API multiple times (3 chunks)
         assert mock_client.get_stock_bars.call_count == 3
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
     def test_fetch_bars_batch_insert(self, mock_dao_class, mock_client):
         """Test that large datasets are inserted in batches."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         # Mock DAO
         mock_dao = Mock()
@@ -138,11 +138,11 @@ class TestPagination:
     # fetch_historical_trades Pagination Tests
     # ========================================================================
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
     def test_fetch_trades_single_page(self, mock_dao_class, mock_client):
         """Test fetching trades within one page (no pagination)."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Mock DAO
         mock_dao = Mock()
@@ -174,12 +174,12 @@ class TestPagination:
         # Should call API once (got less than limit)
         assert mock_client.get_stock_trades.call_count == 1
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
-    @patch('src.common.skills.alpaca_skills.time.sleep')  # Mock sleep to speed up test
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
+    @patch('src.common.external.alpaca.time.sleep')  # Mock sleep to speed up test
     def test_fetch_trades_multiple_pages(self, mock_sleep, mock_dao_class, mock_client):
         """Test fetching trades across multiple pages."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Mock DAO
         mock_dao = Mock()
@@ -223,11 +223,11 @@ class TestPagination:
         # Should have combined all pages
         assert len(result) == 25000  # 10000 + 10000 + 5000
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
     def test_fetch_trades_max_total_limit(self, mock_dao_class, mock_client):
         """Test that max_total parameter limits total trades fetched."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Mock DAO
         mock_dao = Mock()
@@ -257,12 +257,12 @@ class TestPagination:
         # Should be trimmed to max_total
         assert len(result) == 12000
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
-    @patch('src.common.skills.alpaca_skills.time.sleep')
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
+    @patch('src.common.external.alpaca.time.sleep')
     def test_fetch_trades_rate_limiting(self, mock_sleep, mock_dao_class, mock_client):
         """Test that rate limiting (sleep) is applied between pages."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Mock DAO
         mock_dao = Mock()
@@ -306,11 +306,11 @@ class TestPagination:
     # Edge Cases
     # ========================================================================
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
-    @patch('src.common.skills.alpaca_skills.AlpacaDAO')
+    @patch('src.common.external.alpaca.historical_client')
+    @patch('src.common.external.alpaca.AlpacaDAO')
     def test_fetch_bars_empty_response(self, mock_dao_class, mock_client):
         """Test handling of empty API response."""
-        from src.common.skills.alpaca_skills import fetch_historical_bars
+        from src.common.external.alpaca import fetch_historical_bars
 
         # Mock DAO
         mock_dao = Mock()
@@ -331,10 +331,10 @@ class TestPagination:
         # Should return empty DataFrame
         assert result.empty
 
-    @patch('src.common.skills.alpaca_skills.historical_client')
+    @patch('src.common.external.alpaca.historical_client')
     def test_fetch_trades_empty_response(self, mock_client):
         """Test handling of empty trades response."""
-        from src.common.skills.alpaca_skills import fetch_historical_trades
+        from src.common.external.alpaca import fetch_historical_trades
 
         # Mock empty response
         mock_trades = Mock()

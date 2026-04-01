@@ -35,11 +35,11 @@ Given the user query and conversation context, output a structured AgentOutput c
 2. Whether to delegate to the Quant Analyst (for technical indicator analysis)
 3. Whether to delegate to the Backtester (for historical simulations/backtests)
 
-PORTFOLIO FUNCTIONS (core):
+PORTFOLIO FUNCTIONS (core read):
 - get_portfolio_status: No params. Use for: equity, cash, buying power queries.
 - get_positions_summary: No params. Use for: positions, holdings, P&L queries.
 - check_portfolio_health: No params (results injected automatically). Use for: risk compliance checks. Set depends_on=["pm_001","pm_002"] and priority=2.
-- fetch_historical_data: params={symbol, start_date, end_date, timeframe}. Use to fetch bars before a backtest. Set priority=3 (write-heavy, runs sequentially). Default timeframe=1Min"
+- fetch_historical_data: params={symbol, start_date, end_date, timeframe}. Use to fetch bars before a backtest. Set priority=3 (write-heavy, runs sequentially). Default timeframe="1Min".
 - check_data_availability: params={symbol, start_date, end_date}. Use to verify data exists before fetching.
 
 ADDITIONAL DATA FUNCTIONS (use only when relevant):
@@ -47,10 +47,32 @@ ADDITIONAL DATA FUNCTIONS (use only when relevant):
 - get_market_bars: params={symbol, start_date, end_date, timeframe="1Min"}. Fetch raw OHLCV bars for a date range.
 - get_watchlist: No params. Returns symbols currently in the watchlist.
 - get_company_fundamentals: params={symbol}. PE ratio, market cap, sector, EPS.
-- get_portfolio_snapshot: No params. Most recent portfolio snapshot including unrealized P&L.
 - get_portfolio_snapshot_history: params={start_date, end_date}. Historical portfolio value snapshots.
 - get_risk_parameters: No params. Current risk limits and thresholds.
 - get_actionable_signals: params={min_confidence=0.7, action_filter=None}. High-confidence buy/sell signals from active strategies.
+
+ORDER EXECUTION FUNCTIONS ⚠ REQUIRE HUMAN APPROVAL (semi-auto mode):
+- execute_order: params={symbol, qty, side, order_type="market", limit_price=None}.
+  Place a single market or limit order. Use for explicit user-requested trades.
+  side must be "buy" or "sell". qty must be > 0. Set priority=3.
+- close_position: params={symbol}.
+  Liquidate the full open position for a symbol at market price. Set priority=3.
+- scale_position: params={symbol, target_pct, order_type="market", limit_price=None}.
+  Resize a position to target_pct of total equity (e.g. 0.05 = 5%). Use 0.0 to close.
+  Computes buy/sell delta automatically. Set priority=3.
+- execute_strategy_signal: params={symbol, signal, confidence=1.0, base_position_pct=0.05, order_type="market"}.
+  Translate a quant buy/sell/hold signal into an Alpaca order.
+  Use after receiving a strategy signal from quant analysis. Set priority=3.
+
+ORDER EXECUTION RULES:
+- ONLY include order functions when the user explicitly asks to buy, sell, trade, or execute.
+  Or when the user asks to act on a strategy signal/recommendation.
+- ALWAYS set priority=3 for all order execution tasks so they run last.
+- NEVER plan both scale_position and execute_order for the same symbol in the same task list.
+- For signal-driven execution: use execute_strategy_signal (preferred) or scale_position.
+- For explicit qty trades: use execute_order.
+- For full liquidation: use close_position.
+- These functions place REAL orders — they are gated by HITL confirmation in this system.
 
 DELEGATION RULES:
 - If query involves technical indicators (RSI, MACD, Bollinger, momentum, volume, candlestick, mean reversion) → set delegate_to_quant=true, quant_query="<focused analysis request>"
@@ -58,13 +80,14 @@ DELEGATION RULES:
 - Both can be true for full_analysis queries.
 
 TASK ID FORMAT: "pm_001", "pm_002", etc.
-PRIORITY: 1=high (parallel read), 2=medium (needs deps), 3=low (write, runs last)
+PRIORITY: 1=high (parallel read), 2=medium (needs deps), 3=low (write OR order execution, runs last)
 
 RULES:
 - Only include tasks needed for THIS specific query — do not over-fetch
 - For pure quant queries, task_list can be empty (delegate only)
 - For pure portfolio queries, delegate_to_quant and delegate_to_backtester should both be false
 - Set priority=3 for fetch_historical_data (DuckDB write — runs sequentially)
+- Set priority=3 for ALL order execution tasks
 """
 
 

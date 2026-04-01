@@ -1,17 +1,18 @@
-"""Skills for trading operations and market data.
+"""External API integrations for trading operations and market data.
 
 This package contains API integration functions for:
-- Alpaca: Historical and real-time market data
-- Alpha Vantage: Fundamental data and financial statements
+- Alpaca: Historical and real-time market data (alpaca.py)
+- Alpha Vantage: Fundamental data and financial statements (alpha_vantage.py)
+- Alpaca Portfolio: Account, positions, orders (alpaca_portfolio.py)
 """
 
-from .alpaca_skills import (
+from src.common.external.alpaca import (
     fetch_historical_bars,
     fetch_historical_trades,
     fetch_all as fetch_all_alpaca,
 )
 
-from .alpha_vantage_skills import (
+from src.common.external.alpha_vantage import (
     fetch_company_overview,
     fetch_dividend_history,
     fetch_earnings_history,
@@ -22,11 +23,11 @@ from .alpha_vantage_skills import (
 )
 
 __all__ = [
-    # Alpaca functions
+    # Alpaca market data
     "fetch_historical_bars",
     "fetch_historical_trades",
     "fetch_all_alpaca",
-    # Alpha Vantage functions
+    # Alpha Vantage fundamentals
     "fetch_company_overview",
     "fetch_dividend_history",
     "fetch_earnings_history",

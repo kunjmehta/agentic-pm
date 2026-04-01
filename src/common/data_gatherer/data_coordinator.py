@@ -18,8 +18,8 @@ import signal
 import time
 from typing import List
 from datetime import datetime, timedelta
-from src.common.skills.alpaca_skills import fetch_historical_bars, fetch_historical_trades
-from src.common.skills.alpha_vantage_skills import (
+from src.common.external.alpaca import fetch_historical_bars, fetch_historical_trades
+from src.common.external.alpha_vantage import (
     fetch_company_overview,
     fetch_dividend_history,
     fetch_earnings_history,

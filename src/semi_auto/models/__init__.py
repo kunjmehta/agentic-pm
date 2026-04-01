@@ -53,7 +53,7 @@ from src.semi_auto.models.responses import (
     SynthesisResult,
     TaskPreviewResponse,
 )
-from src.semi_auto.models.skills import (
+from src.semi_auto.models.strategies import (
     BacktestInput,
     BacktestMetrics,
     BacktestOutput,

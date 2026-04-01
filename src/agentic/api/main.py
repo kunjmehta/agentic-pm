@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     # 1. Sync watchlist from Alpaca to database
     logger.info("📋 Syncing watchlist from Alpaca...")
     try:
-        from src.common.skills.alpaca_portfolio_skills import get_all_watchlist_symbols
+        from src.common.external.alpaca_portfolio import get_all_watchlist_symbols
         from src.common.dao import AlpacaDAO
 
         # Fetch symbols from Alpaca watchlists

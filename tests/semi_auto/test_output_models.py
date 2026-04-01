@@ -22,20 +22,20 @@ import pytest
 
 class TestMACDOutput:
     def test_all_none_defaults(self):
-        from src.semi_auto.models.skills import MACDOutput
+        from src.semi_auto.models.strategies import MACDOutput
         m = MACDOutput()
         assert m.value is None
         assert m.signal is None
         assert m.histogram is None
 
     def test_with_values(self):
-        from src.semi_auto.models.skills import MACDOutput
+        from src.semi_auto.models.strategies import MACDOutput
         m = MACDOutput(value=0.5, signal=0.3, histogram=0.2)
         assert m.value == 0.5
         assert m.histogram == 0.2
 
     def test_extra_fields_allowed(self):
-        from src.semi_auto.models.skills import MACDOutput
+        from src.semi_auto.models.strategies import MACDOutput
         m = MACDOutput.model_validate({"value": 1.0, "extra_key": "ignored_but_kept"})
         assert m.value == 1.0
 
@@ -45,7 +45,7 @@ class TestMACDOutput:
 
 class TestMomentumOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import MomentumOutput
+        from src.semi_auto.models.strategies import MomentumOutput
         m = MomentumOutput.model_validate({})
         assert m.symbol == ""
         assert m.timeframe == "1Day"
@@ -55,13 +55,13 @@ class TestMomentumOutput:
 
     def test_error_dict_passes(self):
         """Error dicts (no symbol) must not raise ValidationError."""
-        from src.semi_auto.models.skills import MomentumOutput
+        from src.semi_auto.models.strategies import MomentumOutput
         m = MomentumOutput.model_validate({"error": "No data found"})
         assert m.error == "No data found"
         assert m.symbol == ""
 
     def test_full_round_trip(self):
-        from src.semi_auto.models.skills import MomentumOutput, MACDOutput
+        from src.semi_auto.models.strategies import MomentumOutput, MACDOutput
         raw = {
             "symbol": "AAPL",
             "macd": {"value": 0.5, "signal": 0.3, "histogram": 0.2},
@@ -77,7 +77,7 @@ class TestMomentumOutput:
         assert data["macd"]["value"] == 0.5
 
     def test_extra_fields_pass_through(self):
-        from src.semi_auto.models.skills import MomentumOutput
+        from src.semi_auto.models.strategies import MomentumOutput
         m = MomentumOutput.model_validate({"symbol": "TSLA", "trend": "bullish"})
         data = m.model_dump()
         assert data.get("trend") == "bullish"
@@ -88,19 +88,19 @@ class TestMomentumOutput:
 
 class TestVolatilityOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import VolatilityOutput
+        from src.semi_auto.models.strategies import VolatilityOutput
         v = VolatilityOutput.model_validate({})
         assert v.symbol == ""
         assert v.upper is None
         assert v.bandwidth is None
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import VolatilityOutput
+        from src.semi_auto.models.strategies import VolatilityOutput
         v = VolatilityOutput.model_validate({"error": "DB down"})
         assert v.error == "DB down"
 
     def test_full_values(self):
-        from src.semi_auto.models.skills import VolatilityOutput
+        from src.semi_auto.models.strategies import VolatilityOutput
         v = VolatilityOutput(symbol="MSFT", upper=155.0, middle=150.0, lower=145.0, bandwidth=6.7)
         assert v.upper == 155.0
         assert v.bandwidth == 6.7
@@ -111,19 +111,19 @@ class TestVolatilityOutput:
 
 class TestVolumeOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import VolumeOutput
+        from src.semi_auto.models.strategies import VolumeOutput
         v = VolumeOutput.model_validate({})
         assert v.symbol == ""
         assert v.obv is None
         assert v.volume_trend is None
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import VolumeOutput
+        from src.semi_auto.models.strategies import VolumeOutput
         v = VolumeOutput.model_validate({"error": "No bars"})
         assert v.error == "No bars"
 
     def test_full_values(self):
-        from src.semi_auto.models.skills import VolumeOutput
+        from src.semi_auto.models.strategies import VolumeOutput
         v = VolumeOutput(
             symbol="NVDA",
             obv=1500000.0,
@@ -140,19 +140,19 @@ class TestVolumeOutput:
 
 class TestCandleOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import CandleOutput
+        from src.semi_auto.models.strategies import CandleOutput
         c = CandleOutput.model_validate({})
         assert c.symbol == ""
         assert c.patterns == []
         assert c.pattern_count == 0
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import CandleOutput
+        from src.semi_auto.models.strategies import CandleOutput
         c = CandleOutput.model_validate({"error": "empty bars"})
         assert c.error == "empty bars"
 
     def test_with_patterns(self):
-        from src.semi_auto.models.skills import CandleOutput
+        from src.semi_auto.models.strategies import CandleOutput
         c = CandleOutput(
             symbol="AAPL",
             patterns=["hammer", "doji"],
@@ -169,20 +169,20 @@ class TestCandleOutput:
 
 class TestBacktestMetrics:
     def test_all_fields_optional(self):
-        from src.semi_auto.models.skills import BacktestMetrics
+        from src.semi_auto.models.strategies import BacktestMetrics
         m = BacktestMetrics()
         assert m.total_return_pct is None
         assert m.sharpe_ratio is None
         assert m.total_trades is None
 
     def test_partial_metrics(self):
-        from src.semi_auto.models.skills import BacktestMetrics
+        from src.semi_auto.models.strategies import BacktestMetrics
         m = BacktestMetrics(total_return_pct=12.5, sharpe_ratio=1.3, win_rate=0.62)
         assert m.total_return_pct == 12.5
         assert m.win_rate == pytest.approx(0.62)
 
     def test_extra_fields_allowed(self):
-        from src.semi_auto.models.skills import BacktestMetrics
+        from src.semi_auto.models.strategies import BacktestMetrics
         m = BacktestMetrics.model_validate({"total_return_pct": 5.0, "custom_metric": 99})
         assert m.total_return_pct == 5.0
 
@@ -192,7 +192,7 @@ class TestBacktestMetrics:
 
 class TestBacktestOutput:
     def test_required_fields(self):
-        from src.semi_auto.models.skills import BacktestOutput
+        from src.semi_auto.models.strategies import BacktestOutput
         b = BacktestOutput(
             strategy="mean-reversion",
             ticker="AAPL",
@@ -203,13 +203,13 @@ class TestBacktestOutput:
         assert b.error is None
 
     def test_missing_required_field_raises(self):
-        from src.semi_auto.models.skills import BacktestOutput
+        from src.semi_auto.models.strategies import BacktestOutput
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             BacktestOutput(ticker="AAPL", start_date="2025-01-01", end_date="2025-12-31")
 
     def test_with_nested_metrics(self):
-        from src.semi_auto.models.skills import BacktestOutput, BacktestMetrics
+        from src.semi_auto.models.strategies import BacktestOutput, BacktestMetrics
         b = BacktestOutput(
             strategy="momentum",
             ticker="TSLA",
@@ -220,7 +220,7 @@ class TestBacktestOutput:
         assert b.metrics.total_return_pct == 8.2
 
     def test_error_status(self):
-        from src.semi_auto.models.skills import BacktestOutput
+        from src.semi_auto.models.strategies import BacktestOutput
         b = BacktestOutput(
             status="error",
             strategy="buy-and-hold",
@@ -233,7 +233,7 @@ class TestBacktestOutput:
         assert "Insufficient" in b.error
 
     def test_round_trip_model_dump(self):
-        from src.semi_auto.models.skills import BacktestOutput
+        from src.semi_auto.models.strategies import BacktestOutput
         b = BacktestOutput(
             strategy="mean-reversion",
             ticker="SPY",
@@ -252,38 +252,38 @@ class TestBacktestOutput:
 
 class TestMeanReversionSubModels:
     def test_statistics_defaults(self):
-        from src.semi_auto.models.skills import MeanReversionStatistics
+        from src.semi_auto.models.strategies import MeanReversionStatistics
         s = MeanReversionStatistics()
         assert s.mean is None
         assert s.z_score is None
 
     def test_moving_averages_defaults(self):
-        from src.semi_auto.models.skills import MeanReversionMovingAverages
+        from src.semi_auto.models.strategies import MeanReversionMovingAverages
         ma = MeanReversionMovingAverages()
         assert ma.sma_20 is None
         assert ma.ema_20 is None
 
     def test_signals_defaults(self):
-        from src.semi_auto.models.skills import MeanReversionSignals
+        from src.semi_auto.models.strategies import MeanReversionSignals
         sig = MeanReversionSignals()
         assert sig.current_state == "unknown"
         assert sig.overall_signal == "hold"
 
     def test_levels_defaults(self):
-        from src.semi_auto.models.skills import MeanReversionLevels
+        from src.semi_auto.models.strategies import MeanReversionLevels
         lv = MeanReversionLevels()
         assert lv.resistance is None
         assert lv.support is None
 
     def test_recommendation_defaults(self):
-        from src.semi_auto.models.skills import MeanReversionRecommendation
+        from src.semi_auto.models.strategies import MeanReversionRecommendation
         r = MeanReversionRecommendation()
         assert r.action == "hold"
         assert r.confidence == 0.0
         assert r.reason == ""
 
     def test_recommendation_buy_signal(self):
-        from src.semi_auto.models.skills import MeanReversionRecommendation
+        from src.semi_auto.models.strategies import MeanReversionRecommendation
         r = MeanReversionRecommendation(
             action="buy", confidence=0.85, reason="Oversold below -2 z-score",
             entry_price=148.5, stop_loss=144.0, take_profit=158.0,
@@ -295,19 +295,19 @@ class TestMeanReversionSubModels:
 
 class TestMeanReversionOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import MeanReversionOutput
+        from src.semi_auto.models.strategies import MeanReversionOutput
         m = MeanReversionOutput.model_validate({})
         assert m.symbol == ""
         assert m.current_price is None
         assert m.statistics is None
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import MeanReversionOutput
+        from src.semi_auto.models.strategies import MeanReversionOutput
         m = MeanReversionOutput.model_validate({"error": "No price data"})
         assert m.error == "No price data"
 
     def test_full_nested_output(self):
-        from src.semi_auto.models.skills import (
+        from src.semi_auto.models.strategies import (
             MeanReversionOutput, MeanReversionStatistics,
             MeanReversionSignals, MeanReversionRecommendation,
         )
@@ -325,7 +325,7 @@ class TestMeanReversionOutput:
         assert m.trade_recommendation.confidence == pytest.approx(0.75)
 
     def test_round_trip_model_dump(self):
-        from src.semi_auto.models.skills import MeanReversionOutput
+        from src.semi_auto.models.strategies import MeanReversionOutput
         m = MeanReversionOutput(symbol="NVDA", current_price=850.0, timeframe="1Hour")
         data = m.model_dump()
         assert data["symbol"] == "NVDA"
@@ -337,20 +337,20 @@ class TestMeanReversionOutput:
 
 class TestPortfolioStatusOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         p = PortfolioStatusOutput.model_validate({})
         assert p.equity == 0.0
         assert p.cash == 0.0
         assert p.long_positions == 0
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         p = PortfolioStatusOutput.model_validate({"error": "Alpaca timeout"})
         assert p.error == "Alpaca timeout"
         assert p.equity == 0.0  # default
 
     def test_full_values(self):
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         p = PortfolioStatusOutput(
             equity=150000.0,
             cash=30000.0,
@@ -365,7 +365,7 @@ class TestPortfolioStatusOutput:
         assert p.long_positions == 8
 
     def test_round_trip(self):
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         p = PortfolioStatusOutput(equity=100000.0, cash=25000.0)
         data = p.model_dump()
         assert data["equity"] == 100000.0
@@ -377,19 +377,19 @@ class TestPortfolioStatusOutput:
 
 class TestPositionsSummaryOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import PositionsSummaryOutput
+        from src.semi_auto.models.strategies import PositionsSummaryOutput
         p = PositionsSummaryOutput.model_validate({})
         assert p.positions == []
         assert p.count == 0
         assert p.total_market_value == 0.0
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import PositionsSummaryOutput
+        from src.semi_auto.models.strategies import PositionsSummaryOutput
         p = PositionsSummaryOutput.model_validate({"error": "No positions"})
         assert p.error == "No positions"
 
     def test_with_positions(self):
-        from src.semi_auto.models.skills import PositionsSummaryOutput
+        from src.semi_auto.models.strategies import PositionsSummaryOutput
         p = PositionsSummaryOutput(
             positions=[{"symbol": "AAPL", "qty": 10}, {"symbol": "MSFT", "qty": 5}],
             count=2,
@@ -405,25 +405,25 @@ class TestPositionsSummaryOutput:
 
 class TestHealthModels:
     def test_health_violation_defaults(self):
-        from src.semi_auto.models.skills import HealthViolation
+        from src.semi_auto.models.strategies import HealthViolation
         hv = HealthViolation()
         assert hv.rule == ""
         assert hv.symbol is None
         assert hv.message == ""
 
     def test_health_violation_populated(self):
-        from src.semi_auto.models.skills import HealthViolation
+        from src.semi_auto.models.strategies import HealthViolation
         hv = HealthViolation(rule="max_position_size", symbol="AAPL", current=0.25, limit=0.20, message="Over limit")
         assert hv.current == pytest.approx(0.25)
 
     def test_health_risk_params_defaults(self):
-        from src.semi_auto.models.skills import HealthRiskParams
+        from src.semi_auto.models.strategies import HealthRiskParams
         rp = HealthRiskParams()
         assert rp.position_limit_percent is None
         assert rp.daily_loss_limit is None
 
     def test_health_check_output_defaults_from_empty(self):
-        from src.semi_auto.models.skills import HealthCheckOutput
+        from src.semi_auto.models.strategies import HealthCheckOutput
         h = HealthCheckOutput.model_validate({})
         assert h.health_status == "healthy"
         assert h.violations == []
@@ -431,13 +431,13 @@ class TestHealthModels:
         assert h.checks_performed == []
 
     def test_health_check_output_error_dict(self):
-        from src.semi_auto.models.skills import HealthCheckOutput
+        from src.semi_auto.models.strategies import HealthCheckOutput
         h = HealthCheckOutput.model_validate({"error": "DB error"})
         assert h.error == "DB error"
         assert h.health_status == "healthy"  # default preserved
 
     def test_health_check_output_with_violations(self):
-        from src.semi_auto.models.skills import HealthCheckOutput, HealthViolation
+        from src.semi_auto.models.strategies import HealthCheckOutput, HealthViolation
         h = HealthCheckOutput(
             health_status="unhealthy",
             violations=[HealthViolation(rule="daily_loss", message="Exceeded daily loss limit")],
@@ -449,7 +449,7 @@ class TestHealthModels:
         assert len(h.checks_performed) == 2
 
     def test_health_check_output_round_trip(self):
-        from src.semi_auto.models.skills import HealthCheckOutput
+        from src.semi_auto.models.strategies import HealthCheckOutput
         h = HealthCheckOutput(health_status="warning", checks_performed=["pos_check"])
         data = h.model_dump()
         assert data["health_status"] == "warning"
@@ -461,20 +461,20 @@ class TestHealthModels:
 
 class TestFetchHistoricalDataOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import FetchHistoricalDataOutput
+        from src.semi_auto.models.strategies import FetchHistoricalDataOutput
         f = FetchHistoricalDataOutput.model_validate({})
         assert f.status == "success"
         assert f.bars_fetched is None
         assert f.data_source is None
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import FetchHistoricalDataOutput
+        from src.semi_auto.models.strategies import FetchHistoricalDataOutput
         f = FetchHistoricalDataOutput.model_validate({"error": "API unavailable"})
         assert f.error == "API unavailable"
         assert f.status == "success"  # default preserved
 
     def test_full_values(self):
-        from src.semi_auto.models.skills import FetchHistoricalDataOutput
+        from src.semi_auto.models.strategies import FetchHistoricalDataOutput
         f = FetchHistoricalDataOutput(
             status="success",
             bars_fetched=250,
@@ -492,25 +492,25 @@ class TestFetchHistoricalDataOutput:
 
 class TestDataAvailabilityOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import DataAvailabilityOutput
+        from src.semi_auto.models.strategies import DataAvailabilityOutput
         d = DataAvailabilityOutput.model_validate({})
         assert d.available is False
         assert d.bar_count == 0
         assert d.coverage_pct is None
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import DataAvailabilityOutput
+        from src.semi_auto.models.strategies import DataAvailabilityOutput
         d = DataAvailabilityOutput.model_validate({"error": "Query failed"})
         assert d.error == "Query failed"
 
     def test_partial_availability(self):
-        from src.semi_auto.models.skills import DataAvailabilityOutput
+        from src.semi_auto.models.strategies import DataAvailabilityOutput
         d = DataAvailabilityOutput(available="partial", bar_count=60, expected_bars=90, coverage_pct=66.7)
         assert d.available == "partial"
         assert d.coverage_pct == pytest.approx(66.7)
 
     def test_full_availability(self):
-        from src.semi_auto.models.skills import DataAvailabilityOutput
+        from src.semi_auto.models.strategies import DataAvailabilityOutput
         d = DataAvailabilityOutput(available=True, bar_count=365, expected_bars=365, coverage_pct=100.0)
         assert d.available is True
 
@@ -520,20 +520,20 @@ class TestDataAvailabilityOutput:
 
 class TestSnapshotSaveOutput:
     def test_defaults_from_empty_dict(self):
-        from src.semi_auto.models.skills import SnapshotSaveOutput
+        from src.semi_auto.models.strategies import SnapshotSaveOutput
         s = SnapshotSaveOutput.model_validate({})
         assert s.status == "success"
         assert s.snapshot_id is None
         assert s.positions_count is None
 
     def test_error_dict_passes(self):
-        from src.semi_auto.models.skills import SnapshotSaveOutput
+        from src.semi_auto.models.strategies import SnapshotSaveOutput
         s = SnapshotSaveOutput.model_validate({"status": "error", "error": "DB write failed"})
         assert s.status == "error"
         assert s.error == "DB write failed"
 
     def test_full_success(self):
-        from src.semi_auto.models.skills import SnapshotSaveOutput
+        from src.semi_auto.models.strategies import SnapshotSaveOutput
         s = SnapshotSaveOutput(
             status="success",
             message="Snapshot saved",
@@ -552,18 +552,18 @@ class TestSnapshotSaveOutput:
 
 class TestSimulationOutputFamily:
     def test_simulation_output_defaults(self):
-        from src.semi_auto.models.skills import SimulationOutput
+        from src.semi_auto.models.strategies import SimulationOutput
         s = SimulationOutput.model_validate({})
         assert s.initial_worth is None
         assert s.return_pct is None
 
     def test_simulation_output_error_dict(self):
-        from src.semi_auto.models.skills import SimulationOutput
+        from src.semi_auto.models.strategies import SimulationOutput
         s = SimulationOutput.model_validate({"error": "No snapshot"})
         assert s.error == "No snapshot"
 
     def test_simulation_output_full_values(self):
-        from src.semi_auto.models.skills import SimulationOutput
+        from src.semi_auto.models.strategies import SimulationOutput
         s = SimulationOutput(
             snapshot_date="2026-01-01",
             end_date="2026-03-31",
@@ -576,7 +576,7 @@ class TestSimulationOutputFamily:
         assert s.return_dollars == 12000.0
 
     def test_snapshot_worth_output_inherits_simulation(self):
-        from src.semi_auto.models.skills import SnapshotWorthOutput
+        from src.semi_auto.models.strategies import SnapshotWorthOutput
         s = SnapshotWorthOutput(
             snapshot_date="2026-01-01",
             end_date="2026-03-31",
@@ -590,12 +590,12 @@ class TestSimulationOutputFamily:
         assert "initial_worth" in data
 
     def test_snapshot_worth_error_dict(self):
-        from src.semi_auto.models.skills import SnapshotWorthOutput
+        from src.semi_auto.models.strategies import SnapshotWorthOutput
         s = SnapshotWorthOutput.model_validate({"error": "Missing dates"})
         assert s.error == "Missing dates"
 
     def test_swap_positions_output_extra_fields(self):
-        from src.semi_auto.models.skills import SwapPositionsOutput
+        from src.semi_auto.models.strategies import SwapPositionsOutput
         s = SwapPositionsOutput(
             snapshot_date="2026-01-01",
             end_date="2026-03-31",
@@ -609,7 +609,7 @@ class TestSimulationOutputFamily:
         assert s.initial_worth_before_swap == pytest.approx(99500.0)
 
     def test_swap_positions_error_dict(self):
-        from src.semi_auto.models.skills import SwapPositionsOutput
+        from src.semi_auto.models.strategies import SwapPositionsOutput
         s = SwapPositionsOutput.model_validate({"error": "No tickers provided"})
         assert s.error == "No tickers provided"
 
@@ -622,7 +622,7 @@ class TestOutHelper:
 
     def test_valid_dict_returns_model_dump(self):
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import MomentumOutput
+        from src.semi_auto.models.strategies import MomentumOutput
         raw = {"symbol": "AAPL", "rsi": 65.0, "timeframe": "1Day", "timestamp": "2026-01-01T00:00:00"}
         result = _out(MomentumOutput, raw)
         assert isinstance(result, dict)
@@ -631,14 +631,14 @@ class TestOutHelper:
 
     def test_empty_dict_returns_defaults(self):
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         result = _out(PortfolioStatusOutput, {})
         assert result["equity"] == 0.0
         assert result["long_positions"] == 0
 
     def test_error_dict_passes_without_raising(self):
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import MomentumOutput
+        from src.semi_auto.models.strategies import MomentumOutput
         raw = {"error": "Connection failed"}
         result = _out(MomentumOutput, raw)
         # Either validated (defaults filled) or raw returned — both are dicts
@@ -647,7 +647,7 @@ class TestOutHelper:
 
     def test_extra_fields_pass_through_with_allow(self):
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         raw = {"equity": 100000.0, "extra_computed_field": 99}
         result = _out(PortfolioStatusOutput, raw)
         assert result["equity"] == 100000.0
@@ -656,7 +656,7 @@ class TestOutHelper:
     def test_fallback_on_unrecoverable_failure(self):
         """If model_validate raises (e.g. required field missing) raw dict is returned."""
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import BacktestOutput
+        from src.semi_auto.models.strategies import BacktestOutput
         # BacktestOutput requires strategy/ticker/start_date/end_date
         raw = {"error": "failed early"}
         result = _out(BacktestOutput, raw)
@@ -667,14 +667,14 @@ class TestOutHelper:
     def test_returns_dict_not_model_instance(self):
         """Output of _out() must always be a plain dict."""
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import HealthCheckOutput
+        from src.semi_auto.models.strategies import HealthCheckOutput
         result = _out(HealthCheckOutput, {"health_status": "warning"})
         assert type(result) is dict
 
     def test_type_coercion(self):
         """Pydantic coerces string numbers to float/int."""
         from src.semi_auto.registry.functions import _out
-        from src.semi_auto.models.skills import PortfolioStatusOutput
+        from src.semi_auto.models.strategies import PortfolioStatusOutput
         raw = {"equity": "150000.0", "long_positions": "5"}
         result = _out(PortfolioStatusOutput, raw)
         assert isinstance(result["equity"], float)

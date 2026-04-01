@@ -83,3 +83,73 @@ async def portfolio_history(
     except Exception as exc:
         logger.error(f"[portfolio/history] {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# Valid timeframe options per period to avoid Alpaca 422 errors.
+_PERIOD_TIMEFRAME_MAP: dict = {
+    "1D": {"1Min", "5Min", "15Min", "1H"},
+    "1W": {"1Min", "5Min", "15Min", "1H", "1D"},
+    "1M": {"1H", "1D"},
+    "3M": {"1D"},
+    "1A": {"1D"},
+    "all": {"1D"},
+}
+
+
+@router.get("/history/alpaca")
+async def portfolio_history_alpaca(
+    period: str = Query(default="1M", description="Time period: 1D, 1W, 1M, 3M, 1A, all"),
+    timeframe: str = Query(default="1D", description="Bar resolution: 1Min, 5Min, 15Min, 1H, 1D"),
+    extended_hours: bool = Query(default=False, description="Include pre/post market data"),
+):
+    """Live portfolio performance history directly from Alpaca.
+
+    Returns equity curve and P&L series from Alpaca's portfolio history API,
+    as opposed to ``/history`` which returns locally-stored snapshots.
+
+    Args:
+        period: Lookback window. One of ``1D``, ``1W``, ``1M``, ``3M``,
+            ``1A``, ``all``. Default ``1M``.
+        timeframe: Bar aggregation. Allowed values depend on ``period``
+            (e.g. ``1D`` period only supports intraday resolutions).
+            Default ``1D``.
+        extended_hours: Include extended-hours data. Default False.
+
+    Returns:
+        Dict with timestamp list, equity list, profit_loss list,
+        profit_loss_pct list, base_value, and timeframe.
+
+    Raises:
+        400: If the period+timeframe combination is invalid.
+        500: If the Alpaca API request fails.
+    """
+    valid_timeframes = _PERIOD_TIMEFRAME_MAP.get(period.upper())
+    if valid_timeframes is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid period '{period}'. Must be one of: {', '.join(_PERIOD_TIMEFRAME_MAP)}",
+        )
+    if timeframe not in valid_timeframes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Timeframe '{timeframe}' is not valid for period '{period}'. "
+                f"Allowed: {', '.join(sorted(valid_timeframes))}"
+            ),
+        )
+    try:
+        from src.common.external.alpaca_portfolio import fetch_portfolio_history
+        data = fetch_portfolio_history(
+            period=period.upper(),
+            timeframe=timeframe,
+            extended_hours=extended_hours,
+        )
+        return {
+            "status": "success",
+            "period": period,
+            **data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[portfolio/history/alpaca] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))

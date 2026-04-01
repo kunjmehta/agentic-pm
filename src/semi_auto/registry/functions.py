@@ -17,7 +17,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
-from src.semi_auto.models.skills import (
+from src.semi_auto.models.strategies import (
     BacktestInput,
     CandleInput,
     DataAvailabilityInput,
@@ -51,6 +51,11 @@ from src.semi_auto.skills.portfolio.skills import (
     get_positions_summary_core,
     check_portfolio_health_core,
     check_data_availability_core,
+    # Order execution (new)
+    execute_order_core,
+    close_position_core,
+    scale_position_core,
+    execute_strategy_signal_core,
 )
 
 # ── Quant skills ──────────────────────────────────────────────────────────────
@@ -70,13 +75,17 @@ from src.semi_auto.skills.quant.skills import (
 
 # ── Backtester skills ─────────────────────────────────────────────────────────
 
-from src.semi_auto.skills.backtester.skills import (
+from src.semi_auto.skills.backtester.backtest_strategy import (
     backtest_skill as _backtest_skill,
-    snapshot_skill as _snapshot_skill,
-    swap_skill as _swap_skill,
     backtest_strategy_core as _backtest_strategy_raw,
+)
+from src.semi_auto.skills.backtester.snapshot import (
+    snapshot_skill as _snapshot_skill,
     save_eod_snapshot_core as _save_eod_snapshot_raw,
     snapshot_worth_core as _snapshot_worth_raw,
+)
+from src.semi_auto.skills.backtester.swap_positions import (
+    swap_skill as _swap_skill,
     swap_positions_core as _swap_positions_raw,
 )
 
@@ -378,6 +387,33 @@ def _save_mean_reversion_signal(symbol: str, timeframe: str, result: Dict) -> No
             timeframe=timeframe,
             model_used="user-directed",
         )
+        # ------------------------------------------------------------------
+        # Phase 25 — HITL gate: mark signal as pending_review when enabled
+        # ------------------------------------------------------------------
+        from src.common.utils import config as _cfg
+        if _cfg.get("strategy.hitl.enabled", False):
+            try:
+                s_dao2 = StrategyDAO()
+                s_dao2.execute(
+                    """
+                    UPDATE strategy_results
+                       SET status = 'pending_review'
+                     WHERE id = (
+                           SELECT id FROM strategy_results
+                            WHERE symbol = ? AND strategy_name = 'mean-reversion'
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                     )
+                    """,
+                    (symbol,),
+                )
+                s_dao2.close()
+                logger.info(f"[registry] Signal for {symbol} marked 'pending_review' (HITL enabled)")
+            except Exception as _hitl_exc:
+                logger.warning(f"[registry] HITL status update failed for {symbol}: {_hitl_exc}")
+        else:
+            # Close the original dao only after potential HITL path (already closed above)
+            pass
         s_dao.close()
         logger.info(
             f"[registry] Persisted user-directed signal for {symbol}/{timeframe}: "
@@ -746,7 +782,7 @@ def _get_market_bars(
             # Not in local DB — pull from Alpaca API; save_bars is called inside
             logger.info(f"[registry] get_market_bars: no local data for {symbol}, fetching from API")
             try:
-                from src.common.skills.alpaca_skills import fetch_historical_bars
+                from src.common.external.alpaca import fetch_historical_bars
                 df = fetch_historical_bars(
                     symbol=symbol, start=start_date, end=end_date, timeframe=tf
                 )
@@ -879,22 +915,175 @@ def _swap_positions_wrapped(
         logger.warning(f"[registry] swap_positions failed: {exc}")
         return _out(SwapPositionsOutput, {"error": str(exc)})
 
-def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
-    """Get the most recent bar for a symbol.
+
+# ── Order execution wrappers (new) ────────────────────────────────────────────
+
+def _execute_order_wrapped(
+    symbol: str,
+    qty: float,
+    side: str,
+    order_type: str = "market",
+    limit_price: Optional[float] = None,
+    **kwargs,
+) -> Dict:
+    """Wrap execute_order_core — place a market or limit order.
 
     Args:
         symbol: Stock ticker.
-        timeframe: Bar timeframe.
+        qty: Number of shares (> 0).
+        side: "buy" or "sell".
+        order_type: "market" (default) or "limit".
+        limit_price: Required for limit orders.
 
     Returns:
-        Bar dict with open/high/low/close/volume or error dict.
+        Order result dict with id, symbol, qty, side, type, status.
     """
     try:
+        return execute_order_core(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            order_type=order_type,
+            limit_price=limit_price,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] execute_order failed ({side} {qty} {symbol}): {exc}")
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
+def _close_position_wrapped(symbol: str, **kwargs) -> Dict:
+    """Wrap close_position_core — liquidate a position at market price.
+
+    Args:
+        symbol: Stock ticker whose position to close.
+
+    Returns:
+        Closing market-order result dict.
+    """
+    try:
+        return close_position_core(symbol=symbol)
+    except Exception as exc:
+        logger.warning(f"[registry] close_position failed for {symbol}: {exc}")
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
+def _scale_position_wrapped(
+    symbol: str,
+    target_pct: float,
+    order_type: str = "market",
+    limit_price: Optional[float] = None,
+    **kwargs,
+) -> Dict:
+    """Wrap scale_position_core — resize position to a target % of equity.
+
+    Args:
+        symbol: Stock ticker.
+        target_pct: Target position size as fraction of equity (e.g. 0.05 = 5%).
+            Use 0.0 to fully close the position.
+        order_type: "market" (default) or "limit".
+        limit_price: Required for limit orders.
+
+    Returns:
+        Scale result dict with action, current_qty, target_qty, delta_qty,
+        current_pct, order details.
+    """
+    try:
+        return scale_position_core(
+            symbol=symbol,
+            target_pct=target_pct,
+            order_type=order_type,
+            limit_price=limit_price,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] scale_position failed for {symbol}: {exc}")
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
+def _execute_strategy_signal_wrapped(
+    symbol: str,
+    signal: str,
+    confidence: float = 1.0,
+    base_position_pct: float = 0.05,
+    order_type: str = "market",
+    **kwargs,
+) -> Dict:
+    """Wrap execute_strategy_signal_core — translate a signal into a trade.
+
+    Maps buy/sell/hold signals to actual Alpaca orders.  Confidence
+    scales the allocated position size.
+
+    Args:
+        symbol: Stock ticker.
+        signal: "buy" | "sell" | "hold" (case-insensitive).
+        confidence: Conviction score 0–1.  Multiplies base_position_pct.
+        base_position_pct: Max allocation per position (default 5%).
+        order_type: "market" (default) or "limit".
+
+    Returns:
+        Dict with action, order (or None for hold), target_pct, confidence.
+    """
+    try:
+        return execute_strategy_signal_core(
+            symbol=symbol,
+            signal=signal,
+            confidence=confidence,
+            base_position_pct=base_position_pct,
+            order_type=order_type,
+        )
+    except Exception as exc:
+        logger.warning(f"[registry] execute_strategy_signal failed for {symbol}: {exc}")
+        return {"status": "error", "error": str(exc), "symbol": symbol, "signal": signal}
+
+
+def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
+    """Get the most recent price for a symbol.
+
+    Priority order:
+    1. **live_trades** — most recent tick from the last hour (freshest intraday price).
+    2. **Latest bar close** — falls back to the most recent OHLCV bar when no
+       live tick is available (e.g. after-hours or when streaming is inactive).
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar timeframe for the fallback bar query (default ``"1Min"``).
+
+    Returns:
+        Dict with at minimum a ``close`` key, plus source / timestamp metadata.
+        Returns an error dict on failure.
+    """
+    try:
+        from datetime import datetime as _dt, timedelta as _td
         from src.common.dao import AlpacaDAO
+
+        symbol = symbol.strip().upper()
         dao = AlpacaDAO()
+
+        # 1. Prefer freshest live tick from the last hour
+        try:
+            now = _dt.now()
+            df_live = dao.get_recent_trades(
+                symbol, start=now - _td(hours=1), end=now, limit=None
+            )
+            if not df_live.empty:
+                last = df_live.iloc[-1]  # ASC order → iloc[-1] is most recent
+                dao.close()
+                return {
+                    "symbol": symbol,
+                    "close": float(last["price"]),
+                    "source": "live_trades",
+                    "timestamp": str(last["timestamp"]),
+                }
+        except Exception:
+            pass  # live_trades unavailable — fall through to bar price
+
+        # 2. Fall back to latest OHLCV bar (may be previous session close)
         result = dao.get_latest_bar(symbol, timeframe)
         dao.close()
-        return _to_native(result) if result else {"error": f"No bar found for {symbol}"}
+        if result:
+            result = _to_native(result)
+            result.setdefault("source", "bar")
+            return result
+        return {"error": f"No price data found for {symbol}"}
     except Exception as exc:
         logger.warning(f"[registry] get_latest_price failed for {symbol}: {exc}")
         return {"error": str(exc)}
@@ -1434,6 +1623,11 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "save_eod_snapshot":       _save_eod_snapshot_wrapped,
     "snapshot_worth":          _snapshot_worth_wrapped,
     "swap_positions":          _swap_positions_wrapped,
+    # ── Order execution & strategy scaling (new) ──────────────────────────────
+    "execute_order":           _execute_order_wrapped,
+    "close_position":          _close_position_wrapped,
+    "scale_position":          _scale_position_wrapped,
+    "execute_strategy_signal": _execute_strategy_signal_wrapped,
 }
 
 # Filter out None entries at load time so executor can detect unavailable fns
@@ -1531,7 +1725,11 @@ def get_registry_schema() -> Dict[str, Any]:
                 "ticker": "str",
                 "start_date": "str — YYYY-MM-DD",
                 "end_date": "str — YYYY-MM-DD",
-                "strategy": "str — 'buy-and-hold' | 'mean-reversion' | 'momentum' | 'value'",
+                "strategy": (
+                    "str — 'buy-and-hold' | 'mean-reversion' | 'momentum' | 'value' | "
+                    "'vwap-reversion' | 'opening-range-breakout' | 'rsi-divergence' | 'momentum-burst' | "
+                    "'golden-cross' | 'breakout-52w' | 'mean-reversion-daily' | 'earnings-drift'"
+                ),
                 "initial_capital": "float — default 100000.0",
             },
         },
@@ -1659,10 +1857,57 @@ def get_registry_schema() -> Dict[str, Any]:
         "swap_positions": {
             "description": "Simulate swapping portfolio positions and calculate resulting worth (workflow C).",
             "params": {
-                "snapshot_date": "str — YYYY-MM-DD",
-                "end_date": "str — YYYY-MM-DD",
-                "tickers": "dict — {symbol: {swap_to: str, quantity: int}}",
+                "snapshot_date": "str \u2014 YYYY-MM-DD",
+                "end_date": "str \u2014 YYYY-MM-DD",
+                "tickers": "dict \u2014 {symbol: {swap_to: str, quantity: int}}",
             },
+        },
+        # \u2500\u2500 Order execution & strategy scaling (new) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        "execute_order": {
+            "description": "Place a market or limit order via Alpaca. Preferred for direct single-symbol execution.",
+            "params": {
+                "symbol": "str",
+                "qty": "float \u2014 number of shares (> 0)",
+                "side": "str \u2014 'buy' or 'sell'",
+                "order_type": "str \u2014 'market' (default) or 'limit'",
+                "limit_price": "float \u2014 required for limit orders",
+            },
+            "note": "REQUIRES HUMAN APPROVAL \u2014 always present to the user before executing",
+        },
+        "close_position": {
+            "description": "Liquidate the full open position for a symbol at market price.",
+            "params": {
+                "symbol": "str",
+            },
+            "note": "REQUIRES HUMAN APPROVAL \u2014 always present to the user before executing",
+        },
+        "scale_position": {
+            "description": (
+                "Resize an open (or new) position to a target percentage of total equity. "
+                "Use target_pct=0.0 to fully close the position. "
+                "Computes the buy/sell delta automatically."
+            ),
+            "params": {
+                "symbol": "str",
+                "target_pct": "float \u2014 target allocation as fraction of equity (e.g. 0.05 = 5%)",
+                "order_type": "str \u2014 'market' (default) or 'limit'",
+                "limit_price": "float \u2014 required for limit orders",
+            },
+            "note": "REQUIRES HUMAN APPROVAL \u2014 always present to the user before executing",
+        },
+        "execute_strategy_signal": {
+            "description": (
+                "Translate a quant strategy signal (buy/sell/hold) into a live Alpaca order. "
+                "Confidence score scales the position size relative to base_position_pct."
+            ),
+            "params": {
+                "symbol": "str",
+                "signal": "str \u2014 'buy' | 'sell' | 'hold'",
+                "confidence": "float \u2014 conviction score 0\u20131, default 1.0",
+                "base_position_pct": "float \u2014 max allocation per position, default 0.05",
+                "order_type": "str \u2014 'market' (default) or 'limit'",
+            },
+            "note": "REQUIRES HUMAN APPROVAL \u2014 always present to the user before executing",
         },
     }
 
@@ -1680,11 +1925,11 @@ if __name__ == "__main__":
         status = "[OK]" if fn is not None else "[WARN] not available"
         print(f"  {status}  {name}")
 
-    assert len(FUNCTION_REGISTRY) == 37, f"Expected 37 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
-    print("\n[OK] All 37 functions registered")
+    assert len(FUNCTION_REGISTRY) == 42, f"Expected 42 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
+    print("\n[OK] All 41 functions registered")
 
     schema = get_registry_schema()
-    assert len(schema) == 37, f"Expected 37 schema entries, got {len(schema)}"
+    assert len(schema) == 41, f"Expected 41 schema entries, got {len(schema)}"
     print("[OK] Registry schema returned")
 
     print("\n[ALL OK] registry/functions.py smoke test passed")
