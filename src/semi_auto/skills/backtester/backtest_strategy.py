@@ -230,7 +230,6 @@ class BacktestStrategySkill:
                 bars_df=bars_df,
                 strategy_signals=strategy_signals,
                 save_to_db=False,
-                strategy_params=_sp,
             )
 
             # Persist to DB when requested

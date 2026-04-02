@@ -20,13 +20,14 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.semi_auto.agents import get_llm
 from src.semi_auto.models.task import FunctionCallEdit, PMFeedback
 
 logger = get_logger(__name__)
 
 MAX_RETRIES = 3
 
-_REVIEW_SYSTEM_PROMPT = """You are the Portfolio Manager reviewing Quant and Backtester function-call plans.
+_REVIEW_SYSTEM_PROMPT = """You are the Portfolio Manager reviewing Quant, Backtester, and Order function-call plans.
 
 Each plan is a list of FunctionCall objects: {function_name, params}.
 
@@ -34,6 +35,7 @@ Your output is a PMFeedback object:
   approved       — true if the plans are correct and complete (after your edits)
   quant_edits    — list of FunctionCallEdit targeting the Quant calls by 0-based index
   backtester_edits — list of FunctionCallEdit targeting the Backtester calls by 0-based index
+  order_edits    — list of FunctionCallEdit targeting the Order calls by 0-based index
   reason         — ONE sentence only, required when approved=false
 
 FunctionCallEdit fields:
@@ -188,6 +190,50 @@ get_strategy_performance
   Optional : days=30
 
 ───────────────────────────────────────────────────────────
+ORDER FUNCTIONS  (do NOT remove or replace unless a required param is missing or clearly wrong)
+───────────────────────────────────────────────────────────
+Order calls represent user-directed trading actions — treat them conservatively.
+Only apply edits if a required param is missing or a param value is clearly invalid.
+NEVER remove an order call simply because its function name looks unfamiliar.
+
+fetch_orders
+  Optional : status=None  limit=20
+  No required params
+
+place_market_order
+  Required : symbol (str)  qty (float)  side ("buy" | "sell")
+  Optional : time_in_force="day"
+
+place_limit_order
+  Required : symbol (str)  qty (float)  side ("buy" | "sell")  limit_price (float)
+  Optional : time_in_force="day"
+
+execute_order
+  Required : symbol (str)  qty (float)  side ("buy" | "sell")
+  Optional : order_type="market"  limit_price=None  time_in_force="day"
+
+execute_strategy_signal
+  Required : symbol (str)  signal ("BUY" | "SELL" | "HOLD")  confidence (float)
+  Optional : qty=None  order_type="market"
+
+scale_position
+  Required : symbol (str)  target_pct (float)
+  Optional : order_type="market"
+
+cancel_order
+  Required : order_id (str)
+
+cancel_all_orders
+  No required params
+
+close_position
+  Required : symbol (str)
+  Optional : order_type="market"
+
+close_all_positions
+  No required params
+
+───────────────────────────────────────────────────────────
 CRITICAL PARAM RULES — violations must be corrected with update_params edits
 ───────────────────────────────────────────────────────────
 1.  All functions use "symbol" — "ticker" is NEVER a valid param name
@@ -294,9 +340,7 @@ def pm_review_node(state: dict) -> dict:
         Partial state update with corrected queues and pm_review fields.
     """
     try:
-        from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets, config
 
         query: str = state.get("query", "")
         intent: str = state.get("intent", "unknown")
@@ -304,9 +348,10 @@ def pm_review_node(state: dict) -> dict:
         portfolio_queue = state.get("portfolio_task_queue") or []
         quant_queue: List[Dict] = list(state.get("quant_task_queue") or [])
         bt_queue: List[Dict] = list(state.get("backtester_task_queue") or [])
+        order_queue: List[Dict] = list(state.get("order_task_queue") or [])
 
         # Auto-approve when no sub-agent tasks exist
-        if not quant_queue and not bt_queue:
+        if not quant_queue and not bt_queue and not order_queue:
             logger.info("[pm_review] no sub-agent tasks — auto-approving PM plan")
             return {
                 "pm_review_approved": True,
@@ -316,14 +361,15 @@ def pm_review_node(state: dict) -> dict:
 
         logger.info(
             f"[pm_review] reviewing {len(portfolio_queue)} PM + "
-            f"{len(quant_queue)} quant + {len(bt_queue)} bt calls "
+            f"{len(quant_queue)} quant + {len(bt_queue)} bt + {len(order_queue)} order calls "
             f"(iteration={current_iteration})"
         )
 
-        task_summary = "\n\n".join([
+        task_summary = "\n\n".join(filter(None, [
             _format_calls("Quant", quant_queue),
             _format_calls("Backtester", bt_queue),
-        ])
+            _format_calls("Order", order_queue),
+        ]))
 
         revision_context = (
             f"\nThis is REVISION REVIEW #{current_iteration} — agents have revised their plans.\n"
@@ -374,12 +420,7 @@ def pm_review_node(state: dict) -> dict:
             f"Plans to review:\n\n{task_summary}"
         )
 
-        llm = ChatOpenAI(
-            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
-            temperature=config.get("graph_api.model_temperature", 0.0),
-            api_key=secrets.get("openai.api_key"),
-        )
-        structured_llm = llm.with_structured_output(PMFeedback, method="function_calling")
+        structured_llm = get_llm("pm_review").with_structured_output(PMFeedback, method="function_calling")
 
         messages = [
             {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
@@ -396,7 +437,8 @@ def pm_review_node(state: dict) -> dict:
                     f"[pm_review] feedback on attempt {attempt}: "
                     f"approved={feedback.approved}  "
                     f"quant_edits={len(feedback.quant_edits)}  "
-                    f"bt_edits={len(feedback.backtester_edits)}"
+                    f"bt_edits={len(feedback.backtester_edits)}  "
+                    f"order_edits={len(feedback.order_edits)}"
                 )
                 break
             except (ValidationError, Exception) as exc:
@@ -410,22 +452,25 @@ def pm_review_node(state: dict) -> dict:
         # Apply edits to queues before returning
         edited_quant = _apply_edits(quant_queue, feedback.quant_edits, "Quant")
         edited_bt = _apply_edits(bt_queue, feedback.backtester_edits, "Backtester")
+        edited_order = _apply_edits(order_queue, feedback.order_edits, "Order")
 
         # Serialise edits for state / agent revision feedback
         edits_payload = {
             "quant_edits": [e.model_dump() for e in feedback.quant_edits],
             "backtester_edits": [e.model_dump() for e in feedback.backtester_edits],
+            "order_edits": [e.model_dump() for e in feedback.order_edits],
             "reason": feedback.reason,
         }
 
         if feedback.approved:
-            logger.info(f"[pm_review] approved — quant={len(edited_quant)} bt={len(edited_bt)} calls after edits")
+            logger.info(f"[pm_review] approved — quant={len(edited_quant)} bt={len(edited_bt)} order={len(edited_order)} calls after edits")
             return {
                 "pm_review_approved": True,
                 "pm_review_notes": feedback.reason or "Plans approved.",
                 "pm_review_edits": edits_payload,
                 "quant_task_queue": edited_quant,
                 "backtester_task_queue": edited_bt,
+                "order_task_queue": edited_order,
             }
 
         # Rejected: structural problem that edits couldn't fix
@@ -437,8 +482,10 @@ def pm_review_node(state: dict) -> dict:
             "review_iteration": current_iteration + 1,
             "quant_task_queue": [],
             "backtester_task_queue": [],
+            "order_task_queue": [],
             "quant_reasoning": None,
             "backtester_reasoning": None,
+            "order_reasoning": None,
         }
 
     except Exception as exc:

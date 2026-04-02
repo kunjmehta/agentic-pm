@@ -65,15 +65,20 @@ class AgentOutput(BaseModel):
         task_list: PM's own task list (direct function calls).
         delegate_to_quant: Whether to invoke the Quant reasoning node.
         delegate_to_backtester: Whether to invoke the Backtester reasoning node.
+        delegate_to_order: Whether to invoke the Order Agent node for order
+            placement, cancellation, or order-book queries.
         quant_query: Focused sub-query to pass to quant node.
         backtester_query: Focused sub-query to pass to backtester node.
+        order_query: Focused sub-query to pass to order agent node.
     """
 
     task_list: TaskList
     delegate_to_quant: bool = Field(default=False)
     delegate_to_backtester: bool = Field(default=False)
+    delegate_to_order: bool = Field(default=False)
     quant_query: Optional[str] = Field(default=None)
     backtester_query: Optional[str] = Field(default=None)
+    order_query: Optional[str] = Field(default=None)
 
 
 class FunctionCall(BaseModel):
@@ -129,7 +134,7 @@ class FunctionCallEdit(BaseModel):
 
 
 class PMFeedback(BaseModel):
-    """Structured PM review of Quant and Backtester AgentPlans.
+    """Structured PM review of Quant, Backtester, and Order AgentPlans.
 
     PM applies edits directly to the plans — no free-text rejection notes.
     If approved=False, the graph routes agents back for a full re-plan.
@@ -138,6 +143,7 @@ class PMFeedback(BaseModel):
         approved: True if both plans are ready to execute (after applying edits).
         quant_edits: Edits to apply to the Quant AgentPlan.calls list.
         backtester_edits: Edits to apply to the Backtester AgentPlan.calls list.
+        order_edits: Edits to apply to the Order AgentPlan.calls list.
         reason: One sentence (only if approved=False). Empty string if approved.
     """
 
@@ -149,6 +155,10 @@ class PMFeedback(BaseModel):
     backtester_edits: List[FunctionCallEdit] = Field(
         default_factory=list,
         description="Edits to apply to backtester calls. Empty if no changes needed.",
+    )
+    order_edits: List[FunctionCallEdit] = Field(
+        default_factory=list,
+        description="Edits to apply to order agent calls. Empty if no changes needed.",
     )
     reason: Optional[str] = Field(
         default=None,

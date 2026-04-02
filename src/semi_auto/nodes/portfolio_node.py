@@ -22,6 +22,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.semi_auto.agents import get_llm
 from src.semi_auto.models.task import AgentOutput, TaskList
 
 logger = get_logger(__name__)
@@ -51,43 +52,28 @@ ADDITIONAL DATA FUNCTIONS (use only when relevant):
 - get_risk_parameters: No params. Current risk limits and thresholds.
 - get_actionable_signals: params={min_confidence=0.7, action_filter=None}. High-confidence buy/sell signals from active strategies.
 
-ORDER EXECUTION FUNCTIONS ⚠ REQUIRE HUMAN APPROVAL (semi-auto mode):
-- execute_order: params={symbol, qty, side, order_type="market", limit_price=None}.
-  Place a single market or limit order. Use for explicit user-requested trades.
-  side must be "buy" or "sell". qty must be > 0. Set priority=3.
-- close_position: params={symbol}.
-  Liquidate the full open position for a symbol at market price. Set priority=3.
-- scale_position: params={symbol, target_pct, order_type="market", limit_price=None}.
-  Resize a position to target_pct of total equity (e.g. 0.05 = 5%). Use 0.0 to close.
-  Computes buy/sell delta automatically. Set priority=3.
-- execute_strategy_signal: params={symbol, signal, confidence=1.0, base_position_pct=0.05, order_type="market"}.
-  Translate a quant buy/sell/hold signal into an Alpaca order.
-  Use after receiving a strategy signal from quant analysis. Set priority=3.
-
-ORDER EXECUTION RULES:
-- ONLY include order functions when the user explicitly asks to buy, sell, trade, or execute.
-  Or when the user asks to act on a strategy signal/recommendation.
-- ALWAYS set priority=3 for all order execution tasks so they run last.
-- NEVER plan both scale_position and execute_order for the same symbol in the same task list.
-- For signal-driven execution: use execute_strategy_signal (preferred) or scale_position.
-- For explicit qty trades: use execute_order.
-- For full liquidation: use close_position.
-- These functions place REAL orders — they are gated by HITL confirmation in this system.
+ORDER DELEGATION (⚠  do NOT plan order functions in the PM task_list):
+- Any request to BUY, SELL, PLACE, CANCEL, CLOSE, LIQUIDATE, EXECUTE orders
+  → set delegate_to_order=true, order_query="<focused order request with symbol/qty/side/price>"
+- The Order Agent handles: place_market_order, place_limit_order, execute_order,
+  cancel_order, cancel_all_orders, close_position, close_all_positions,
+  scale_position, execute_strategy_signal, fetch_orders.
+- NEVER include any of those functions in the PM task_list.
 
 DELEGATION RULES:
 - If query involves technical indicators (RSI, MACD, Bollinger, momentum, volume, candlestick, mean reversion) → set delegate_to_quant=true, quant_query="<focused analysis request>"
 - If query involves backtesting, simulation, historical what-if, strategy performance → set delegate_to_backtester=true, backtester_query="<focused backtest request with symbol and dates>"
-- Both can be true for full_analysis queries.
+- If query involves placing, cancelling, or fetching orders → set delegate_to_order=true, order_query="<focused order request>"
+- Multiple delegation flags can be true together (e.g. quant + order for signal-driven execution).
 
 TASK ID FORMAT: "pm_001", "pm_002", etc.
-PRIORITY: 1=high (parallel read), 2=medium (needs deps), 3=low (write OR order execution, runs last)
+PRIORITY: 1=high (parallel read), 2=medium (needs deps), 3=low (write, runs last)
 
 RULES:
 - Only include tasks needed for THIS specific query — do not over-fetch
 - For pure quant queries, task_list can be empty (delegate only)
-- For pure portfolio queries, delegate_to_quant and delegate_to_backtester should both be false
+- For pure portfolio queries, delegate_to_quant, delegate_to_backtester, and delegate_to_order should all be false
 - Set priority=3 for fetch_historical_data (DuckDB write — runs sequentially)
-- Set priority=3 for ALL order execution tasks
 """
 
 
@@ -128,9 +114,7 @@ def portfolio_reasoning_node(state: dict) -> dict:
         Partial state update with portfolio task queue and delegation flags.
     """
     try:
-        from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets, config
 
         query: str = state.get("query", "")
         intent: str = state.get("intent", "portfolio")
@@ -150,12 +134,7 @@ def portfolio_reasoning_node(state: dict) -> dict:
             f"PRIOR CONVERSATION CONTEXT:\n{prior_context}"
         )
 
-        llm = ChatOpenAI(
-            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
-            temperature=config.get("graph_api.model_temperature", 0.0),
-            api_key=secrets.get("openai.api_key"),
-        )
-        structured_llm = llm.with_structured_output(AgentOutput, method="function_calling")
+        structured_llm = get_llm("pm").with_structured_output(AgentOutput, method="function_calling")
 
         messages = [
             {"role": "system", "content": _PM_SYSTEM_PROMPT},
@@ -193,8 +172,10 @@ def portfolio_reasoning_node(state: dict) -> dict:
             "portfolio_reasoning": result.task_list.reasoning_summary,
             "_delegate_quant": result.delegate_to_quant,
             "_delegate_backtester": result.delegate_to_backtester,
+            "_delegate_order": result.delegate_to_order,
             "_quant_query": result.quant_query,
             "_backtester_query": result.backtester_query,
+            "_order_query": result.order_query,
         }
 
     except Exception as exc:
@@ -203,6 +184,7 @@ def portfolio_reasoning_node(state: dict) -> dict:
             "error": f"Portfolio reasoning failed: {exc}",
             "_delegate_quant": False,
             "_delegate_backtester": False,
+            "_delegate_order": False,
             "portfolio_task_queue": [],
             "portfolio_reasoning": None,
         }

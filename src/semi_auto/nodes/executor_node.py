@@ -189,12 +189,154 @@ def _extract_dep_params(dep_task_id: str, dep_result: Dict[str, Any], fn_name: s
     return {}
 
 
+def _run_queue(
+    state: dict,
+    queue_specs: List[tuple],
+    label: str,
+) -> dict:
+    """Shared execution logic for analysis and order executor nodes.
+
+    Args:
+        state: Current GraphState dict.
+        queue_specs: List of (prefix, queue_key) tuples to process.
+        label: Log label for this executor pass ("analysis" or "order").
+
+    Returns:
+        Partial state update with execution_results and tool_timings.
+    """
+    if state.get("error"):
+        logger.warning(f"[executor/{label}] skipping — upstream error: {state['error']}")
+        return {"execution_results": state.get("execution_results") or {}, "tool_timings": state.get("tool_timings") or []}
+
+    all_tasks: List[Dict[str, Any]] = []
+
+    pm_queue = state.get("portfolio_task_queue") or []
+    if label == "analysis":
+        all_tasks.extend(pm_queue)  # portfolio tasks run in analysis pass
+
+    for prefix, queue_key in queue_specs:
+        queue = state.get(queue_key) or []
+        for i, call in enumerate(queue):
+            if "task_id" not in call:
+                call = {
+                    "task_id": f"{prefix}_{i + 1:03d}",
+                    "function_name": call.get("function_name", ""),
+                    "params": call.get("params", {}),
+                    "priority": 1,
+                    "depends_on": [],
+                    "retry_count": 0,
+                    "description": "",
+                }
+            all_tasks.append(call)
+
+    if not all_tasks:
+        logger.info(f"[executor/{label}] no tasks — skipping")
+        prior = state.get("execution_results") or {}
+        return {"execution_results": prior, "tool_timings": state.get("tool_timings") or []}
+
+    logger.info(f"[executor/{label}] processing {len(all_tasks)} tasks")
+
+    # Merge with prior execution_results (from analysis pass, for order pass)
+    execution_results: Dict[str, Any] = dict(state.get("execution_results") or {})
+    tool_timings: List[Dict[str, Any]] = list(state.get("tool_timings") or [])
+
+    independent = [t for t in all_tasks if not t.get("depends_on") and t.get("priority", 1) < 3]
+    sequential = [t for t in all_tasks if t.get("depends_on") or t.get("priority", 1) >= 3]
+
+    logger.info(f"[executor/{label}] parallel={len(independent)} sequential={len(sequential)}")
+
+    if independent:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(_run_task, t, {}): t for t in independent}
+            for future in as_completed(futures):
+                result = future.result()
+                execution_results[result["task_id"]] = result
+                if result.get("timing"):
+                    tool_timings.append(result["timing"])
+
+    for task in sequential:
+        retry_count = task.get("retry_count", 0)
+        if retry_count >= 1:
+            logger.warning(f"[executor/{label}] skipping {task.get('task_id')} — already retried once")
+            execution_results[task["task_id"]] = {
+                "task_id": task["task_id"], "function_name": task.get("function_name"),
+                "status": "skipped", "error": "Max retries reached",
+            }
+            continue
+
+        fn_name = task.get("function_name", "")
+        injected = {}
+        for dep_id in task.get("depends_on", []):
+            dep_result = execution_results.get(dep_id, {})
+            injected.update(_extract_dep_params(dep_id, dep_result, fn_name))
+
+        result = _run_task(task, injected)
+        execution_results[task["task_id"]] = result
+        if result.get("timing"):
+            tool_timings.append(result["timing"])
+
+        if result["status"] == "error":
+            logger.warning(f"[executor/{label}] retrying failed task {task['task_id']}")
+            task["retry_count"] = retry_count + 1
+            retry_result = _run_task(task, injected)
+            execution_results[task["task_id"]] = retry_result
+            if retry_result.get("timing"):
+                tool_timings.append(retry_result["timing"])
+
+    success_count = sum(1 for r in execution_results.values() if r.get("status") == "success")
+    error_count = sum(1 for r in execution_results.values() if r.get("status") == "error")
+    logger.info(f"[executor/{label}] done: {success_count} success, {error_count} errors")
+    return {"execution_results": execution_results, "tool_timings": tool_timings}
+
+
 def executor_node(state: dict) -> dict:
-    """Execute all queued tasks from portfolio, quant, and backtester queues.
+    """Execute analysis tasks from portfolio, quant, and backtester queues.
+
+    Order queue is NOT processed here — it runs in order_executor_node after
+    pm_decision_node decides whether orders are needed.
 
     Execution strategy:
     - Pass 1 (parallel): Tasks with no depends_on and priority < 3
     - Pass 2 (sequential): Tasks with depends_on set OR priority == 3
+
+    Args:
+        state: Current GraphState dict with populated task queues.
+
+    Returns:
+        Partial state update with execution_results and tool_timings.
+    """
+    return _run_queue(
+        state,
+        queue_specs=[("qa", "quant_task_queue"), ("bt", "backtester_task_queue")],
+        label="analysis",
+    )
+
+
+def order_executor_node(state: dict) -> dict:
+    """Execute order tasks from order_task_queue (second pass, after pm_decision).
+
+    Merges results with execution_results from the analysis pass so that
+    synthesizer_node sees both analysis and order outcomes in a single dict.
+
+    Args:
+        state: Current GraphState dict with order_task_queue populated by order_reasoning_node.
+
+    Returns:
+        Partial state update with merged execution_results and tool_timings.
+    """
+    return _run_queue(
+        state,
+        queue_specs=[("ord", "order_task_queue")],
+        label="order",
+    )
+
+
+def _executor_node_legacy(state: dict) -> dict:
+    """Legacy full-queue executor — kept for backward-compat tests only.
+
+    Processes ALL four queues (portfolio + quant + backtester + order) in one pass.
+    Not used in the live graph; used by existing functional tests that mock state
+    with all queues populated.
 
     Args:
         state: Current GraphState dict with populated task queues.
@@ -213,7 +355,7 @@ def executor_node(state: dict) -> dict:
     pm_queue = state.get("portfolio_task_queue") or []
     all_tasks.extend(pm_queue)  # already full TaskItem dicts
 
-    for prefix, queue_key in (("qa", "quant_task_queue"), ("bt", "backtester_task_queue")):
+    for prefix, queue_key in (("qa", "quant_task_queue"), ("bt", "backtester_task_queue"), ("ord", "order_task_queue")):
         queue = state.get(queue_key) or []
         for i, call in enumerate(queue):
             # FunctionCall format: {function_name, params} — normalise to task dict
@@ -334,6 +476,7 @@ if __name__ == "__main__":
         ],
         "quant_task_queue": None,
         "backtester_task_queue": None,
+        "order_task_queue": None,
     }
     result = executor_node(test_state)
     print(f"[OK] execution_results keys: {list(result['execution_results'].keys())}")
@@ -357,6 +500,7 @@ if __name__ == "__main__":
         ],
         "quant_task_queue": None,
         "backtester_task_queue": None,
+        "order_task_queue": None,
     }
     result = executor_node(error_state)
     assert result["execution_results"]["pm_err"]["status"] == "error"
@@ -368,6 +512,7 @@ if __name__ == "__main__":
         "portfolio_task_queue": None,
         "quant_task_queue": [],
         "backtester_task_queue": None,
+        "order_task_queue": None,
     })
     assert empty_result["execution_results"] == {}
     print("[OK] empty queues return empty results")

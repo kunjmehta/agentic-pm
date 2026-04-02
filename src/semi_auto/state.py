@@ -11,7 +11,10 @@ State lifecycle:
   portfolio_node        → portfolio_task_queue, portfolio_reasoning, delegation flags
   quant_node            → quant_task_queue, quant_reasoning
   backtester_node       → backtester_task_queue, backtester_reasoning
-  executor_node         → execution_results, tool_timings
+  executor_node         → execution_results, tool_timings  (analysis queues only)
+  pm_decision_node      → pm_decision_reasoning, _execute_orders, order_task_queue
+  order_node            → order_task_queue, order_reasoning  (second pass)
+  order_executor_node   → execution_results (merged with analysis results)
   synthesizer_node      → final_response, execution_time_ms
 """
 
@@ -52,24 +55,32 @@ class GraphState(TypedDict):
     # ── PM reasoning routing flags (ephemeral — used only by conditional edges)
     _delegate_quant: Optional[bool]
     _delegate_backtester: Optional[bool]
+    _delegate_order: Optional[bool]
     _quant_query: Optional[str]
     _backtester_query: Optional[str]
+    _order_query: Optional[str]
 
     # ── Task queues (List[dict] — serialized TaskItem.model_dump()) ─────────
     portfolio_task_queue: Optional[List[Dict[str, Any]]]
     quant_task_queue: Optional[List[Dict[str, Any]]]
     backtester_task_queue: Optional[List[Dict[str, Any]]]
+    order_task_queue: Optional[List[Dict[str, Any]]]
 
     # ── Reasoning traces (shown to user + stored in DB) ──────────────────────
     portfolio_reasoning: Optional[str]
     quant_reasoning: Optional[str]
     backtester_reasoning: Optional[str]
+    order_reasoning: Optional[str]
 
     # ── PM supervisor review of sub-agent task plans ──────────────────────────
     pm_review_approved: Optional[bool]          # True → proceed; False → short-circuit
     pm_review_notes: Optional[str]              # shown to user at HITL approval
     pm_review_edits: Optional[List[Dict[str, Any]]]  # serialized PMFeedback for agents on revision
     review_iteration: Optional[int]             # 0-based; incremented on each PM rejection (max 2)
+
+    # ── PM decision — post-analysis order decision ──────────────────────────
+    pm_decision_reasoning: Optional[str]        # PM rationale for order decision
+    _execute_orders: Optional[bool]             # routing flag: True → fan-out to order_reasoning + synthesizer
 
     # ── Function execution results (task_id → result dict) ───────────────────
     execution_results: Optional[Dict[str, Any]]
@@ -116,18 +127,24 @@ def make_initial_state(
         "_query_intent": None,
         "_delegate_quant": None,
         "_delegate_backtester": None,
+        "_delegate_order": None,
         "_quant_query": None,
         "_backtester_query": None,
+        "_order_query": None,
         "portfolio_task_queue": None,
         "quant_task_queue": None,
         "backtester_task_queue": None,
+        "order_task_queue": None,
         "portfolio_reasoning": None,
         "quant_reasoning": None,
         "backtester_reasoning": None,
+        "order_reasoning": None,
         "pm_review_approved": None,
         "pm_review_notes": None,
         "pm_review_edits": None,
         "review_iteration": 0,
+        "pm_decision_reasoning": None,
+        "_execute_orders": None,
         "execution_results": None,
         "final_response": None,
         "error": None,

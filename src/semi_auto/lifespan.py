@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 import src.semi_auto.app_state as _state
 from src.semi_auto.graph import build_graph
+from src.semi_auto.agents import init_all_agents
 from src.common.utils import get_logger, config as app_config
 from src.common.data_gatherer.data_coordinator import DataCoordinator
 from src.common.data_gatherer.db_stream_handlers import (
@@ -121,6 +122,10 @@ async def lifespan(app: FastAPI):
     logger.info("Compiling LangGraph...")
     _state._graph = build_graph()
     logger.info("[OK] Graph compiled with HITL interrupt_before=['executor_node']")
+
+    logger.info("Pre-warming LLM singletons...")
+    init_all_agents()
+    logger.info("[OK] All LLM singletons initialized")
 
     # ── Startup archival: clear stale live_trades from previous run ────────
     try:

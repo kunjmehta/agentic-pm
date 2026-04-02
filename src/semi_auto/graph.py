@@ -50,8 +50,10 @@ from src.semi_auto.nodes.guards import market_hours_guard
 from src.semi_auto.nodes.portfolio_node import portfolio_reasoning_node
 from src.semi_auto.nodes.quant_node import quant_reasoning_node
 from src.semi_auto.nodes.backtester_node import backtester_reasoning_node
+from src.semi_auto.nodes.order_node import order_reasoning_node
 from src.semi_auto.nodes.pm_review_node import pm_review_node
-from src.semi_auto.nodes.executor_node import executor_node
+from src.semi_auto.nodes.executor_node import executor_node, order_executor_node
+from src.semi_auto.nodes.pm_decision_node import pm_decision_node
 from src.semi_auto.nodes.synthesizer import synthesizer_node
 from src.common.utils import get_logger
 
@@ -104,7 +106,7 @@ def route_after_pm_reasoning(state: GraphState) -> str:
         if state.get("_delegate_backtester"):
             logger.info("[route] PM → backtester_reasoning_node (backtest intent)")
             return "backtester_reasoning_node"
-        logger.info("[route] PM → pm_review_node (backtest, no backtester delegation)")
+        logger.info("[route] PM → pm_review_node (backtest, no delegation)")
         return "pm_review_node"
     # quant intent: quant only — route_after_quant will not chain to backtester
     if intent == "quant":
@@ -113,7 +115,9 @@ def route_after_pm_reasoning(state: GraphState) -> str:
             return "quant_reasoning_node"
         logger.info("[route] PM → pm_review_node (quant, no quant delegation)")
         return "pm_review_node"
-    # full_analysis / portfolio / unknown: use delegation flags (quant first if set)
+    # full_analysis / portfolio / order / unknown: use delegation flags (quant first if set)
+    # Note: order intent no longer fast-paths to order_reasoning_node in pass 1.
+    # Orders are decided by pm_decision_node after analysis execution.
     if state.get("_delegate_quant"):
         logger.info("[route] PM → quant_reasoning_node")
         return "quant_reasoning_node"
@@ -147,7 +151,7 @@ def route_after_quant(state: GraphState) -> str:
 
 
 def route_after_backtester(state: GraphState) -> str:
-    """After backtester: always go to PM review.
+    """After backtester: route to order agent if needed, else PM review.
 
     Args:
         state: Current GraphState.
@@ -159,6 +163,22 @@ def route_after_backtester(state: GraphState) -> str:
         logger.info("[route] error after backtester → synthesizer_node")
         return "synthesizer_node"
     logger.info("[route] backtester done → pm_review_node")
+    return "pm_review_node"
+
+
+def route_after_order(state: GraphState) -> str:
+    """After order agent: always go to PM review.
+
+    Args:
+        state: Current GraphState.
+
+    Returns:
+        Next node name string.
+    """
+    if state.get("error"):
+        logger.info("[route] error after order_node → synthesizer_node")
+        return "synthesizer_node"
+    logger.info("[route] order_node done → pm_review_node")
     return "pm_review_node"
 
 
@@ -197,6 +217,26 @@ def route_after_pm_review(state: GraphState) -> str:
     return "executor_node"
 
 
+def route_after_pm_decision(state: GraphState) -> str:
+    """Fan-out after PM decision node.
+
+    When _execute_orders is True, sends state to order_reasoning_node.
+    Synthesizer always runs (order results will be merged into execution_results
+    by order_executor_node before synthesizer reads them only when orders run first).
+
+    Args:
+        state: Current GraphState.
+
+    Returns:
+        Next node name string.
+    """
+    if state.get("_execute_orders"):
+        logger.info("[route] PM decision → order_reasoning_node + synthesizer_node (parallel)")
+        return "order_reasoning_node"
+    logger.info("[route] PM decision → synthesizer_node (no orders)")
+    return "synthesizer_node"
+
+
 # ── Graph assembly ─────────────────────────────────────────────────────────────
 
 
@@ -223,8 +263,11 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
     builder.add_node("portfolio_reasoning_node", portfolio_reasoning_node)
     builder.add_node("quant_reasoning_node", quant_reasoning_node)
     builder.add_node("backtester_reasoning_node", backtester_reasoning_node)
+    builder.add_node("order_reasoning_node", order_reasoning_node)
     builder.add_node("pm_review_node", pm_review_node)
     builder.add_node("executor_node", executor_node)
+    builder.add_node("pm_decision_node", pm_decision_node)
+    builder.add_node("order_executor_node", order_executor_node)
     builder.add_node("synthesizer_node", synthesizer_node)
 
     # ── Fixed edges ────────────────────────────────────────────────────────
@@ -232,7 +275,9 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
     builder.add_edge("context_node", "classify_intent")
     builder.add_edge("classify_intent", "data_availability_node")
     builder.add_edge("data_availability_node", "market_hours_guard")
-    builder.add_edge("executor_node", "synthesizer_node")
+    builder.add_edge("executor_node", "pm_decision_node")
+    builder.add_edge("order_reasoning_node", "order_executor_node")
+    builder.add_edge("order_executor_node", "synthesizer_node")
     builder.add_edge("synthesizer_node", END)
 
     # ── Conditional edges ──────────────────────────────────────────────────
@@ -280,8 +325,17 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
         route_after_pm_review,
         {
             "executor_node": "executor_node",
-            "quant_reasoning_node": "quant_reasoning_node",          # revision cycle
+            "quant_reasoning_node": "quant_reasoning_node",           # revision cycle
             "backtester_reasoning_node": "backtester_reasoning_node", # revision cycle
+            "synthesizer_node": "synthesizer_node",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "pm_decision_node",
+        route_after_pm_decision,
+        {
+            "order_reasoning_node": "order_reasoning_node",
             "synthesizer_node": "synthesizer_node",
         },
     )
@@ -317,8 +371,10 @@ if __name__ == "__main__":
         "context_node", "classify_intent", "data_availability_node",
         "market_hours_guard",
         "portfolio_reasoning_node", "quant_reasoning_node",
-        "backtester_reasoning_node", "pm_review_node",
-        "executor_node", "synthesizer_node",
+        "backtester_reasoning_node", "order_reasoning_node",
+        "pm_review_node",
+        "executor_node", "pm_decision_node", "order_executor_node",
+        "synthesizer_node",
     }
     for node in expected_nodes:
         assert node in node_names, f"Missing node: {node}"

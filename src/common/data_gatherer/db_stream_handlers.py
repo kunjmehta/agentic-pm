@@ -382,73 +382,44 @@ async def _compute_and_save_indicators(symbol: str, timeframe: str, dao: AlpacaD
         # Generate and persist strategy signals from the same bars.
         strategy_enabled = config.get("strategy.enabled", default=True)
         if strategy_enabled:
-            await _generate_and_save_signals(symbol, timeframe, bars, config)
+            await _run_all_strategy_signals(symbol, timeframe, bars, config)
 
     except Exception as e:
         logger.error(f"❌ Failed to compute/save indicators for {symbol} {timeframe}: {e}", exc_info=True)
         logger.error(f"   Context: {len(bars) if 'bars' in locals() else 'unknown'} bars fetched")
 
 
-async def _generate_and_save_signals(
+async def _save_flat_signal(
     symbol: str,
     timeframe: str,
-    bars: "pd.DataFrame",
-    cfg,
+    strategy_name: str,
+    result: dict,
+    s_dao,
 ) -> None:
-    """Run mean-reversion signal generation on *bars* and persist to StrategyDAO.
+    """Persist any flat-result strategy signal dict to StrategyDAO.
 
-    Parameters are read from config so callers are not hard-coded:
-
-    * ``strategy.mean_reversion.threshold``  (default 2.5)
-    * ``strategy.mean_reversion.ma_period``  (default 20)
-    * ``strategy.mean_reversion.lookback``   (default 120)
-    * ``strategy.mean_reversion.sr_lookback`` (default 60)
+    Handles two result shapes:
+    - **Flat** (all 8 new strategies): result keys are directly action/
+      confidence/entry_price/stop_loss/take_profit/reason/current_price.
+    - **Nested mean-reversion** shape: pulls action/confidence/etc. from
+      ``trade_recommendation`` and statistics/signals from their sub-dicts.
 
     Args:
-        symbol: Stock ticker symbol.
-        timeframe: Bar timeframe string (e.g. ``'1Min'``, ``'1Day'``).
-        bars: DataFrame of OHLCV bars already fetched by the caller.
-        cfg: Config accessor instance (the module-level ``config`` object).
+        symbol: Stock ticker (already upper-cased).
+        timeframe: Bar timeframe string.
+        strategy_name: Canonical strategy name stored in DB.
+        result: Dict returned by the skill's ``analyze_bars`` or
+            ``generate_signals`` method.
+        s_dao: Open StrategyDAO instance managed by the caller.
     """
-    try:
-        from src.semi_auto.skills.quant.skills import MeanReversionSkill
-        from src.common.dao.strategy_dao import StrategyDAO
-
-        # --- Read strategy parameters from config (all have safe defaults) ---
-        threshold: float = cfg.get("strategy.mean_reversion.threshold", default=2.5)
-        ma_period: int = int(cfg.get("strategy.mean_reversion.ma_period", default=20))
-        lookback: int = int(cfg.get("strategy.mean_reversion.lookback", default=120))
-        sr_lookback: int = int(cfg.get("strategy.mean_reversion.sr_lookback", default=60))
-
-        if len(bars) < lookback:
-            logger.debug(
-                f"⏳ [{symbol}] Skipping signal generation — only {len(bars)} bars, need {lookback}"
-            )
-            return
-
-        # --- Run pure-DataFrame analysis (no extra network call) ---
-        skill = MeanReversionSkill()
-        result = skill.analyze_bars(
-            bars,
-            threshold=threshold,
-            ma_period=ma_period,
-            lookback=lookback,
-            sr_lookback=sr_lookback,
-        )
-
-        if "error" in result:
-            logger.warning(f"⚠ [{symbol}] Signal generation returned error: {result['error']}")
-            return
-
+    # Mean-reversion nested shape
+    if "trade_recommendation" in result:
         rec = result.get("trade_recommendation", {})
         signals = result.get("signals", {})
-
-        # --- Persist signal to StrategyDAO ---
-        s_dao = StrategyDAO()
         s_dao.save_strategy_result(
             symbol=symbol,
-            strategy_name="mean-reversion",
-            current_price=result.get("current_price", float(bars["close"].iloc[-1])),
+            strategy_name=strategy_name,
+            current_price=result.get("current_price", 0.0),
             statistics=result.get("statistics", {}),
             indicators={
                 "moving_averages": result.get("moving_averages", {}),
@@ -468,17 +439,302 @@ async def _generate_and_save_signals(
             timeframe=timeframe,
             model_used="rule-based",
         )
-        s_dao.close()
-
         logger.info(
-            f"✓ Signal generated for {symbol} {timeframe}: "
+            f"✓ [{strategy_name}] {symbol}/{timeframe}: "
             f"action={rec.get('action','hold')}  "
             f"confidence={rec.get('confidence', 0.0):.2f}  "
             f"state={signals.get('current_state', '?')}"
         )
+    else:
+        # Flat shape — all 8 new strategy wrappers
+        action = result.get("action", "hold")
+        confidence = float(result.get("confidence", 0.0))
+        s_dao.save_strategy_result(
+            symbol=symbol,
+            strategy_name=strategy_name,
+            current_price=float(result.get("current_price", 0.0)),
+            statistics={},
+            indicators={},
+            signals={"overall_signal": action},
+            action=action,
+            confidence=confidence,
+            reason=result.get("reason", ""),
+            entry_price=result.get("entry_price"),
+            stop_loss=result.get("stop_loss"),
+            take_profit=result.get("take_profit"),
+            current_state=action if action != "hold" else "neutral",
+            parameters={
+                k: v for k, v in result.items()
+                if k not in {"action", "confidence", "reason", "entry_price",
+                             "stop_loss", "take_profit", "current_price",
+                             "symbol", "timeframe", "timestamp", "error"}
+            },
+            timeframe=timeframe,
+            model_used="rule-based",
+        )
+        logger.info(
+            f"✓ [{strategy_name}] {symbol}/{timeframe}: "
+            f"action={action}  confidence={confidence:.2f}"
+        )
 
+
+async def _run_intraday_strategies(
+    symbol: str,
+    timeframe: str,
+    bars: "pd.DataFrame",
+    cfg,
+    s_dao,
+) -> None:
+    """Run all intraday strategies on the pre-fetched bar DataFrame.
+
+    Strategies and their minimum bar requirements:
+    - **mean-reversion**       — ``strategy.mean_reversion.lookback`` (default 120)
+    - **vwap-reversion**       — ``strategy.vwap_reversion.min_bars``  (default 26)
+    - **opening-range-breakout** — ``strategy.opening_range_breakout.range_bars`` (default 15) + 5
+    - **rsi-divergence**       — ``strategy.rsi_divergence.lookback`` (default 20)
+    - **momentum-burst**       — ``strategy.momentum_burst.min_bars``  (default 10)
+
+    Each strategy is silently skipped when bars < its minimum without failing
+    the others.
+
+    Args:
+        symbol: Stock ticker (upper-case).
+        timeframe: Intraday timeframe string.
+        bars: Full bar history DataFrame available at this point.
+        cfg: Config accessor.
+        s_dao: Open StrategyDAO instance managed by the caller.
+    """
+    from src.semi_auto.skills.quant.skills import (
+        MeanReversionSkill,
+        vwap_reversion_skill,
+        opening_range_breakout_skill,
+        rsi_divergence_scalp_skill,
+        momentum_burst_skill,
+    )
+
+    n = len(bars)
+
+    # ── mean-reversion ────────────────────────────────────────────────────────
+    mr_lookback: int = int(cfg.get("strategy.mean_reversion.lookback", default=120))
+    if n >= mr_lookback:
+        try:
+            skill = MeanReversionSkill()
+            result = skill.analyze_bars(
+                bars,
+                threshold=float(cfg.get("strategy.mean_reversion.threshold", default=2.5)),
+                ma_period=int(cfg.get("strategy.mean_reversion.ma_period", default=20)),
+                lookback=mr_lookback,
+                sr_lookback=int(cfg.get("strategy.mean_reversion.sr_lookback", default=60)),
+            )
+            if "error" not in result:
+                await _save_flat_signal(symbol, timeframe, "mean-reversion", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [mean-reversion] {symbol}: {exc}")
+
+    # ── vwap-reversion ────────────────────────────────────────────────────────
+    vwap_min: int = int(cfg.get("strategy.vwap_reversion.min_bars", default=26))
+    if n >= vwap_min:
+        try:
+            result = vwap_reversion_skill.analyze_bars(
+                bars,
+                dev_pct=float(cfg.get("strategy.vwap_reversion.dev_pct", default=0.005)),
+                vol_mult=float(cfg.get("strategy.vwap_reversion.vol_mult", default=2.0)),
+                stop_pct=float(cfg.get("strategy.vwap_reversion.stop_pct", default=0.003)),
+            )
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "vwap-reversion", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [vwap-reversion] {symbol}: {exc}")
+
+    # ── opening-range-breakout ────────────────────────────────────────────────
+    range_bars: int = int(cfg.get("strategy.opening_range_breakout.range_bars", default=15))
+    orb_min: int = range_bars + 5
+    if n >= orb_min:
+        try:
+            result = opening_range_breakout_skill.analyze_bars(bars, range_bars=range_bars)
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "opening-range-breakout", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [opening-range-breakout] {symbol}: {exc}")
+
+    # ── rsi-divergence ────────────────────────────────────────────────────────
+    rsi_lookback: int = int(cfg.get("strategy.rsi_divergence.lookback", default=20))
+    if n >= rsi_lookback:
+        try:
+            result = rsi_divergence_scalp_skill.analyze_bars(
+                bars,
+                lookback=rsi_lookback,
+                oversold=float(cfg.get("strategy.rsi_divergence.oversold", default=35.0)),
+            )
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "rsi-divergence", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [rsi-divergence] {symbol}: {exc}")
+
+    # ── momentum-burst ────────────────────────────────────────────────────────
+    mb_min: int = int(cfg.get("strategy.momentum_burst.min_bars", default=10))
+    if n >= mb_min:
+        try:
+            result = momentum_burst_skill.analyze_bars(
+                bars,
+                vol_mult=float(cfg.get("strategy.momentum_burst.vol_mult", default=3.0)),
+                min_move=float(cfg.get("strategy.momentum_burst.min_move", default=0.005)),
+                trail_pct=float(cfg.get("strategy.momentum_burst.trail_pct", default=0.002)),
+            )
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "momentum-burst", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [momentum-burst] {symbol}: {exc}")
+
+
+async def _run_daily_strategies(
+    symbol: str,
+    timeframe: str,
+    bars: "pd.DataFrame",
+    cfg,
+    s_dao,
+) -> None:
+    """Run all swing / daily strategies on the pre-fetched daily bar DataFrame.
+
+    Strategies and their minimum bar requirements:
+    - **mean-reversion-daily** — ``strategy.mean_reversion_daily.lookback`` (default 20)
+    - **golden-cross**          — ``strategy.golden_cross.slow`` (default 200)
+    - **breakout-52w**          — ``strategy.breakout_52w.lookback`` (default 252)
+    - **earnings-drift**        — ``strategy.earnings_drift.lookback`` (default 10)
+
+    Args:
+        symbol: Stock ticker (upper-case).
+        timeframe: ``"1Day"`` timeframe string.
+        bars: Full daily bar history DataFrame.
+        cfg: Config accessor.
+        s_dao: Open StrategyDAO instance managed by the caller.
+    """
+    from src.semi_auto.skills.quant.skills import (
+        mean_reversion_daily_skill,
+        golden_cross_skill,
+        breakout_52w_skill,
+        earnings_drift_skill,
+    )
+
+    n = len(bars)
+
+    # ── mean-reversion-daily ──────────────────────────────────────────────────
+    mrd_lookback: int = int(cfg.get("strategy.mean_reversion_daily.lookback", default=20))
+    if n >= mrd_lookback:
+        try:
+            result = mean_reversion_daily_skill.analyze_bars(
+                bars,
+                lookback=mrd_lookback,
+                threshold=float(cfg.get("strategy.mean_reversion_daily.threshold", default=2.5)),
+                ma_period=int(cfg.get("strategy.mean_reversion_daily.ma_period", default=20)),
+            )
+            if "error" not in result:
+                await _save_flat_signal(symbol, timeframe, "mean-reversion-daily", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [mean-reversion-daily] {symbol}: {exc}")
+
+    # ── golden-cross ──────────────────────────────────────────────────────────
+    gc_slow: int = int(cfg.get("strategy.golden_cross.slow", default=200))
+    if n >= gc_slow:
+        try:
+            result = golden_cross_skill.analyze_bars(
+                bars,
+                fast=int(cfg.get("strategy.golden_cross.fast", default=50)),
+                slow=gc_slow,
+            )
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "golden-cross", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [golden-cross] {symbol}: {exc}")
+
+    # ── breakout-52w ──────────────────────────────────────────────────────────
+    bk_lookback: int = int(cfg.get("strategy.breakout_52w.lookback", default=252))
+    if n >= bk_lookback:
+        try:
+            result = breakout_52w_skill.analyze_bars(
+                bars,
+                lookback=bk_lookback,
+                vol_mult=float(cfg.get("strategy.breakout_52w.vol_mult", default=1.5)),
+                trail_pct=float(cfg.get("strategy.breakout_52w.trail_pct", default=0.10)),
+            )
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "breakout-52w", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [breakout-52w] {symbol}: {exc}")
+
+    # ── earnings-drift ────────────────────────────────────────────────────────
+    ed_lookback: int = int(cfg.get("strategy.earnings_drift.lookback", default=10))
+    if n >= ed_lookback:
+        try:
+            result = earnings_drift_skill.analyze_bars(
+                bars,
+                lookback=ed_lookback,
+                min_move=float(cfg.get("strategy.earnings_drift.min_move", default=0.04)),
+                vol_mult=float(cfg.get("strategy.earnings_drift.vol_mult", default=2.0)),
+                hold_days=int(cfg.get("strategy.earnings_drift.hold_days", default=5)),
+            )
+            if "error" not in result:
+                result.setdefault("symbol", symbol)
+                await _save_flat_signal(symbol, timeframe, "earnings-drift", result, s_dao)
+        except Exception as exc:
+            logger.warning(f"⚠ [earnings-drift] {symbol}: {exc}")
+
+
+async def _run_all_strategy_signals(
+    symbol: str,
+    timeframe: str,
+    bars: "pd.DataFrame",
+    cfg,
+) -> None:
+    """Run all applicable strategies for *timeframe* and persist signals to DB.
+
+    Dispatches to two groups based on timeframe:
+
+    **Intraday** (``1Min``, ``5Min``, ``15Min``, ``1Hour``):
+        - mean-reversion (requires 120 bars by default)
+        - vwap-reversion  (requires 26 bars)
+        - opening-range-breakout (requires range_bars + 5, default 20)
+        - rsi-divergence  (requires 20 bars)
+        - momentum-burst  (requires 10 bars)
+
+    **Daily** (``1Day``):
+        - mean-reversion-daily (requires 20 bars)
+        - golden-cross  (requires 200 bars)
+        - breakout-52w  (requires 252 bars)
+        - earnings-drift (requires 10 bars)
+
+    All strategies share a single open StrategyDAO instance for the duration
+    of the call, avoiding repeated connection overhead.
+
+    Args:
+        symbol: Stock ticker symbol (upper-case).
+        timeframe: AlpacaDAO canonical timeframe string.
+        bars: Full bar history DataFrame fetched by the caller.
+        cfg: Config accessor (the module-level ``config`` object).
+    """
+    try:
+        from src.common.dao.strategy_dao import StrategyDAO
+        s_dao = StrategyDAO()
+        try:
+            if timeframe in ("1Min", "5Min", "15Min", "1Hour"):
+                await _run_intraday_strategies(symbol, timeframe, bars, cfg, s_dao)
+            elif timeframe == "1Day":
+                await _run_daily_strategies(symbol, timeframe, bars, cfg, s_dao)
+            else:
+                logger.debug(f"[strategy] No strategy group for timeframe={timeframe}")
+        finally:
+            s_dao.close()
     except Exception as exc:
-        logger.error(f"❌ Signal generation failed for {symbol} {timeframe}: {exc}", exc_info=True)
+        logger.error(
+            f"❌ _run_all_strategy_signals failed for {symbol} {timeframe}: {exc}",
+            exc_info=True,
+        )
 
 
 async def combined_trade_handler(trade):

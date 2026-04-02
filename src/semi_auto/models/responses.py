@@ -57,10 +57,12 @@ class TaskPreviewResponse(BaseModel):
     portfolio_reasoning: Optional[str] = None
     quant_reasoning: Optional[str] = None
     backtester_reasoning: Optional[str] = None
+    order_reasoning: Optional[str] = None
     pm_review_notes: Optional[str] = None   # PM supervisor verdict on sub-agent plans
     portfolio_tasks: List[Dict[str, Any]] = Field(default_factory=list)
     quant_tasks: List[Dict[str, Any]] = Field(default_factory=list)
     backtester_tasks: List[Dict[str, Any]] = Field(default_factory=list)
+    order_tasks: List[Dict[str, Any]] = Field(default_factory=list)
     message: str = "Review the planned tasks and call POST /v1/approve/{thread_id} to proceed"
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -75,11 +77,13 @@ class ApprovalRequest(BaseModel):
         modified_portfolio_tasks: Replacement for portfolio_task_queue in state.
         modified_quant_tasks: Replacement for quant_task_queue in state.
         modified_backtester_tasks: Replacement for backtester_task_queue in state.
+        modified_order_tasks: Replacement for order_task_queue in state.
     """
 
     modified_portfolio_tasks: Optional[List[Dict[str, Any]]] = None
     modified_quant_tasks: Optional[List[Dict[str, Any]]] = None
     modified_backtester_tasks: Optional[List[Dict[str, Any]]] = None
+    modified_order_tasks: Optional[List[Dict[str, Any]]] = None
 
 
 class SemiAutoResponse(BaseModel):

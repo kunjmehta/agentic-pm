@@ -324,6 +324,271 @@ class HistoricalDataInput(DataAvailabilityInput):
 
 
 # ===========================================================================
+# New Quant Strategy — Input Models
+# (8 strategies: 4 day-trading + 4 swing; added to registry)
+# ===========================================================================
+
+
+class _StrategyBaseInput(BaseModel):
+    """Shared base for the 8 new quant strategy inputs.
+
+    Provides symbol normalisation, timeframe alias resolution, and date-pair
+    validation. Concrete subclasses override ``timeframe`` and ``lookback_days``
+    defaults to match the strategy's natural operating mode.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    symbol: str = Field(description="Stock ticker symbol")
+    timeframe: str
+    lookback_days: int
+    start_date: Optional[str] = Field(
+        default=None, description="YYYY-MM-DD — enables historical mode"
+    )
+    end_date: Optional[str] = Field(
+        default=None, description="YYYY-MM-DD — enables historical mode"
+    )
+
+    @field_validator("symbol")
+    @classmethod
+    def upper_symbol(cls, v: str) -> str:
+        return v.strip().upper()
+
+    @field_validator("timeframe")
+    @classmethod
+    def normalise_timeframe(cls, v: str) -> str:
+        return _normalise_timeframe(v)
+
+    @model_validator(mode="after")
+    def check_date_pair(self) -> "_StrategyBaseInput":
+        has_start = self.start_date is not None
+        has_end = self.end_date is not None
+        if has_start != has_end:
+            raise ValueError(
+                "Both start_date and end_date must be provided together "
+                f"(got start_date={self.start_date!r}, end_date={self.end_date!r})"
+            )
+        if has_start and has_end and self.start_date >= self.end_date:
+            raise ValueError(
+                f"start_date {self.start_date!r} must be strictly before end_date {self.end_date!r}"
+            )
+        return self
+
+    @property
+    def is_historical(self) -> bool:
+        """Return True when both date bounds are set."""
+        return self.start_date is not None and self.end_date is not None
+
+
+# -- Day-trading strategies (default timeframe: 1Min) ----------------------
+
+
+class VWAPReversionInput(_StrategyBaseInput):
+    """Input for ``vwap_reversion_analyze`` — intraday VWAP mean-reversion.
+
+    Attributes:
+        timeframe: Default ``"1Min"``.
+        lookback_days: Calendar days of intraday bars to fetch. Default 5.
+        dev_pct: VWAP deviation threshold (fraction). Default 0.5%.
+        vol_mult: Volume spike multiplier for confirmation. Default 2.0×.
+        stop_pct: Stop-loss distance from entry (fraction). Default 0.3%.
+    """
+
+    timeframe: str = Field(default="1Min")
+    lookback_days: int = Field(default=5, ge=1, le=30)
+    dev_pct: float = Field(
+        default=0.005, ge=0.001, le=0.05,
+        description="VWAP deviation threshold (fraction). Default 0.5%.",
+    )
+    vol_mult: float = Field(
+        default=2.0, ge=0.5, le=10.0,
+        description="Volume spike multiplier for confirmation.",
+    )
+    stop_pct: float = Field(
+        default=0.003, ge=0.001, le=0.05,
+        description="Stop-loss distance from entry (fraction). Default 0.3%.",
+    )
+
+
+class OpeningRangeBreakoutInput(_StrategyBaseInput):
+    """Input for ``opening_range_breakout_analyze`` — first-N-bar range breakout.
+
+    Attributes:
+        timeframe: Default ``"1Min"``.
+        lookback_days: Calendar days to fetch. Default 2.
+        range_bars: Bars defining the opening range (default 15 = first 15 minutes).
+    """
+
+    timeframe: str = Field(default="1Min")
+    lookback_days: int = Field(default=2, ge=1, le=10)
+    range_bars: int = Field(
+        default=15, ge=5, le=60,
+        description="Number of bars defining the opening range.",
+    )
+
+
+class RSIDivergenceInput(_StrategyBaseInput):
+    """Input for ``rsi_divergence_analyze`` — bullish/bearish RSI divergence scalp.
+
+    Attributes:
+        timeframe: Default ``"1Min"``.
+        lookback_days: Calendar days to fetch. Default 5.
+        lookback: Bars to scan for divergence. Default 20.
+        oversold: RSI oversold threshold (overbought mirror = 100 - oversold). Default 35.
+    """
+
+    timeframe: str = Field(default="1Min")
+    lookback_days: int = Field(default=5, ge=1, le=30)
+    lookback: int = Field(
+        default=20, ge=5, le=100,
+        description="Number of bars to scan for divergence.",
+    )
+    oversold: float = Field(
+        default=35.0, ge=10.0, le=50.0,
+        description="RSI oversold threshold.",
+    )
+
+
+class MomentumBurstInput(_StrategyBaseInput):
+    """Input for ``momentum_burst_analyze`` — explosive volume+price momentum.
+
+    Attributes:
+        timeframe: Default ``"1Min"``.
+        lookback_days: Calendar days to fetch. Default 3.
+        vol_mult: Volume spike multiplier. Default 3.0×.
+        min_move: Minimum bar price move (fraction). Default 0.5%.
+        trail_pct: Trailing stop distance (fraction). Default 0.2%.
+    """
+
+    timeframe: str = Field(default="1Min")
+    lookback_days: int = Field(default=3, ge=1, le=14)
+    vol_mult: float = Field(
+        default=3.0, ge=1.0, le=10.0,
+        description="Volume spike multiplier.",
+    )
+    min_move: float = Field(
+        default=0.005, ge=0.001, le=0.05,
+        description="Minimum bar price move (fraction).",
+    )
+    trail_pct: float = Field(
+        default=0.002, ge=0.001, le=0.02,
+        description="Trailing stop distance (fraction).",
+    )
+
+
+# -- Swing / multi-day strategies (default timeframe: 1Day) ----------------
+
+
+class GoldenCrossInput(_StrategyBaseInput):
+    """Input for ``golden_cross_analyze`` — SMA-50/200 crossover on daily bars.
+
+    Attributes:
+        timeframe: Default ``"1Day"``.
+        lookback_days: Calendar days to fetch. Default 365.
+        fast: Fast SMA period. Default 50.
+        slow: Slow SMA period. Default 200.
+    """
+
+    timeframe: str = Field(default="1Day")
+    lookback_days: int = Field(default=365, ge=200, le=730)
+    fast: int = Field(default=50, ge=5, le=100, description="Fast SMA period.")
+    slow: int = Field(default=200, ge=50, le=500, description="Slow SMA period.")
+
+    @model_validator(mode="after")
+    def check_sma_order(self) -> "GoldenCrossInput":
+        """Ensure fast < slow."""
+        if self.fast >= self.slow:
+            raise ValueError(f"fast ({self.fast}) must be less than slow ({self.slow})")
+        return self
+
+
+class Breakout52WInput(_StrategyBaseInput):
+    """Input for ``breakout_52w_analyze`` — 52-week high breakout with volume confirmation.
+
+    Attributes:
+        timeframe: Default ``"1Day"``.
+        lookback_days: Calendar days to fetch. Default 400.
+        lookback: Prior-high scan window in bars (252 = 1 trading year).
+        vol_mult: Volume multiplier for breakout confirmation. Default 1.5×.
+        trail_pct: Trailing stop distance (fraction). Default 10%.
+    """
+
+    timeframe: str = Field(default="1Day")
+    lookback_days: int = Field(default=400, ge=252, le=730)
+    lookback: int = Field(
+        default=252, ge=60, le=504,
+        description="Prior-high scan window in bars (252 = 1 trading year).",
+    )
+    vol_mult: float = Field(
+        default=1.5, ge=0.5, le=5.0,
+        description="Volume multiplier for breakout confirmation.",
+    )
+    trail_pct: float = Field(
+        default=0.10, ge=0.01, le=0.30,
+        description="Trailing stop distance (fraction). Default 10%.",
+    )
+
+
+class MeanReversionDailyInput(_StrategyBaseInput):
+    """Input for ``mean_reversion_daily_analyze`` — daily-bar Z-score mean reversion.
+
+    Attributes:
+        timeframe: Default ``"1Day"``.
+        lookback_days: Calendar days to fetch. Default 90.
+        lookback: Daily bars for the statistics window. Default 20.
+        threshold: Z-score entry threshold (higher than intraday default 2.0). Default 2.5.
+        ma_period: Moving average period for Bollinger calculation. Default 20.
+    """
+
+    timeframe: str = Field(default="1Day")
+    lookback_days: int = Field(default=90, ge=21, le=365)
+    lookback: int = Field(
+        default=20, ge=10, le=100,
+        description="Daily bars for the statistics window.",
+    )
+    threshold: float = Field(
+        default=2.5, ge=0.5, le=5.0,
+        description="Z-score entry threshold.",
+    )
+    ma_period: int = Field(
+        default=20, ge=5, le=100,
+        description="Moving average period.",
+    )
+
+
+class EarningsDriftInput(_StrategyBaseInput):
+    """Input for ``earnings_drift_analyze`` — post-earnings momentum drift ride.
+
+    Attributes:
+        timeframe: Default ``"1Day"``.
+        lookback_days: Calendar days to fetch. Default 60.
+        lookback: Catalyst scan window in bars. Default 10.
+        min_move: Minimum catalyst-day move (fraction). Default 4%.
+        vol_mult: Volume multiplier for catalyst-day confirmation. Default 2.0×.
+        hold_days: Sessions to hold the drift position. Default 5.
+    """
+
+    timeframe: str = Field(default="1Day")
+    lookback_days: int = Field(default=60, ge=10, le=365)
+    lookback: int = Field(
+        default=10, ge=5, le=60,
+        description="Catalyst scan window in bars.",
+    )
+    min_move: float = Field(
+        default=0.04, ge=0.01, le=0.20,
+        description="Minimum catalyst-day move (fraction). Default 4%.",
+    )
+    vol_mult: float = Field(
+        default=2.0, ge=0.5, le=10.0,
+        description="Volume multiplier for catalyst-day confirmation.",
+    )
+    hold_days: int = Field(
+        default=5, ge=1, le=30,
+        description="Sessions to hold the drift position.",
+    )
+
+
+# ===========================================================================
 # Quant Skill — Output Models
 # ===========================================================================
 
@@ -602,6 +867,46 @@ class MeanReversionOutput(BaseModel):
     parameters: Optional[Dict[str, Any]] = None
     timeframe: str = "1Day"
     timestamp: str = ""
+    error: Optional[str] = None
+
+
+class StrategySignalOutput(BaseModel):
+    """Generic signal output for all 8 new quant strategy wrappers.
+
+    Covers flat-result strategies (VWAP reversion, opening range breakout,
+    RSI divergence, momentum burst, golden cross, 52-week breakout,
+    mean reversion daily, earnings drift). Extra fields emitted by individual
+    strategies (e.g. ``deviation_pct``, ``high_52w``, ``bar_return_pct``) are
+    preserved via ``extra="allow"``.
+
+    Attributes:
+        symbol: Stock ticker.
+        action: ``"buy"`` | ``"sell"`` | ``"hold"``.
+        confidence: Conviction score 0–1.
+        timeframe: Bar timeframe used for analysis.
+        timestamp: ISO-8601 timestamp of the analysis.
+        entry_price: Suggested entry price (null for hold).
+        stop_loss: Stop-loss price (null for hold).
+        take_profit: Take-profit target (null for hold).
+        current_price: Latest bar close price.
+        reason: Human-readable explanation.
+        mode: ``"live"`` | ``"historical"``.
+        error: Error message if computation failed.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    symbol: str = ""
+    action: str = "hold"
+    confidence: float = 0.0
+    timeframe: Optional[str] = None
+    timestamp: Optional[str] = None
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    current_price: Optional[float] = None
+    reason: Optional[str] = None
+    mode: str = "live"
     error: Optional[str] = None
 
 

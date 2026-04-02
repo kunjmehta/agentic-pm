@@ -66,6 +66,16 @@ from src.semi_auto.skills.quant.skills import (
     volume_skill as _volume_skill,
     candlestick_skill as _candlestick_skill,
     mean_reversion_skill as _mean_reversion_skill,
+    # Strategy singletons (day-trading)
+    vwap_reversion_skill as _vwap_reversion_skill,
+    opening_range_breakout_skill as _opening_range_breakout_skill,
+    rsi_divergence_scalp_skill as _rsi_divergence_scalp_skill,
+    momentum_burst_skill as _momentum_burst_skill,
+    # Strategy singletons (swing / multi-day)
+    golden_cross_skill as _golden_cross_skill,
+    breakout_52w_skill as _breakout_52w_skill,
+    mean_reversion_daily_skill as _mean_reversion_daily_skill,
+    earnings_drift_skill as _earnings_drift_skill,
     # Legacy function aliases (used by _calc_*_wrapped helpers below)
     calc_momentum_package as _calc_momentum_raw,
     calc_volatility_bands as _calc_volatility_raw,
@@ -488,6 +498,416 @@ def _mean_reversion_analyze(
     except Exception as exc:
         logger.warning(f"[registry] mean_reversion_analyze failed for {inp.symbol}: {exc}")
         return _out(MeanReversionOutput, {"error": str(exc), "symbol": inp.symbol})
+
+
+# ── Day-trading strategy wrappers ─────────────────────────────────────────────
+
+
+def _vwap_reversion_wrapped(
+    symbol: str,
+    timeframe: str = "1Min",
+    lookback_days: int = 5,
+    dev_pct: float = 0.005,
+    vol_mult: float = 2.0,
+    stop_pct: float = 0.003,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """VWAP intraday reversion — detect deviation from VWAP and fade back.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Min"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 5.
+        dev_pct: VWAP deviation threshold (fraction). Default 0.005 (0.5%).
+        vol_mult: Volume spike multiplier. Default 2.0×.
+        stop_pct: Stop-loss distance from entry (fraction). Default 0.3%.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, entry_price, stop_loss, take_profit — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("vwap_reversion_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _vwap_reversion_skill.analyze_bars(df, dev_pct=dev_pct, vol_mult=vol_mult, stop_pct=stop_pct)
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _vwap_reversion_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+                dev_pct=dev_pct, vol_mult=vol_mult, stop_pct=stop_pct,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] vwap_reversion_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+def _opening_range_breakout_wrapped(
+    symbol: str,
+    timeframe: str = "1Min",
+    lookback_days: int = 2,
+    range_bars: int = 15,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Opening range breakout — trade breakouts beyond the first ``range_bars`` candles.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Min"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 2.
+        range_bars: Number of opening bars that define the range. Default 15.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, breakout_side, stop_loss, take_profit — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("opening_range_breakout_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _opening_range_breakout_skill.analyze_bars(df, range_bars=range_bars)
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _opening_range_breakout_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days, range_bars=range_bars,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] opening_range_breakout_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+def _rsi_divergence_wrapped(
+    symbol: str,
+    timeframe: str = "1Min",
+    lookback_days: int = 5,
+    lookback: int = 20,
+    oversold: float = 35.0,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """RSI divergence scalp — detect bullish/bearish RSI divergence for scalp entries.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Min"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 5.
+        lookback: Number of bars to scan for divergence. Default 20.
+        oversold: RSI oversold threshold. Default 35.0.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, current_rsi, divergence_type — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("rsi_divergence_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _rsi_divergence_scalp_skill.analyze_bars(df, lookback=lookback, oversold=oversold)
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _rsi_divergence_scalp_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+                lookback=lookback, oversold=oversold,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] rsi_divergence_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+def _momentum_burst_wrapped(
+    symbol: str,
+    timeframe: str = "1Min",
+    lookback_days: int = 3,
+    vol_mult: float = 3.0,
+    min_move: float = 0.005,
+    trail_pct: float = 0.002,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Momentum burst — detect explosive volume+price bars for momentum entries.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Min"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 3.
+        vol_mult: Volume spike multiplier. Default 3.0×.
+        min_move: Minimum bar price move (fraction). Default 0.5%.
+        trail_pct: Trailing stop distance (fraction). Default 0.2%.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, bar_return_pct, volume_ratio — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("momentum_burst_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _momentum_burst_skill.analyze_bars(df, vol_mult=vol_mult, min_move=min_move, trail_pct=trail_pct)
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _momentum_burst_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+                vol_mult=vol_mult, min_move=min_move, trail_pct=trail_pct,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] momentum_burst_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+# ── Swing / multi-day strategy wrappers ───────────────────────────────────────
+
+
+def _golden_cross_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 365,
+    fast: int = 50,
+    slow: int = 200,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Golden / death cross — SMA-50 vs SMA-200 crossover signal on daily bars.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Day"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 365.
+        fast: Fast SMA period. Default 50.
+        slow: Slow SMA period. Default 200.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, sma_fast, sma_slow, cross_type — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("golden_cross_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _golden_cross_skill.analyze_bars(df, fast=fast, slow=slow)
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _golden_cross_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days, fast=fast, slow=slow,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] golden_cross_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+def _breakout_52w_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 400,
+    lookback: int = 252,
+    vol_mult: float = 1.5,
+    trail_pct: float = 0.10,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """52-week breakout — new annual high with volume confirmation.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Day"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 400.
+        lookback: Prior-high scan window in bars. Default 252.
+        vol_mult: Volume multiplier for confirmation. Default 1.5×.
+        trail_pct: Trailing stop distance (fraction). Default 10%.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, high_52w, current_price, volume_ratio — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("breakout_52w_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _breakout_52w_skill.analyze_bars(df, lookback=lookback, vol_mult=vol_mult, trail_pct=trail_pct)
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _breakout_52w_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+                lookback=lookback, vol_mult=vol_mult, trail_pct=trail_pct,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] breakout_52w_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+def _mean_reversion_daily_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 90,
+    lookback: int = 20,
+    threshold: float = 2.5,
+    ma_period: int = 20,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Daily mean reversion — Z-score + Bollinger analysis on daily bars.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Day"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 90.
+        lookback: Daily bars for statistics window. Default 20.
+        threshold: Z-score entry threshold. Default 2.5.
+        ma_period: Moving average period. Default 20.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Full analysis dict with statistics, signals, trade_recommendation — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("mean_reversion_daily_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _mean_reversion_daily_skill.analyze_bars(
+                df, lookback=lookback, threshold=threshold, ma_period=ma_period,
+            )
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _mean_reversion_daily_skill.generate_signals(
+                symbol=symbol, lookback=lookback, threshold=threshold,
+                ma_period=ma_period, timeframe=timeframe,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] mean_reversion_daily_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
+
+
+def _earnings_drift_wrapped(
+    symbol: str,
+    timeframe: str = "1Day",
+    lookback_days: int = 60,
+    lookback: int = 10,
+    min_move: float = 0.04,
+    vol_mult: float = 2.0,
+    hold_days: int = 5,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **_extra,
+) -> Dict:
+    """Earnings drift — ride post-earnings momentum for ``hold_days`` sessions.
+
+    Supports two modes:
+    - **Live mode** (default): fetches recent bars using ``lookback_days`` from today.
+    - **Historical mode**: analyzes a specific date range when ``start_date`` and
+      ``end_date`` are both provided.
+
+    Args:
+        symbol: Stock ticker.
+        timeframe: Bar resolution. Default ``"1Day"``.
+        lookback_days: Calendar days to fetch (live mode only). Default 60.
+        lookback: Catalyst scan window in bars. Default 10.
+        min_move: Minimum catalyst-day move (fraction). Default 4%.
+        vol_mult: Volume multiplier for catalyst day. Default 2.0×.
+        hold_days: Drift hold window in sessions. Default 5.
+        start_date: Optional start date "YYYY-MM-DD" (enables historical mode).
+        end_date: Optional end date "YYYY-MM-DD" (enables historical mode).
+
+    Returns:
+        Signal dict with action, confidence, catalyst_move, days_since, take_profit — or error dict.
+    """
+    symbol = symbol.upper().strip()
+    try:
+        if start_date and end_date:
+            df = _fetch_bars_range("earnings_drift_analyze", symbol, start_date, end_date, timeframe)
+            if df is None:
+                return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
+            result = _earnings_drift_skill.analyze_bars(
+                df, lookback=lookback, min_move=min_move, vol_mult=vol_mult, hold_days=hold_days,
+            )
+            result.update({"symbol": symbol, "timeframe": timeframe,
+                           "start_date": start_date, "end_date": end_date, "mode": "historical"})
+        else:
+            result = _earnings_drift_skill.generate_signals(
+                symbol=symbol, timeframe=timeframe, lookback_days=lookback_days,
+                lookback=lookback, min_move=min_move, vol_mult=vol_mult, hold_days=hold_days,
+            )
+        return _to_native(result)
+    except Exception as exc:
+        logger.warning(f"[registry] earnings_drift_analyze failed for {symbol}: {exc}")
+        return {"error": str(exc), "symbol": symbol}
 
 
 def _backtest_strategy(
@@ -1033,6 +1453,140 @@ def _execute_strategy_signal_wrapped(
     except Exception as exc:
         logger.warning(f"[registry] execute_strategy_signal failed for {symbol}: {exc}")
         return {"status": "error", "error": str(exc), "symbol": symbol, "signal": signal}
+
+
+# ── Raw Alpaca order wrappers (order_node) ─────────────────────────────────────
+
+def _fetch_orders_wrapped(
+    status: str = "all",
+    limit: int = 100,
+    **kwargs,
+) -> Dict:
+    """Fetch orders from Alpaca with optional status / limit filters.
+
+    Args:
+        status: ``'open'`` | ``'closed'`` | ``'all'`` (default ``'all'``).
+        limit: Maximum number of orders to return (default 100).
+
+    Returns:
+        List of order dicts inside ``{"orders": [...], "count": int}``.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import fetch_orders as _fetch
+        orders = _fetch(status=status, limit=limit)
+        return {"orders": orders, "count": len(orders)}
+    except Exception as exc:
+        logger.warning(f"[registry] fetch_orders failed: {exc}")
+        return {"status": "error", "error": str(exc)}
+
+
+def _place_market_order_wrapped(
+    symbol: str,
+    qty: float,
+    side: str,
+    **kwargs,
+) -> Dict:
+    """Place a market order via Alpaca.
+
+    Args:
+        symbol: Stock ticker.
+        qty: Shares to buy or sell (> 0).
+        side: ``'buy'`` or ``'sell'``.
+
+    Returns:
+        Order result dict with id, symbol, qty, side, type, status.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import place_market_order as _place
+        return _place(symbol=symbol, qty=qty, side=side)
+    except Exception as exc:
+        logger.warning(f"[registry] place_market_order failed ({side} {qty} {symbol}): {exc}")
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
+def _place_limit_order_wrapped(
+    symbol: str,
+    qty: float,
+    side: str,
+    limit_price: float,
+    time_in_force: str = "day",
+    **kwargs,
+) -> Dict:
+    """Place a limit order via Alpaca.
+
+    Args:
+        symbol: Stock ticker.
+        qty: Shares to buy or sell (> 0).
+        side: ``'buy'`` or ``'sell'``.
+        limit_price: Price cap (buy) or floor (sell).
+        time_in_force: ``'day'`` | ``'gtc'`` | ``'ioc'`` | ``'fok'`` (default ``'day'``).
+
+    Returns:
+        Order result dict with id, symbol, qty, type, limit_price, status.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import place_limit_order as _place
+        return _place(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"[registry] place_limit_order failed ({side} {qty} {symbol} @ {limit_price}): {exc}"
+        )
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
+def _cancel_order_wrapped(order_id: str, **kwargs) -> Dict:
+    """Cancel an open order by its UUID.
+
+    Args:
+        order_id: Alpaca order UUID string.
+
+    Returns:
+        ``{"order_id": str, "status": "cancelled", "timestamp": str}``.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import cancel_order as _cancel
+        return _cancel(order_id=order_id)
+    except Exception as exc:
+        logger.warning(f"[registry] cancel_order failed ({order_id}): {exc}")
+        return {"status": "error", "error": str(exc), "order_id": order_id}
+
+
+def _cancel_all_orders_wrapped(**kwargs) -> Dict:
+    """Cancel all open orders.
+
+    Returns:
+        ``{"cancelled_count": int, "status": "all_cancelled", "timestamp": str}``.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import cancel_all_orders as _cancel_all
+        return _cancel_all()
+    except Exception as exc:
+        logger.warning(f"[registry] cancel_all_orders failed: {exc}")
+        return {"status": "error", "error": str(exc)}
+
+
+def _close_all_positions_wrapped(cancel_orders_first: bool = True, **kwargs) -> Dict:
+    """Liquidate all open positions at market price.
+
+    Args:
+        cancel_orders_first: Cancel open orders before closing positions
+            (default ``True`` to avoid partial-fill conflicts).
+
+    Returns:
+        ``{"closed_count": int, "status": "all_closed", "timestamp": str}``.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import close_all_positions as _close_all
+        return _close_all(cancel_orders_first=cancel_orders_first)
+    except Exception as exc:
+        logger.warning(f"[registry] close_all_positions failed: {exc}")
+        return {"status": "error", "error": str(exc)}
 
 
 def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
@@ -1584,6 +2138,16 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "calc_volume_flow":        _calc_volume_wrapped,
     "analyze_candle_structure": _analyze_candles_wrapped,
     "mean_reversion_analyze":  _mean_reversion_analyze,
+    # ── Quant strategies — day trading ───────────────────────────────────────
+    "vwap_reversion_analyze":           _vwap_reversion_wrapped,
+    "opening_range_breakout_analyze":   _opening_range_breakout_wrapped,
+    "rsi_divergence_analyze":           _rsi_divergence_wrapped,
+    "momentum_burst_analyze":           _momentum_burst_wrapped,
+    # ── Quant strategies — swing / multi-day ─────────────────────────────────
+    "golden_cross_analyze":             _golden_cross_wrapped,
+    "breakout_52w_analyze":             _breakout_52w_wrapped,
+    "mean_reversion_daily_analyze":     _mean_reversion_daily_wrapped,
+    "earnings_drift_analyze":           _earnings_drift_wrapped,
     # ── Backtester core ───────────────────────────────────────────────────────
     "backtest_strategy":       _backtest_strategy,
     # ── AlpacaDAO market data ─────────────────────────────────────────────────
@@ -1623,11 +2187,18 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "save_eod_snapshot":       _save_eod_snapshot_wrapped,
     "snapshot_worth":          _snapshot_worth_wrapped,
     "swap_positions":          _swap_positions_wrapped,
-    # ── Order execution & strategy scaling (new) ──────────────────────────────
+    # ── Order execution & strategy scaling ───────────────────────────────────
     "execute_order":           _execute_order_wrapped,
     "close_position":          _close_position_wrapped,
     "scale_position":          _scale_position_wrapped,
     "execute_strategy_signal": _execute_strategy_signal_wrapped,
+    # ── Raw Alpaca order operations (order_node) ───────────────────────────
+    "fetch_orders":            _fetch_orders_wrapped,
+    "place_market_order":      _place_market_order_wrapped,
+    "place_limit_order":       _place_limit_order_wrapped,
+    "cancel_order":            _cancel_order_wrapped,
+    "cancel_all_orders":       _cancel_all_orders_wrapped,
+    "close_all_positions":     _close_all_positions_wrapped,
 }
 
 # Filter out None entries at load time so executor can detect unavailable fns
@@ -1717,6 +2288,109 @@ def get_registry_schema() -> Dict[str, Any]:
                 "symbol": "str",
                 "lookback": "int — default 60",
                 "threshold": "float — default 2.0",
+            },
+        },
+        # ── Day-trading strategies ────────────────────────────────────────────
+        "vwap_reversion_analyze": {
+            "description": "VWAP intraday reversion — detect deviation from VWAP and fade back to it.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Min'",
+                "lookback_days": "int — default 5",
+                "dev_pct": "float — VWAP deviation threshold, default 0.005 (0.5%)",
+                "vol_mult": "float — volume spike multiplier, default 2.0",
+                "stop_pct": "float — stop-loss distance, default 0.003 (0.3%)",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        "opening_range_breakout_analyze": {
+            "description": "Opening range breakout — trade breakouts beyond the first N-bar opening range.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Min'",
+                "lookback_days": "int — default 2",
+                "range_bars": "int — opening range bar count, default 15",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        "rsi_divergence_analyze": {
+            "description": "RSI divergence scalp — detect bullish/bearish RSI divergence for scalp entries.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Min'",
+                "lookback_days": "int — default 5",
+                "lookback": "int — divergence scan window, default 20",
+                "oversold": "float — RSI oversold threshold, default 35.0",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        "momentum_burst_analyze": {
+            "description": "Momentum burst — detect explosive volume+price bars for momentum entries.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Min'",
+                "lookback_days": "int — default 3",
+                "vol_mult": "float — volume spike multiplier, default 3.0",
+                "min_move": "float — minimum bar price move, default 0.005 (0.5%)",
+                "trail_pct": "float — trailing stop distance, default 0.002 (0.2%)",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        # ── Swing / multi-day strategies ──────────────────────────────────────
+        "golden_cross_analyze": {
+            "description": "Golden/death cross — SMA-50 vs SMA-200 crossover signal on daily bars.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Day'",
+                "lookback_days": "int — default 365",
+                "fast": "int — fast SMA period, default 50",
+                "slow": "int — slow SMA period, default 200",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        "breakout_52w_analyze": {
+            "description": "52-week breakout — new annual high with volume confirmation.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Day'",
+                "lookback_days": "int — default 400",
+                "lookback": "int — prior-high scan window, default 252",
+                "vol_mult": "float — volume multiplier, default 1.5",
+                "trail_pct": "float — trailing stop distance, default 0.10 (10%)",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        "mean_reversion_daily_analyze": {
+            "description": "Daily mean reversion — Z-score + Bollinger analysis on daily bars (higher threshold than intraday).",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Day'",
+                "lookback_days": "int — default 90",
+                "lookback": "int — daily bars for statistics, default 20",
+                "threshold": "float — Z-score entry threshold, default 2.5",
+                "ma_period": "int — moving average period, default 20",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
+            },
+        },
+        "earnings_drift_analyze": {
+            "description": "Earnings drift — ride post-earnings momentum for hold_days sessions.",
+            "params": {
+                "symbol": "str",
+                "timeframe": "str — default '1Day'",
+                "lookback_days": "int — default 60",
+                "lookback": "int — catalyst scan window, default 10",
+                "min_move": "float — minimum catalyst-day move, default 0.04 (4%)",
+                "vol_mult": "float — volume multiplier for catalyst day, default 2.0",
+                "hold_days": "int — drift hold window in sessions, default 5",
+                "start_date": "str — YYYY-MM-DD (enables historical mode)",
+                "end_date": "str — YYYY-MM-DD (enables historical mode)",
             },
         },
         "backtest_strategy": {
@@ -1909,6 +2583,53 @@ def get_registry_schema() -> Dict[str, Any]:
             },
             "note": "REQUIRES HUMAN APPROVAL \u2014 always present to the user before executing",
         },
+        # \u2500\u2500 Raw Alpaca order operations (order_node) \u2500\u2500
+        "fetch_orders": {
+            "description": "List orders from Alpaca with optional status and limit filters.",
+            "params": {
+                "status": "str \u2014 'open' | 'closed' | 'all' (default 'all')",
+                "limit": "int \u2014 max orders to return (default 100)",
+            },
+        },
+        "place_market_order": {
+            "description": "Place a market order for immediate execution at the best available price.",
+            "params": {
+                "symbol": "str",
+                "qty": "float \u2014 number of shares (> 0)",
+                "side": "str \u2014 'buy' or 'sell'",
+            },
+            "note": "REQUIRES HUMAN APPROVAL",
+        },
+        "place_limit_order": {
+            "description": "Place a limit order that executes only at the specified price or better.",
+            "params": {
+                "symbol": "str",
+                "qty": "float \u2014 number of shares (> 0)",
+                "side": "str \u2014 'buy' or 'sell'",
+                "limit_price": "float \u2014 price cap (buy) or floor (sell)",
+                "time_in_force": "str \u2014 'day' | 'gtc' | 'ioc' | 'fok' (default 'day')",
+            },
+            "note": "REQUIRES HUMAN APPROVAL",
+        },
+        "cancel_order": {
+            "description": "Cancel a specific open order by its Alpaca UUID.",
+            "params": {
+                "order_id": "str \u2014 Alpaca order UUID",
+            },
+            "note": "REQUIRES HUMAN APPROVAL",
+        },
+        "cancel_all_orders": {
+            "description": "Cancel all open orders at once.",
+            "params": {},
+            "note": "REQUIRES HUMAN APPROVAL",
+        },
+        "close_all_positions": {
+            "description": "Liquidate all open positions at market price.",
+            "params": {
+                "cancel_orders_first": "bool \u2014 cancel open orders before closing (default True)",
+            },
+            "note": "REQUIRES HUMAN APPROVAL",
+        },
     }
 
 
@@ -1925,11 +2646,11 @@ if __name__ == "__main__":
         status = "[OK]" if fn is not None else "[WARN] not available"
         print(f"  {status}  {name}")
 
-    assert len(FUNCTION_REGISTRY) == 42, f"Expected 42 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
-    print("\n[OK] All 41 functions registered")
+    assert len(FUNCTION_REGISTRY) == 56, f"Expected 56 functions, got {len(FUNCTION_REGISTRY)}"  # noqa: E501
+    print("\n[OK] All 56 functions registered")
 
     schema = get_registry_schema()
-    assert len(schema) == 41, f"Expected 41 schema entries, got {len(schema)}"
+    assert len(schema) == 56, f"Expected 56 schema entries, got {len(schema)}"
     print("[OK] Registry schema returned")
 
     print("\n[ALL OK] registry/functions.py smoke test passed")

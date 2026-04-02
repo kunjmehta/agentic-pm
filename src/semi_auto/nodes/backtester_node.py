@@ -18,6 +18,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.semi_auto.agents import get_llm
 from src.semi_auto.models.task import AgentPlan
 
 logger = get_logger(__name__)
@@ -99,9 +100,7 @@ def backtester_reasoning_node(state: dict) -> dict:
         Partial state update with backtester_task_queue and backtester_reasoning.
     """
     try:
-        from langchain_openai import ChatOpenAI
         from pydantic import ValidationError
-        from src.common.utils import secrets, config
 
         # Support both Send payload (partial) and full state
         query: str = (
@@ -196,12 +195,7 @@ def backtester_reasoning_node(state: dict) -> dict:
                     f"Hard limits: max 5 calls, max 3 unique function names, no duplicates."
                 )
 
-        llm = ChatOpenAI(
-            model=config.get("graph_api.reasoning_model", "gpt-5-mini"),
-            temperature=config.get("graph_api.model_temperature", 0.0),
-            api_key=secrets.get("openai.api_key"),
-        )
-        structured_llm = llm.with_structured_output(AgentPlan, method="function_calling")
+        structured_llm = get_llm("backtester").with_structured_output(AgentPlan, method="function_calling")
 
         messages = [
             {"role": "system", "content": system_prompt},

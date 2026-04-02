@@ -117,6 +117,8 @@ async def query_endpoint(request: SemiAutoQueryRequest):
             "portfolio_tasks": current_state.get("portfolio_task_queue") or [],
             "quant_tasks": current_state.get("quant_task_queue") or [],
             "backtester_tasks": current_state.get("backtester_task_queue") or [],
+            "order_tasks": current_state.get("order_task_queue") or [],
+            "order_reasoning": current_state.get("order_reasoning"),
         })
         _save_conversation(thread_id, turns)
         return preview
@@ -187,6 +189,7 @@ async def query_stream(request: SemiAutoQueryRequest):
                 ("portfolio", "portfolio_reasoning", "portfolio_task_queue"),
                 ("quant", "quant_reasoning", "quant_task_queue"),
                 ("backtester", "backtester_reasoning", "backtester_task_queue"),
+                ("order", "order_reasoning", "order_task_queue"),
             ]:
                 reasoning = snapshot.get(reasoning_key)
                 tasks = snapshot.get(queue_key) or []
@@ -224,6 +227,8 @@ async def query_stream(request: SemiAutoQueryRequest):
                 "portfolio_tasks": snapshot.get("portfolio_task_queue") or [],
                 "quant_tasks": snapshot.get("quant_task_queue") or [],
                 "backtester_tasks": snapshot.get("backtester_task_queue") or [],
+                "order_tasks": snapshot.get("order_task_queue") or [],
+                "order_reasoning": snapshot.get("order_reasoning"),
             })
             _save_conversation(thread_id, turns)
             yield _fmt({
@@ -234,6 +239,7 @@ async def query_stream(request: SemiAutoQueryRequest):
                     "portfolio": snapshot.get("portfolio_task_queue") or [],
                     "quant": snapshot.get("quant_task_queue") or [],
                     "backtester": snapshot.get("backtester_task_queue") or [],
+                    "order": snapshot.get("order_task_queue") or [],
                 },
             })
             yield _fmt({"type": "done"})
@@ -284,6 +290,9 @@ async def approve_endpoint(thread_id: str, request: ApprovalRequest):
         override_updates["quant_task_queue"] = request.modified_quant_tasks
     if request.modified_backtester_tasks is not None:
         override_updates["backtester_task_queue"] = request.modified_backtester_tasks
+    if request.modified_order_tasks is not None:
+        override_updates["order_task_queue"] = request.modified_order_tasks
+        logger.info(f"[api/approve] overriding order_task_queue with {len(request.modified_order_tasks)} tasks")
 
     if override_updates:
         graph.update_state(config, override_updates)

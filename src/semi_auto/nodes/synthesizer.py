@@ -18,6 +18,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.semi_auto.agents import get_llm
 
 logger = get_logger(__name__)
 
@@ -38,13 +39,21 @@ overall_signal — QUANT ONLY: "BUY", "SELL", or "HOLD"
 signal_confidence — QUANT ONLY: "High" (≥2 confirming), "Medium" (split), "Low" (insufficient data)
 
 sections — use minimal sections:
-  * Backtest: "Returns", "Risk", "Trade Statistics"
+  * Backtest: "Returns", "Risk", "Trade Statistics", and optionally "Trades" (if a trade list is present)
   * Quant: "Momentum", "Volatility", "Volume" (only if data exists per indicator)
   * Portfolio: ONE section titled "Portfolio" — consolidate ALL metrics (account + positions + health) into one table
   Each section:
     - table: {metric, value} rows for numeric data only — pre-format values ("+12.50%", "$100,000")
     - bullets: ONLY if the observation adds genuine insight NOT already visible in the table. Max 1 bullet/section. OMIT bullets for portfolio sections unless a position needs highlighting.
     - note: ONLY for actual errors, missing data, or real warnings. Leave empty otherwise.
+
+BACKTEST TRADE LIST RULES (critical — read carefully):
+  - If the formatted result includes a TRADES section (rows showing Entry Date, Exit Date, etc.), render them as a SINGLE section titled "Trades".
+  - For each closed trade, add ONE MetricRow where:
+      metric = "Trade #N (LONG|SHORT)  entry_date → exit_date"
+      value  = "Entry: $entry_price × shares | Exit: $exit_price (exit_reason) | P&L: $pnl (pnl_pct)"
+  - NEVER create separate "Entries" and "Exits" sections. All entry and exit data must be in one unified "Trades" section row per trade.
+  - NEVER split a trade into entry and exit in separate rows or separate sections.
 
 takeaway — ONE short sentence: the single most actionable conclusion
 
@@ -189,6 +198,53 @@ def _format_backtest_result(result_data: dict) -> str:
         lines.append("  --- ADDITIONAL METRICS ---")
         for k, v in extra:
             lines.append(f"  {k:<26} {v}")
+
+    # ── Closed trades list ──────────────────────────────────────────────
+    trades: List[Dict] = result_data.get("trades") or []
+    closed = [t for t in trades if t.get("status") == "closed" and t.get("exit_date")]
+    if closed:
+        lines.append("")
+        lines.append(f"  --- TRADES ({len(closed)} closed) ---")
+        lines.append(
+            f"  {'#':<4} {'Side':<5} {'Entry Date':<12} {'Exit Date':<12} "
+            f"{'Entry $':>8} {'Exit $':>8} {'Shares':>6} {'Exit Reason':<18} {'P&L $':>9} {'P&L %':>7}"
+        )
+        lines.append("  " + "-" * 92)
+        for i, t in enumerate(closed, 1):
+            side = str(t.get("side", "?")).upper()[:5]
+            ed = str(t.get("entry_date", "?"))[:10]
+            xd = str(t.get("exit_date", "?"))[:10]
+            try:
+                ep = f"${float(t['entry_price']):,.2f}"
+            except Exception:
+                ep = str(t.get("entry_price", "?"))
+            try:
+                xp = f"${float(t['exit_price']):,.2f}"
+            except Exception:
+                xp = str(t.get("exit_price", "?"))
+            try:
+                qty = str(int(t.get("quantity", 0)))
+            except Exception:
+                qty = str(t.get("quantity", "?"))
+            reason = str(t.get("exit_reason", "?"))[:18]
+            pnl_raw = t.get("pnl") or t.get("net_pnl") or 0.0
+            try:
+                pnl_f = float(pnl_raw)
+                pnl_str = f"${pnl_f:+,.2f}"
+            except Exception:
+                pnl_str = str(pnl_raw)
+            # P&L %
+            try:
+                ep_f = float(t["entry_price"])
+                qty_f = float(t.get("quantity", 0))
+                cost = ep_f * qty_f
+                pnl_pct = f"{(pnl_f / cost * 100):+.2f}%" if cost else "N/A"
+            except Exception:
+                pnl_pct = "N/A"
+            lines.append(
+                f"  {i:<4} {side:<5} {ed:<12} {xd:<12} "
+                f"{ep:>8} {xp:>8} {qty:>6} {reason:<18} {pnl_str:>9} {pnl_pct:>7}"
+            )
 
     return "\n".join(lines)
 
@@ -455,16 +511,9 @@ def _call_llm(state: dict) -> str:
         Synthesized response as a Markdown string.
     """
     try:
-        from langchain_openai import ChatOpenAI
-        from src.common.utils import secrets, config
         from src.semi_auto.models.responses import SynthesisResult
 
-        llm = ChatOpenAI(
-            model=config.get("graph_api.routing_model", "gpt-4o-mini"),
-            temperature=config.get("graph_api.synthesizer_temperature", 0.2),
-            api_key=secrets.get("openai.api_key"),
-        )
-        structured_llm = llm.with_structured_output(SynthesisResult)
+        structured_llm = get_llm("synthesizer").with_structured_output(SynthesisResult)
         prompt = _build_synthesis_prompt(state)
         result: SynthesisResult = structured_llm.invoke([
             {"role": "system", "content": _SYNTHESIZER_SYSTEM_PROMPT},

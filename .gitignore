@@ -44,3 +44,6 @@ docs/
 docs/
 archive/
 Trial.ipynb
+**/node_modules/*
+**/.next/*
+**/dist/*

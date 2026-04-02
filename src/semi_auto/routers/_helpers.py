@@ -68,10 +68,12 @@ def _state_to_preview(state: dict, thread_id: str) -> TaskPreviewResponse:
         portfolio_reasoning=state.get("portfolio_reasoning"),
         quant_reasoning=state.get("quant_reasoning"),
         backtester_reasoning=state.get("backtester_reasoning"),
+        order_reasoning=state.get("order_reasoning"),
         pm_review_notes=state.get("pm_review_notes"),
         portfolio_tasks=state.get("portfolio_task_queue") or [],
         quant_tasks=state.get("quant_task_queue") or [],
         backtester_tasks=state.get("backtester_task_queue") or [],
+        order_tasks=state.get("order_task_queue") or [],
     )
     logger.info(f"[_state_to_preview] status={preview.status} thread={thread_id}")
     return preview
