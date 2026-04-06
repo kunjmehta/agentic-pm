@@ -1,1 +1,0 @@
-"""Backtester Agent Skills module."""

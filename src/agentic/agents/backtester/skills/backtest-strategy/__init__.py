@@ -1,1 +1,0 @@
-"""Backtest Strategy skill."""

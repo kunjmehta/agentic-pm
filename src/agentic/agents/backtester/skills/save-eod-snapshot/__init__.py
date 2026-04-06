@@ -1,1 +1,0 @@
-"""Save EOD Snapshot skill."""
