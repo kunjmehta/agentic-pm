@@ -163,6 +163,76 @@ def _save_conversation(thread_id: str, turns: list) -> None:
     logger.debug(f"[_save_conversation] saved {len(turns)} turn(s) → {path}")
 
 
+def _persist_reasoning_trace(thread_id: str, turn_number: int, state: dict) -> None:
+    """Store LLM reasoning traces to analytics database for audit/compliance.
+
+    Persists all reasoning outputs from the multi-agent workflow:
+    - portfolio_reasoning (PM planning)
+    - quant_reasoning (quant analyst signals)
+    - backtester_reasoning (backtest results)
+    - order_reasoning (order planning)
+    - pm_review_notes (PM approval notes)
+    - pm_decision_reasoning (post-execution order decision)
+
+    Args:
+        thread_id: Conversation thread identifier.
+        turn_number: Sequential turn number within conversation.
+        state: Current GraphState dict with reasoning traces.
+
+    Note:
+        Silently catches and logs any persistence errors to prevent blocking
+        the main workflow. Analytics persistence is best-effort.
+    """
+    try:
+        from src.common.dao import AnalyticsDAO
+
+        dao = AnalyticsDAO()
+
+        # Extract reasoning traces from state
+        reasoning_data = {
+            "thread_id": thread_id,
+            "turn_number": turn_number,
+            "conversation_id": state.get("conversation_id"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "query": state.get("query"),
+            "intent": state.get("intent"),
+            "symbol": state.get("symbol"),
+            # Reasoning traces from each agent
+            "portfolio_reasoning": state.get("portfolio_reasoning"),
+            "quant_reasoning": state.get("quant_reasoning"),
+            "backtester_reasoning": state.get("backtester_reasoning"),
+            "order_reasoning": state.get("order_reasoning"),
+            "pm_review_notes": state.get("pm_review_notes"),
+            "pm_decision_reasoning": state.get("pm_decision_reasoning"),
+            # Approval status
+            "pm_review_approved": state.get("pm_review_approved"),
+            "execute_orders": state.get("_execute_orders"),
+            # Task counts
+            "portfolio_task_count": len(state.get("portfolio_task_queue") or []),
+            "quant_task_count": len(state.get("quant_task_queue") or []),
+            "backtester_task_count": len(state.get("backtester_task_queue") or []),
+            "order_task_count": len(state.get("order_task_queue") or []),
+            # Execution metadata
+            "error": state.get("error"),
+            "execution_time_ms": state.get("execution_time_ms"),
+        }
+
+        # Save to analytics database
+        dao.save_reasoning_trace(reasoning_data)
+        dao.close()
+
+        logger.info(
+            f"[audit] Persisted reasoning trace: thread={thread_id} turn={turn_number} "
+            f"intent={reasoning_data.get('intent')} symbol={reasoning_data.get('symbol')}"
+        )
+
+    except Exception as exc:
+        # Non-blocking: log warning but don't fail the request
+        logger.warning(
+            f"[audit] Failed to persist reasoning trace for {thread_id}/{turn_number}: {exc}"
+        )
+
+
 # ── DAO response helpers ───────────────────────────────────────────────────────
 
 

@@ -226,6 +226,64 @@ class StrategyDAO(BaseDAO):
 
         return self.fetch_df(query, params)
 
+    def get_actionable_signals_by_time(
+        self,
+        min_confidence: float = 0.65,
+        lookback_minutes: int = 30,
+        action_filter: Optional[str] = None
+    ) -> List[Dict]:
+        """Fetch actionable signals generated within a time window.
+
+        Used by autonomous signal aggregator to fetch signals generated
+        in the last N minutes above a confidence threshold.
+
+        Args:
+            min_confidence: Minimum confidence threshold (default 0.65).
+            lookback_minutes: Time window to look back (default 30).
+            action_filter: Filter by action ('buy' or 'sell'), None for both.
+
+        Returns:
+            List of signal row dicts matching criteria.
+        """
+        from datetime import timedelta
+        cutoff = datetime.now() - timedelta(minutes=lookback_minutes)
+
+        if action_filter:
+            query = """
+                SELECT * FROM strategy_results
+                WHERE action = ?
+                  AND confidence >= ?
+                  AND timestamp >= ?
+                ORDER BY timestamp DESC, confidence DESC
+            """
+            params = (action_filter, min_confidence, cutoff)
+        else:
+            query = """
+                SELECT * FROM strategy_results
+                WHERE action IN ('buy', 'sell')
+                  AND confidence >= ?
+                  AND timestamp >= ?
+                ORDER BY timestamp DESC, confidence DESC
+            """
+            params = (min_confidence, cutoff)
+
+        df = self.fetch_df(query, params)
+        if df.empty:
+            return []
+
+        # Parse JSON fields for each row
+        results = []
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            row_dict['statistics'] = json.loads(row_dict.get('statistics') or '{}')
+            row_dict['indicators'] = json.loads(row_dict.get('indicators') or '{}')
+            row_dict['signals'] = json.loads(row_dict.get('signals') or '{}')
+            raw_parameters = row_dict.get('parameters')
+            row_dict['parameters'] = json.loads(raw_parameters) if raw_parameters else None
+            results.append(row_dict)
+
+        return results
+
     def get_strategy_performance(
         self,
         strategy_name: str,

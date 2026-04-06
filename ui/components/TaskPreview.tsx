@@ -82,10 +82,10 @@ export default function TaskPreview({ data, onApprove, onReject }: Props) {
   }
 
   const reasoningItems = [
-    { key: 'portfolio_reasoning', label: '🏦 Portfolio Manager reasoning', text: data.portfolio_reasoning },
-    { key: 'quant_reasoning',     label: '📊 Quant reasoning',             text: data.quant_reasoning },
-    { key: 'backtester_reasoning',label: '📈 Backtester reasoning',        text: data.backtester_reasoning },
-    { key: 'order_reasoning',     label: '📋 Order reasoning',             text: data.order_reasoning },
+    { key: 'portfolio_reasoning', label: 'Portfolio Manager', text: data.portfolio_reasoning },
+    { key: 'quant_reasoning',     label: 'Quant',             text: data.quant_reasoning },
+    { key: 'backtester_reasoning',label: 'Backtester',        text: data.backtester_reasoning },
+    { key: 'order_reasoning',     label: 'Order',             text: data.order_reasoning },
   ] as const;
 
   const queueItems = [
@@ -97,15 +97,15 @@ export default function TaskPreview({ data, onApprove, onReject }: Props) {
 
   return (
     <div className="task-preview">
-      <div className="task-preview-header">🔍 Task Preview — Review before execution</div>
+      <div className="task-preview-header">Task Preview — Review before execution</div>
 
       {reasoningItems.map(({ key, label, text }) =>
         text ? <AgentReasoning key={key} label={label} text={text} /> : null,
       )}
 
       {data.pm_review_notes && (
-        <div style={{ background: '#0d1f0d', border: '1px solid #1a4a1a', borderRadius: 6, padding: '8px 12px', marginBottom: 8, fontSize: 12, color: '#6ee7b7' }}>
-          <strong style={{ color: '#a3e6bc' }}>🤖 PM Review:</strong> {data.pm_review_notes}
+        <div style={{ background: '#050f05', border: '1px solid #1a2a1a', borderRadius: 2, padding: '5px 8px', marginBottom: 6, fontSize: 10, fontFamily: "'Courier New', monospace", color: '#00aa00' }}>
+          <strong style={{ color: '#00dd00' }}>PM:</strong> {data.pm_review_notes}
         </div>
       )}
 
@@ -115,10 +115,10 @@ export default function TaskPreview({ data, onApprove, onReject }: Props) {
 
       <div className="approve-row">
         <button className="btn-approve" disabled={busy} onClick={handleApprove}>
-          {busy ? '⏳ Executing…' : '✅ Approve & Execute'}
+          {busy ? 'Executing...' : 'Approve & Execute'}
         </button>
         <button className="btn-reject" disabled={busy} onClick={handleReject}>
-          ✗ Reject
+          Reject
         </button>
       </div>
     </div>

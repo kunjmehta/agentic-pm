@@ -16,6 +16,9 @@ from typing import Any, Callable, Dict, Optional
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+import time
+from functools import wraps
+
 from src.common.utils import get_logger
 from src.semi_auto.models.strategies import (
     BacktestInput,
@@ -42,6 +45,92 @@ from src.semi_auto.models.strategies import (
 )
 
 logger = get_logger(__name__)
+
+
+# ── Retry Decorator for Transient Failures ────────────────────────────────────
+
+
+def retry_on_transient_error(max_retries=3, backoff_factor=2, timeout_seconds=30):
+    """Retry decorator for transient API failures with exponential backoff.
+
+    Handles common transient errors:
+    - Network timeouts (requests.exceptions.Timeout, httpx.TimeoutException)
+    - HTTP 429 Rate Limit Exceeded
+    - HTTP 5xx Server Errors
+    - Connection errors
+
+    Args:
+        max_retries: Maximum number of retry attempts. Default 3.
+        backoff_factor: Exponential backoff multiplier. Default 2 (1s, 2s, 4s).
+        timeout_seconds: Max time to wait for retries. Default 30s.
+
+    Returns:
+        Decorated function with retry logic.
+
+    Example:
+        @retry_on_transient_error(max_retries=3)
+        def fetch_data_from_api():
+            return requests.get(url, timeout=10).json()
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            last_exception = None
+
+            for attempt in range(max_retries + 1):  # +1 for initial attempt
+                try:
+                    return func(*args, **kwargs)
+                except Exception as exc:
+                    last_exception = exc
+                    elapsed = time.time() - start_time
+
+                    # Check if error is retryable
+                    is_timeout = any([
+                        "timeout" in str(exc).lower(),
+                        "timed out" in str(exc).lower(),
+                        exc.__class__.__name__ in ("Timeout", "TimeoutException", "ReadTimeout"),
+                    ])
+                    is_rate_limit = "429" in str(exc) or "rate limit" in str(exc).lower()
+                    is_server_error = any(
+                        f"{code}" in str(exc) for code in (500, 502, 503, 504)
+                    )
+                    is_connection_error = any([
+                        "connection" in str(exc).lower(),
+                        "network" in str(exc).lower(),
+                        exc.__class__.__name__ in ("ConnectionError", "ConnectionResetError"),
+                    ])
+
+                    is_retryable = is_timeout or is_rate_limit or is_server_error or is_connection_error
+
+                    # Don't retry on last attempt or non-retryable errors
+                    if attempt == max_retries or not is_retryable:
+                        logger.warning(
+                            f"[retry] {func.__name__} failed after {attempt} attempts: {exc}"
+                        )
+                        raise
+
+                    # Check timeout
+                    if elapsed > timeout_seconds:
+                        logger.warning(
+                            f"[retry] {func.__name__} timeout after {elapsed:.1f}s (limit: {timeout_seconds}s)"
+                        )
+                        raise
+
+                    # Exponential backoff
+                    wait_time = backoff_factor ** attempt
+                    logger.warning(
+                        f"[retry] {func.__name__} attempt {attempt + 1}/{max_retries} failed: {exc}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+
+            # Should never reach here, but just in case
+            raise last_exception if last_exception else RuntimeError("Retry logic error")
+
+        return wrapper
+    return decorator
+
 
 # ── Portfolio skills ───────────────────────────────────────────────────────────
 
@@ -74,7 +163,6 @@ from src.semi_auto.skills.quant.skills import (
     # Strategy singletons (swing / multi-day)
     golden_cross_skill as _golden_cross_skill,
     breakout_52w_skill as _breakout_52w_skill,
-    mean_reversion_daily_skill as _mean_reversion_daily_skill,
     earnings_drift_skill as _earnings_drift_skill,
     # Legacy function aliases (used by _calc_*_wrapped helpers below)
     calc_momentum_package as _calc_momentum_raw,
@@ -839,13 +927,13 @@ def _mean_reversion_daily_wrapped(
             df = _fetch_bars_range("mean_reversion_daily_analyze", symbol, start_date, end_date, timeframe)
             if df is None:
                 return {"error": f"No data for {symbol}/{timeframe} in range {start_date}\u2013{end_date}"}
-            result = _mean_reversion_daily_skill.analyze_bars(
+            result = _mean_reversion_skill.analyze_bars(
                 df, lookback=lookback, threshold=threshold, ma_period=ma_period,
             )
             result.update({"symbol": symbol, "timeframe": timeframe,
                            "start_date": start_date, "end_date": end_date, "mode": "historical"})
         else:
-            result = _mean_reversion_daily_skill.generate_signals(
+            result = _mean_reversion_skill.generate_signals(
                 symbol=symbol, lookback=lookback, threshold=threshold,
                 ma_period=ma_period, timeframe=timeframe,
             )
@@ -1540,6 +1628,81 @@ def _place_limit_order_wrapped(
         return {"status": "error", "error": str(exc), "symbol": symbol}
 
 
+def _place_stop_order_wrapped(
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    time_in_force: str = "day",
+    **kwargs,
+) -> Dict:
+    """Place a stop (stop-market) order via Alpaca.
+
+    Triggers a market order when the market price reaches ``stop_price``.
+    Use for stop-loss (sell below current price) or breakout entry (buy above).
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Shares to trade.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price.  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+
+    Returns:
+        ``{"id": str, "symbol": str, "qty": float, "side": str,
+           "type": "stop", "stop_price": float, "status": str, ...}``.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import place_stop_order as _place
+        return _place(symbol=symbol, qty=qty, side=side,
+                      stop_price=stop_price, time_in_force=time_in_force)
+    except Exception as exc:
+        logger.warning(
+            f"[registry] place_stop_order failed ({side} {qty} {symbol} stop@{stop_price}): {exc}"
+        )
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
+def _place_stop_limit_order_wrapped(
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    limit_price: float,
+    time_in_force: str = "day",
+    **kwargs,
+) -> Dict:
+    """Place a stop-limit order via Alpaca.
+
+    Triggers a limit order at ``limit_price`` when the market price reaches
+    ``stop_price``.  Provides both trigger control and execution price control.
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Shares to trade.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Price that activates the limit order.  Must be > 0.
+        limit_price: Execution cap (buy) or floor (sell).  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+
+    Returns:
+        ``{"id": str, "symbol": str, "qty": float, "side": str,
+           "type": "stop_limit", "stop_price": float, "limit_price": float,
+           "status": str, ...}``.
+    """
+    try:
+        from src.common.external.alpaca_portfolio import place_stop_limit_order as _place
+        return _place(symbol=symbol, qty=qty, side=side,
+                      stop_price=stop_price, limit_price=limit_price,
+                      time_in_force=time_in_force)
+    except Exception as exc:
+        logger.warning(
+            f"[registry] place_stop_limit_order failed "
+            f"({side} {qty} {symbol} stop@{stop_price} limit@{limit_price}): {exc}"
+        )
+        return {"status": "error", "error": str(exc), "symbol": symbol}
+
+
 def _cancel_order_wrapped(order_id: str, **kwargs) -> Dict:
     """Cancel an open order by its UUID.
 
@@ -2196,6 +2359,8 @@ FUNCTION_REGISTRY: Dict[str, Optional[Callable]] = {
     "fetch_orders":            _fetch_orders_wrapped,
     "place_market_order":      _place_market_order_wrapped,
     "place_limit_order":       _place_limit_order_wrapped,
+    "place_stop_order":        _place_stop_order_wrapped,
+    "place_stop_limit_order":  _place_stop_limit_order_wrapped,
     "cancel_order":            _cancel_order_wrapped,
     "cancel_all_orders":       _cancel_all_orders_wrapped,
     "close_all_positions":     _close_all_positions_wrapped,

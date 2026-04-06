@@ -874,7 +874,9 @@ class TestClassifierHelpers:
     def _fb(self, query: str):
         """Shorthand: call _keyword_fallback and return QueryIntent."""
         from src.semi_auto.nodes.classifier import _keyword_fallback
-        return _keyword_fallback(query, self._TODAY, self._DEFAULT_START)
+        from datetime import datetime, timezone
+        now = datetime.strptime(self._TODAY, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return _keyword_fallback(query, now, self._TODAY, self._DEFAULT_START)
 
     def test_portfolio_keywords_detected(self):
         qi = self._fb("what is my portfolio status and equity")

@@ -8,21 +8,23 @@ executor calls.
 Endpoints:
     GET  /v1/orders                       List open orders from Alpaca
     POST /v1/orders/execute               Place a market or limit order
+    POST /v1/orders/stop                  Place a stop (stop-market) order
+    POST /v1/orders/stop-limit            Place a stop-limit order
     POST /v1/orders/close/{symbol}        Liquidate a full position
     POST /v1/orders/scale                 Resize to a target portfolio %
     POST /v1/orders/signal                Execute a strategy buy/sell/hold signal
     DELETE /v1/orders/{order_id}          Cancel a specific order
     DELETE /v1/orders                     Cancel all open orders
 
-All write endpoints (/execute, /close, /scale, /signal, DELETE) go through
-the same audit trail as the agent — LOG entries are written but no LangGraph
-checkpoint is created.
+All write endpoints (/execute, /stop, /stop-limit, /close, /scale, /signal,
+DELETE) go through the same audit trail as the agent — LOG entries are written
+but no LangGraph checkpoint is created.
 """
 
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from src.common.external.alpaca_portfolio import (
@@ -40,6 +42,7 @@ from src.semi_auto.models.endpoints import (
 )
 
 from src.semi_auto.registry.functions import AVAILABLE_FUNCTIONS
+from src.semi_auto.ws_manager import ws_manager
 
 logger = get_logger(__name__)
 
@@ -84,6 +87,44 @@ class ScalePositionRequest(BaseModel):
     limit_price: Optional[float] = Field(default=None, gt=0)
 
 
+class StopOrderRequest(BaseModel):
+    """POST /v1/orders/stop request body.
+
+    Attributes:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price.  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+    """
+
+    symbol: str
+    qty: float = Field(..., gt=0, description="Number of shares (must be > 0)")
+    side: str = Field(..., pattern="^(buy|sell)$", description="'buy' or 'sell'")
+    stop_price: float = Field(..., gt=0, description="Trigger price (must be > 0)")
+    time_in_force: str = Field(default="day", pattern="^(day|gtc|ioc|fok)$")
+
+
+class StopLimitOrderRequest(BaseModel):
+    """POST /v1/orders/stop-limit request body.
+
+    Attributes:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price that activates the limit order.  Must be > 0.
+        limit_price: Execution price cap (buy) or floor (sell).  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+    """
+
+    symbol: str
+    qty: float = Field(..., gt=0, description="Number of shares (must be > 0)")
+    side: str = Field(..., pattern="^(buy|sell)$", description="'buy' or 'sell'")
+    stop_price: float = Field(..., gt=0, description="Stop trigger price (must be > 0)")
+    limit_price: float = Field(..., gt=0, description="Limit execution price (must be > 0)")
+    time_in_force: str = Field(default="day", pattern="^(day|gtc|ioc|fok)$")
+
+
 class StrategySignalRequest(BaseModel):
     """POST /v1/orders/signal request body.
 
@@ -124,6 +165,72 @@ def _registry_fn(name: str):
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+
+@router.websocket("/ws")
+async def orders_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time order updates.
+
+    Broadcasts order updates when orders are:
+    - Submitted (new order placed)
+    - Filled (order executed)
+    - Cancelled (order cancelled)
+    - Rejected (order rejected by broker)
+
+    Message types sent to clients:
+    - connection: Initial connection confirmation
+    - order_update: Real-time order status changes
+    - error: Error messages
+
+    Args:
+        websocket: FastAPI WebSocket connection
+
+    Example order_update message:
+        {
+            "type": "order_update",
+            "order_id": "uuid-123",
+            "broker_order_id": "alpaca-456",
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": 10,
+            "status": "submitted",
+            "timestamp": "2024-01-15T10:30:45.123456"
+        }
+
+    Example filled message:
+        {
+            "type": "order_update",
+            "order_id": "uuid-123",
+            "status": "filled",
+            "filled_price": 150.25,
+            "filled_at": "2024-01-15T10:31:12.456789"
+        }
+    """
+    await ws_manager.connect(websocket)
+
+    try:
+        # Send connection confirmation
+        await websocket.send_json({
+            "type": "connection",
+            "message": "Connected to orders stream",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        logger.info("[orders] Client connected to orders stream")
+
+        # Keep connection alive
+        # (messages are sent via ws_manager.broadcast() from order execution handlers)
+        while True:
+            # Wait for client messages (ping, etc.)
+            data = await websocket.receive_text()
+            logger.debug(f"[orders] Received client message: {data}")
+
+    except WebSocketDisconnect:
+        logger.info("[orders] Client disconnected from orders stream")
+        await ws_manager.disconnect(websocket)
+    except Exception as exc:
+        logger.error(f"[orders] WebSocket error: {exc}", exc_info=True)
+        await ws_manager.disconnect(websocket)
 
 
 @router.get("", response_model=OpenOrdersResponse)
@@ -172,6 +279,19 @@ async def execute_order(request: ExecuteOrderRequest):
         )
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("error", "Order failed"))
+
+        # Broadcast order update to WebSocket clients
+        await ws_manager.broadcast({
+            "type": "order_update",
+            "order_id": result.get("id"),
+            "broker_order_id": result.get("id"),
+            "symbol": request.symbol,
+            "side": request.side,
+            "qty": request.qty,
+            "status": "submitted",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
         return {
             "status": "success",
             "order": result,
@@ -181,6 +301,91 @@ async def execute_order(request: ExecuteOrderRequest):
         raise
     except Exception as exc:
         logger.error(f"[orders/execute] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/stop", response_model=OrderResponse)
+async def place_stop_order(request: StopOrderRequest):
+    """Place a stop (stop-market) order via Alpaca.
+
+    A stop order becomes a market order when the market price reaches
+    ``stop_price``.  Commonly used as a stop-loss on an existing position
+    or a breakout entry trigger.
+
+    Args:
+        request: StopOrderRequest with symbol, qty, side, stop_price,
+            and optional time_in_force.
+
+    Returns:
+        OrderResponse with the submitted order details.
+    """
+    logger.info(
+        f"[orders/stop] {request.side.upper()} {request.qty} {request.symbol} "
+        f"stop@{request.stop_price}"
+    )
+    try:
+        fn = _registry_fn("place_stop_order")
+        result = fn(
+            symbol=request.symbol,
+            qty=request.qty,
+            side=request.side,
+            stop_price=request.stop_price,
+            time_in_force=request.time_in_force,
+        )
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "Stop order failed"))
+        return {
+            "status": "success",
+            "order": result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[orders/stop] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/stop-limit", response_model=OrderResponse)
+async def place_stop_limit_order(request: StopLimitOrderRequest):
+    """Place a stop-limit order via Alpaca.
+
+    When the market price reaches ``stop_price`` a limit order at
+    ``limit_price`` is submitted.  Provides both trigger control and
+    execution price control — ideal for risk-managed entries/exits.
+
+    Args:
+        request: StopLimitOrderRequest with symbol, qty, side, stop_price,
+            limit_price, and optional time_in_force.
+
+    Returns:
+        OrderResponse with the submitted order details.
+    """
+    logger.info(
+        f"[orders/stop-limit] {request.side.upper()} {request.qty} {request.symbol} "
+        f"stop@{request.stop_price} limit@{request.limit_price}"
+    )
+    try:
+        fn = _registry_fn("place_stop_limit_order")
+        result = fn(
+            symbol=request.symbol,
+            qty=request.qty,
+            side=request.side,
+            stop_price=request.stop_price,
+            limit_price=request.limit_price,
+            time_in_force=request.time_in_force,
+        )
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "Stop-limit order failed"))
+        return {
+            "status": "success",
+            "order": result,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[orders/stop-limit] {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
 

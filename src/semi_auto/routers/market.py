@@ -1,195 +1,108 @@
-"""Market data router — read-only AlpacaDAO endpoints at /v1/market/..."""
+"""WebSocket endpoint for real-time market data streaming.
 
-from datetime import date, datetime
-from typing import Optional
+This router provides WebSocket endpoints for streaming real-time market data
+(trades and bars) to UI clients. Market data is received from AlpacaDataStreamer
+and broadcast via db_stream_handlers.
+"""
 
-from fastapi import APIRouter, HTTPException, Query
-
-from src.semi_auto.routers._helpers import _df_to_records
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from datetime import datetime, timezone
+from src.semi_auto.ws_manager import ws_manager
 from src.common.utils import get_logger
-from src.semi_auto.models.endpoints import (
-    BarsResponse,
-    IndicatorsResponse,
-    IntradayStatsResponse,
-    LatestBarResponse,
-    TradesResponse,
-    WatchlistMemberResponse,
-    WatchlistResponse,
-)
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/v1/market", tags=["market-data"])
+router = APIRouter(prefix="/v1/market", tags=["market"])
 
 
-def _dao():
-    from src.common.dao.alpaca_dao import AlpacaDAO
-    return AlpacaDAO()
+@router.websocket("/ws")
+async def market_data_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time market data (trades and bars).
 
+    Receives broadcasts from AlpacaDataStreamer via db_stream_handlers.
+    Market data messages are automatically broadcast to all connected clients
+    when trades or bars are received from Alpaca WebSocket.
 
-# ── Watchlist ──────────────────────────────────────────────────────────────────
-
-
-@router.get("/watchlist", response_model=WatchlistResponse)
-async def get_watchlist(active_only: bool = Query(default=True)):
-    """Return all symbols currently in the watchlist.
-
-    Args:
-        active_only: If True (default), only return active symbols.
-
-    Returns:
-        Dict with ``symbols`` list and ``count``.
-    """
-    try:
-        dao = _dao()
-        symbols = dao.get_watchlist(active_only=active_only)
-        dao.close()
-        return {"symbols": symbols, "count": len(symbols)}
-    except Exception as exc:
-        logger.warning(f"[market/watchlist] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@router.get("/watchlist/{symbol}", response_model=WatchlistMemberResponse)
-async def is_in_watchlist(symbol: str):
-    """Check whether a symbol is in the watchlist.
+    Message types sent to clients:
+    - connection: Initial connection confirmation
+    - trade_update: Real-time trade data
+    - bar_update: Real-time bar/candle data
+    - error: Error messages
 
     Args:
-        symbol: Stock ticker (e.g. AAPL).
+        websocket: FastAPI WebSocket connection
 
-    Returns:
-        Dict with ``symbol`` and ``in_watchlist`` bool.
+    Example trade_update message:
+        {
+            "type": "trade_update",
+            "symbol": "AAPL",
+            "price": 150.25,
+            "size": 100,
+            "timestamp": "2024-01-15T10:30:45.123456",
+            "exchange": "Q"
+        }
+
+    Example bar_update message:
+        {
+            "type": "bar_update",
+            "symbol": "AAPL",
+            "timestamp": "2024-01-15T10:30:00",
+            "timeframe": "1Min",
+            "open": 150.00,
+            "high": 150.50,
+            "low": 149.90,
+            "close": 150.25,
+            "volume": 50000,
+            "vwap": 150.20
+        }
     """
+    await ws_manager.connect(websocket)
+
     try:
-        dao = _dao()
-        result = dao.is_in_watchlist(symbol.upper())
-        dao.close()
-        return {"symbol": symbol.upper(), "in_watchlist": result}
+        # Send connection confirmation
+        await websocket.send_json({
+            "type": "connection",
+            "message": "Connected to market data stream",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+        logger.info(f"[market] Client connected to market stream")
+
+        # Keep connection alive
+        # (messages are sent via ws_manager.broadcast() from db_stream_handlers)
+        while True:
+            # Wait for client messages (ping, subscribe requests, etc.)
+            data = await websocket.receive_text()
+
+            # Optional: Handle client subscriptions for specific symbols
+            # For MVP, broadcast all market data to all clients
+            logger.debug(f"[market] Received client message: {data}")
+
+    except WebSocketDisconnect:
+        logger.info("[market] Client disconnected from market stream")
+        await ws_manager.disconnect(websocket)
     except Exception as exc:
-        logger.warning(f"[market/watchlist/{symbol}] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.error(f"[market] WebSocket error: {exc}", exc_info=True)
+        await ws_manager.disconnect(websocket)
 
 
-# ── OHLCV bars ─────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    """Smoke test: verify router instantiation."""
+    print("=" * 60)
+    print("market.py smoke tests")
+    print("=" * 60)
 
+    # Test 1: Router exists
+    assert router is not None, "Router should exist"
+    print("  [OK]  Router instantiation")
 
-@router.get("/bars", response_model=BarsResponse)
-async def get_bars(
-    symbol: str = Query(..., description="Stock ticker"),
-    start: str = Query(..., description="Start date YYYY-MM-DD"),
-    end: str = Query(..., description="End date YYYY-MM-DD"),
-    timeframe: str = Query(default="1Day", description="Bar timeframe e.g. 1Min | 1Hour | 1Day"),
-):
-    """Fetch stored OHLCV bars for a symbol and date range.
+    # Test 2: Router has correct prefix
+    assert router.prefix == "/v1/market", "Router should have /v1/market prefix"
+    print("  [OK]  Router prefix")
 
-    Returns:
-        Dict with ``bars`` list and ``count``.
-    """
-    try:
-        from datetime import datetime as _dt
-        dao = _dao()
-        df = dao.get_bars(symbol.upper(), _dt.fromisoformat(start), _dt.fromisoformat(end), timeframe)
-        dao.close()
-        records = _df_to_records(df)
-        return {"symbol": symbol.upper(), "timeframe": timeframe, "bars": records, "count": len(records)}
-    except Exception as exc:
-        logger.warning(f"[market/bars] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    # Test 3: Router has WebSocket route
+    routes = [route for route in router.routes]
+    assert len(routes) > 0, "Router should have routes"
+    print(f"  [OK]  Router has {len(routes)} route(s)")
 
-
-@router.get("/bars/{symbol}/latest", response_model=LatestBarResponse)
-async def get_latest_bar(
-    symbol: str,
-    timeframe: str = Query(default="1Day"),
-):
-    """Fetch the most recent OHLCV bar for a symbol.
-
-    Returns:
-        Dict with ``symbol``, ``timeframe``, and ``bar`` (dict or null).
-    """
-    try:
-        dao = _dao()
-        bar = dao.get_latest_bar(symbol.upper(), timeframe=timeframe)
-        dao.close()
-        return {"symbol": symbol.upper(), "timeframe": timeframe, "bar": bar}
-    except Exception as exc:
-        logger.warning(f"[market/bars/{symbol}/latest] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ── Trades ─────────────────────────────────────────────────────────────────────
-
-
-@router.get("/trades", response_model=TradesResponse)
-async def get_trades(
-    symbol: str = Query(..., description="Stock ticker"),
-    start: str = Query(..., description="Start date YYYY-MM-DD"),
-    end: str = Query(..., description="End date YYYY-MM-DD"),
-    limit: int = Query(default=1000, ge=1, le=50000),
-):
-    """Fetch recent tick-level trades (live_trades ∪ historical_trades).
-
-    Returns:
-        Dict with ``trades`` list and ``count``.
-    """
-    try:
-        from datetime import datetime as _dt
-        dao = _dao()
-        df = dao.get_recent_trades(symbol.upper(), _dt.fromisoformat(start), _dt.fromisoformat(end), limit=limit)
-        dao.close()
-        records = _df_to_records(df)
-        return {"symbol": symbol.upper(), "trades": records, "count": len(records)}
-    except Exception as exc:
-        logger.warning(f"[market/trades] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ── Indicators ─────────────────────────────────────────────────────────────────
-
-
-@router.get("/indicators", response_model=IndicatorsResponse)
-async def get_computed_indicators(
-    symbol: str = Query(...),
-    start: str = Query(..., description="Start date YYYY-MM-DD"),
-    end: str = Query(..., description="End date YYYY-MM-DD"),
-    timeframe: str = Query(default="1Day"),
-):
-    """Fetch pre-computed technical indicators from the DB.
-
-    Returns:
-        Dict with ``indicators`` list and ``count``.
-    """
-    try:
-        from datetime import datetime as _dt
-        dao = _dao()
-        df = dao.get_computed_indicators(symbol.upper(), _dt.fromisoformat(start), _dt.fromisoformat(end), timeframe)
-        dao.close()
-        records = _df_to_records(df)
-        return {"symbol": symbol.upper(), "timeframe": timeframe, "indicators": records, "count": len(records)}
-    except Exception as exc:
-        logger.warning(f"[market/indicators] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-# ── Intraday stats ─────────────────────────────────────────────────────────────
-
-
-@router.get("/stats/{symbol}", response_model=IntradayStatsResponse)
-async def get_intraday_stats(
-    symbol: str,
-    date: str = Query(..., description="Date YYYY-MM-DD"),
-):
-    """Calculate intraday OHLCV statistics for a symbol on a given date.
-
-    Returns:
-        Dict with ``symbol``, ``date``, and ``stats``.
-    """
-    try:
-        from datetime import date as _date
-        dao = _dao()
-        stats = dao.calculate_intraday_stats(symbol.upper(), _date.fromisoformat(date))
-        dao.close()
-        return {"symbol": symbol.upper(), "date": date, "stats": stats}
-    except Exception as exc:
-        logger.warning(f"[market/stats/{symbol}] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    print("\n[ALL OK] market.py smoke tests passed")

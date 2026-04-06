@@ -211,6 +211,43 @@ class OrdersDAO(BaseDAO):
             return []
         return df.to_dict(orient="records")
 
+    def get_recent_orders_for_symbol(
+        self,
+        symbol: str,
+        side: str,
+        lookback_hours: int = 24
+    ) -> List[Dict]:
+        """Fetch recent orders for a symbol to prevent duplicates.
+
+        Used by autonomous signal aggregator to check if a similar order
+        was recently placed within the lookback window.
+
+        Args:
+            symbol: Stock ticker (e.g. "AAPL").
+            side: Order side: "buy" or "sell".
+            lookback_hours: How far back to check for duplicates. Default 24.
+
+        Returns:
+            List of order row dicts matching symbol+side within time window.
+        """
+        from datetime import datetime, timedelta
+        cutoff = datetime.now() - timedelta(hours=lookback_hours)
+
+        df = self.fetch_df(
+            """
+            SELECT *
+            FROM live_orders
+            WHERE symbol = ?
+              AND side = ?
+              AND submitted_at >= ?
+            ORDER BY submitted_at DESC
+            """,
+            (symbol.upper(), side.lower(), cutoff),
+        )
+        if df.empty:
+            return []
+        return df.to_dict(orient="records")
+
 
 # =============================================================================
 # Main block — smoke test

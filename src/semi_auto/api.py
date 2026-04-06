@@ -36,8 +36,9 @@ from src.semi_auto.routers.analyst import router as analyst_router
 from src.semi_auto.routers.strategy import router as strategy_router
 from src.semi_auto.routers.backtest import router as backtest_router
 from src.semi_auto.routers.orders import router as orders_router
-from src.semi_auto.routers.signals import router as signals_router
 from src.semi_auto.routers.reports import router as reports_router
+from src.semi_auto.routers.config import router as config_router
+from src.semi_auto.routers.telemetry import router as telemetry_router
 from src.common.utils import config as app_config
 from src.semi_auto.models.endpoints import RootResponse
 
@@ -73,8 +74,9 @@ app.include_router(analyst_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
 app.include_router(orders_router)
-app.include_router(signals_router)
 app.include_router(reports_router)
+app.include_router(config_router)
+app.include_router(telemetry_router)
 
 
 # -- Root ----------------------------------------------------------------------
@@ -99,6 +101,15 @@ async def root():
             "POST /v1/orders/signal": "Execute a strategy signal (buy/sell/hold)",
             "POST /v1/orders/close/{symbol}": "Close (liquidate) a position",
             "DELETE /v1/orders/{order_id}": "Cancel an open order",
+            "GET /v1/config": "Get full configuration",
+            "GET /v1/config/ui": "Get UI-formatted configuration (watchlist/strategies as arrays)",
+            "PUT /v1/config/ui": "Update configuration from UI format",
+            "GET /v1/config/{section}": "Get specific config section",
+            "PUT /v1/config/{section}": "Update config section",
+            "POST /v1/config/watchlist/add": "Add ticker to watchlist with strategies",
+            "DELETE /v1/config/watchlist/{symbol}": "Remove ticker from watchlist",
+            "GET /v1/telemetry/stream/{thread_id}": "SSE stream of execution telemetry",
+            "WS /v1/portfolio/ws": "WebSocket for real-time portfolio updates",
         },
     }
 

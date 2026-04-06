@@ -52,6 +52,25 @@ ADDITIONAL DATA FUNCTIONS (use only when relevant):
 - get_risk_parameters: No params. Current risk limits and thresholds.
 - get_actionable_signals: params={min_confidence=0.7, action_filter=None}. High-confidence buy/sell signals from active strategies.
 
+DATA SOURCE RULES (critical — follow these to avoid redundant API calls):
+Before planning any data-fetch task, consult the DATA AVAILABILITY CONTEXT section in the user message.
+- indicators_available=True  → pre-computed indicators EXIST in DB. Do NOT schedule fetch_historical_data or compute_indicators.
+                               Quant agent should use get_computed_indicators (read from DB).
+- indicators_available=False → indicators are absent/stale. Schedule fetch_historical_data then
+                               delegate to quant for indicator computation (quant will plan compute_indicators).
+- bars_available=True        → sufficient OHLCV bars EXIST in DB. Do NOT schedule fetch_historical_data for backtests.
+                               Backtester should use get_bars (read from DB).
+- bars_available=False       → bars missing. Schedule fetch_historical_data (priority=3) before delegating to backtester.
+- trades_available=True      → recent trade data EXIST in DB. Order agent can read from DB; no extra fetch needed.
+- trades_available=False     → no recent trades. If query needs trade history, schedule fetch_trades explicitly.
+- should_precompute_indicators=True  → Symbol is configured for automatic indicator pre-computation. If indicators_available=False,
+                                       schedule compute_indicators as this symbol expects pre-computed data.
+- should_precompute_indicators=False → Symbol uses on-demand computation. Indicators should be computed only when needed.
+                                       Prefer lightweight queries and avoid scheduling compute_indicators proactively.
+- strategies=[]              → List of configured strategies for this symbol. Use this to determine which indicators are relevant.
+- timeframes=[]              → Configured timeframes for this symbol. Use these when scheduling data fetches.
+- If no symbol was resolved (symbol=None), all availability flags are False — default to API fetch for any data needed.
+
 ORDER DELEGATION (⚠  do NOT plan order functions in the PM task_list):
 - Any request to BUY, SELL, PLACE, CANCEL, CLOSE, LIQUIDATE, EXECUTE orders
   → set delegate_to_order=true, order_query="<focused order request with symbol/qty/side/price>"
@@ -100,6 +119,71 @@ def _format_prior_turns(prior_turns: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_data_availability(
+    indicators_available: Optional[bool],
+    bars_available: Optional[bool],
+    trades_available: Optional[bool],
+    data_avail: Dict[str, Any],
+) -> str:
+    """Render data availability flags as a concise prompt section for the LLM.
+
+    Args:
+        indicators_available: True if pre-computed indicators are in DB.
+        bars_available: True if sufficient OHLCV bars are in DB.
+        trades_available: True if recent trade records are in DB.
+        data_avail: Full data_availability dict from data_availability_node.
+
+    Returns:
+        Formatted string injected into the PM user message.
+    """
+    symbol = data_avail.get("symbol") or "N/A"
+    timeframe = data_avail.get("timeframe") or "1Min"
+    indicator_rows = data_avail.get("indicator_rows", 0)
+    bar_count = data_avail.get("bar_count", 0)
+    trade_count = data_avail.get("trade_count", 0)
+    latest_indicator_ts = data_avail.get("latest_indicator_ts") or "—"
+    latest_bar_ts = data_avail.get("latest_bar_ts") or "—"
+    checked_at = data_avail.get("checked_at") or "—"
+
+    def _flag(v: Optional[bool]) -> str:
+        if v is True:
+            return "✅ YES (in DB)"
+        if v is False:
+            return "❌ NO (must fetch)"
+        return "❓ UNKNOWN"
+
+    lines = [
+        f"Symbol: {symbol}  |  Timeframe: {timeframe}  |  Checked: {checked_at}",
+        f"  indicators_available : {_flag(indicators_available)}"
+        + (f"  ({indicator_rows} rows, latest={latest_indicator_ts})" if indicators_available else ""),
+        f"  bars_available       : {_flag(bars_available)}"
+        + (f"  ({bar_count} bars, latest={latest_bar_ts})" if bars_available else ""),
+        f"  trades_available     : {_flag(trades_available)}"
+        + (f"  ({trade_count} recent trades)" if trades_available else ""),
+        "",
+        "ACTION GUIDANCE:",
+    ]
+
+    if indicators_available:
+        lines.append("  → DO NOT schedule fetch_historical_data for indicator computation.")
+        lines.append("    Quant agent will read pre-computed indicators directly from DB.")
+    else:
+        lines.append("  → indicators MISSING: schedule fetch_historical_data (priority=3) before delegating to quant.")
+
+    if bars_available:
+        lines.append("  → DO NOT schedule fetch_historical_data for backtests; bars already in DB.")
+        lines.append("    Backtester will use get_bars from DB.")
+    else:
+        lines.append("  → bars MISSING/INSUFFICIENT: schedule fetch_historical_data (priority=3) before delegating to backtester.")
+
+    if trades_available:
+        lines.append("  → Recent trade data available in DB; order agent can query without extra fetch.")
+    else:
+        lines.append("  → NO recent trades in DB; explicitly schedule fetch_trades if trade history is needed.")
+
+    return "\n".join(lines)
+
+
 def portfolio_reasoning_node(state: dict) -> dict:
     """Portfolio Manager pure reasoning node.
 
@@ -122,15 +206,28 @@ def portfolio_reasoning_node(state: dict) -> dict:
         turn_number: int = state.get("turn_number") or 1
         prior_turns: List[Dict] = state.get("prior_turns") or []
 
-        logger.info(f"[portfolio_node] reasoning for query='{query[:60]}' intent={intent}")
+        # ── Data availability flags ───────────────────────────────────────
+        indicators_available: Optional[bool] = state.get("_indicators_available")
+        bars_available: Optional[bool] = state.get("_bars_available")
+        trades_available: Optional[bool] = state.get("_trades_available")
+        data_avail: Dict = state.get("data_availability") or {}
+
+        logger.info(
+            f"[portfolio_node] reasoning for query='{query[:60]}' intent={intent} "
+            f"indicators={indicators_available} bars={bars_available} trades={trades_available}"
+        )
 
         # Build the user message
         prior_context = _format_prior_turns(prior_turns)
+        data_avail_context = _format_data_availability(
+            indicators_available, bars_available, trades_available, data_avail
+        )
         user_message = (
             f"User query: {query}\n"
             f"Classified intent: {intent}\n"
             f"Extracted symbol: {symbol or 'None'}\n"
             f"Turn number: {turn_number}\n\n"
+            f"DATA AVAILABILITY CONTEXT (checked before reasoning):\n{data_avail_context}\n\n"
             f"PRIOR CONVERSATION CONTEXT:\n{prior_context}"
         )
 
@@ -172,7 +269,6 @@ def portfolio_reasoning_node(state: dict) -> dict:
             "portfolio_reasoning": result.task_list.reasoning_summary,
             "_delegate_quant": result.delegate_to_quant,
             "_delegate_backtester": result.delegate_to_backtester,
-            "_delegate_order": result.delegate_to_order,
             "_quant_query": result.quant_query,
             "_backtester_query": result.backtester_query,
             "_order_query": result.order_query,
@@ -184,7 +280,6 @@ def portfolio_reasoning_node(state: dict) -> dict:
             "error": f"Portfolio reasoning failed: {exc}",
             "_delegate_quant": False,
             "_delegate_backtester": False,
-            "_delegate_order": False,
             "portfolio_task_queue": [],
             "portfolio_reasoning": None,
         }

@@ -45,6 +45,14 @@ class GraphState(TypedDict):
     #         trades_available, indicator_rows, bar_count, trade_count,
     #         latest_indicator_ts, latest_bar_ts, checked_at}
 
+    # Top-level flags promoted from data_availability for fast state access.
+    # True  → data is already in DB, agents should READ from DB, not call API.
+    # False → data absent/stale, agents must schedule a fetch task first.
+    # None  → not yet checked (no symbol resolved, or node not yet run).
+    _indicators_available: Optional[bool]   # pre-computed indicators in DB
+    _bars_available: Optional[bool]         # sufficient OHLCV bars in DB
+    _trades_available: Optional[bool]       # recent trade records in DB
+
     # ── Intent classification ───────────────────────────────────────────────
     intent: Optional[str]       # "portfolio" | "quant" | "backtest" | "full_analysis"
     symbol: Optional[str]       # extracted ticker e.g. "AAPL"
@@ -55,7 +63,6 @@ class GraphState(TypedDict):
     # ── PM reasoning routing flags (ephemeral — used only by conditional edges)
     _delegate_quant: Optional[bool]
     _delegate_backtester: Optional[bool]
-    _delegate_order: Optional[bool]
     _quant_query: Optional[str]
     _backtester_query: Optional[str]
     _order_query: Optional[str]
@@ -81,6 +88,10 @@ class GraphState(TypedDict):
     # ── PM decision — post-analysis order decision ──────────────────────────
     pm_decision_reasoning: Optional[str]        # PM rationale for order decision
     _execute_orders: Optional[bool]             # routing flag: True → fan-out to order_reasoning + synthesizer
+
+    # ── Autonomous trading signals ──────────────────────────────────────────
+    signal_batch: Optional[Dict[str, Any]]      # Aggregated signals from periodic task (SignalBatch.model_dump())
+    autonomous_mode: Optional[bool]             # True = periodic autonomous trading, False = query-driven
 
     # ── Function execution results (task_id → result dict) ───────────────────
     execution_results: Optional[Dict[str, Any]]
@@ -127,7 +138,6 @@ def make_initial_state(
         "_query_intent": None,
         "_delegate_quant": None,
         "_delegate_backtester": None,
-        "_delegate_order": None,
         "_quant_query": None,
         "_backtester_query": None,
         "_order_query": None,
@@ -152,6 +162,11 @@ def make_initial_state(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool_timings": None,
         "data_availability": None,
+        "_indicators_available": None,
+        "_bars_available": None,
+        "_trades_available": None,
+        "signal_batch": None,
+        "autonomous_mode": False,
     }
 
 

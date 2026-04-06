@@ -37,12 +37,13 @@ function renderBlock(block: MessageContent, idx: number, msg: Message, onApprove
       return <div className="error-block" key={`error-${idx}`}>⚠ {block.msg}</div>;
 
     case 'task_preview':
+      if (!onApprove || !onReject) return null;
       return (
         <TaskPreview
           key={`preview-${idx}`}
           data={block.data}
-          onApprove={onApprove ? () => onApprove(msg.id) : undefined}
-          onReject={onReject ? () => onReject(msg.id) : undefined}
+          onApprove={() => onApprove(msg.id)}
+          onReject={() => onReject(msg.id)}
         />
       );
 
@@ -63,8 +64,8 @@ function renderBlock(block: MessageContent, idx: number, msg: Message, onApprove
 
     case 'pending_notice':
       return (
-        <p key={`pending-${idx}`} style={{ color: '#888', fontStyle: 'italic', margin: '0.5rem 0' }}>
-          ⏳ Awaiting approval…
+        <p key={`pending-${idx}`} style={{ color: '#555', fontFamily: "'Courier New', monospace", fontSize: 10, margin: '3px 0' }}>
+          Awaiting approval...
         </p>
       );
 

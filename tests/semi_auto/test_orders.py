@@ -753,9 +753,9 @@ class TestRegistryOrderWrappers:
         for name in ("execute_order", "close_position", "scale_position", "execute_strategy_signal"):
             assert name in FUNCTION_REGISTRY, f"Missing: {name}"
 
-    def test_registry_total_count_is_41(self):
+    def test_registry_total_count_is_56(self):
         from src.semi_auto.registry.functions import FUNCTION_REGISTRY
 
-        assert len(FUNCTION_REGISTRY) == 42, (
-            f"Expected 41 functions, got {len(FUNCTION_REGISTRY)}"
+        assert len(FUNCTION_REGISTRY) == 56, (
+            f"Expected 56 functions, got {len(FUNCTION_REGISTRY)}"
         )

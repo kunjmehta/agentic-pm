@@ -41,6 +41,13 @@ export async function loadConversation(
 
 // ── SSE types ────────────────────────────────────────────────────────────────
 
+export type ToolCallEvent = {
+  task_id: string;
+  function_name: string;
+  status: 'started' | 'success' | 'error';
+  duration_ms?: number | null;
+};
+
 export type SseEvent =
   | { type: 'thought_delta'; agent: string; token: string }
   | { type: 'reasoning'; agent: string; tasks?: unknown[]; content?: string }
@@ -48,10 +55,49 @@ export type SseEvent =
   | { type: 'text'; content: string }
   | { type: 'error'; content: string }
   | { type: 'done' }
-  | { type: 'node'; node: string }
-  | { type: 'tool_call'; content: unknown }
+  | { type: 'node'; data: { node: string; label: string; status: 'started' | 'done' } }
+  | { type: 'tool_call'; data: ToolCallEvent }
+  | { type: 'telemetry'; data: Record<string, unknown> }
   | { type: 'status'; message?: string }
   | { type: string; [key: string]: unknown };
+
+export async function* streamApprove(
+  apiUrl: string,
+  threadId: string,
+  modifications?: {
+    modified_portfolio_tasks?: unknown[] | null;
+    modified_quant_tasks?: unknown[] | null;
+    modified_backtester_tasks?: unknown[] | null;
+    modified_order_tasks?: unknown[] | null;
+  },
+): AsyncGenerator<SseEvent> {
+  const res = await fetch(`${apiUrl}/approve/stream/${threadId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(modifications ?? {}),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      try {
+        yield JSON.parse(line.slice(6)) as SseEvent;
+      } catch {
+        // skip malformed line
+      }
+    }
+  }
+}
 
 export async function* streamQuery(
   apiUrl: string,

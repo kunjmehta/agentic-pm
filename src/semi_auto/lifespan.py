@@ -10,6 +10,7 @@ import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import List
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -25,8 +26,106 @@ from src.common.data_gatherer.db_stream_handlers import (
     start_background_flush_task,
     stop_background_flush_task,
 )
+from src.semi_auto.services.signal_aggregator import SignalAggregator
+from src.semi_auto.state import make_initial_state
+from src.common.external.alpaca import fetch_historical_bars
 
 logger = get_logger(__name__)
+
+
+# ── Historical Data Initialization ─────────────────────────────────────────────
+
+
+async def _ensure_historical_data_loaded(symbols: List[str], years: int = 3) -> None:
+    """Ensure historical data is loaded for all watchlist symbols.
+
+    Checks if historical data exists in the database, and fetches it if missing.
+    Fetches 3 years of daily bars by default to ensure sufficient data for
+    backtesting and indicator calculation.
+
+    Args:
+        symbols: List of symbols to check/fetch.
+        years: Number of years of historical data to fetch. Default 3.
+    """
+    from src.common.dao.alpaca_dao import AlpacaDAO
+
+    logger.info("=" * 70)
+    logger.info(f"Checking historical data for {len(symbols)} symbols...")
+    logger.info("=" * 70)
+
+    dao = AlpacaDAO()
+
+    try:
+        for symbol in symbols:
+            try:
+                # Check if we have recent data
+                latest_bar_query = """
+                    SELECT MAX(timestamp) as latest_ts, COUNT(*) as bar_count
+                    FROM bars
+                    WHERE symbol = ? AND timeframe = '1Day'
+                """
+                result = dao.fetch_one(latest_bar_query, (symbol,))
+
+                latest_ts = result.get("latest_ts") if result else None
+                bar_count = result.get("bar_count", 0) if result else 0
+
+                # Calculate expected bars (approx 252 trading days per year)
+                expected_bars = years * 252
+
+                needs_fetch = False
+                if latest_ts is None:
+                    logger.info(f"[{symbol}] No historical data found")
+                    needs_fetch = True
+                elif bar_count < expected_bars * 0.8:  # Allow 20% tolerance
+                    logger.info(
+                        f"[{symbol}] Insufficient data: {bar_count} bars "
+                        f"(expected ~{expected_bars} for {years} years)"
+                    )
+                    needs_fetch = True
+                else:
+                    logger.info(
+                        f"[{symbol}] ✓ Historical data OK: {bar_count} bars, "
+                        f"latest: {latest_ts}"
+                    )
+
+                if needs_fetch:
+                    # Fetch historical data
+                    end = datetime.now(timezone.utc)
+                    start = end - timedelta(days=years * 365)
+
+                    logger.info(
+                        f"[{symbol}] Fetching {years} years of daily bars "
+                        f"({start.date()} to {end.date()})..."
+                    )
+
+                    bars_df = fetch_historical_bars(
+                        symbol=symbol,
+                        start=start.isoformat(),
+                        end=end.isoformat(),
+                        timeframe="1Day"
+                    )
+
+                    logger.info(
+                        f"[{symbol}] ✓ Fetched {len(bars_df)} daily bars, "
+                        f"saving to database..."
+                    )
+
+                    # Data is automatically saved by fetch_historical_bars
+                    logger.info(f"[{symbol}] ✓ Historical data loaded successfully")
+
+            except Exception as exc:
+                logger.error(
+                    f"[{symbol}] Failed to load historical data: {exc}",
+                    exc_info=True
+                )
+                # Continue with other symbols even if one fails
+
+    finally:
+        dao.close()
+
+    logger.info("=" * 70)
+    logger.info("Historical data check complete")
+    logger.info("=" * 70)
 
 
 # ── Background tasks ───────────────────────────────────────────────────────────
@@ -109,6 +208,106 @@ async def _run_live_streams(coordinator: DataCoordinator) -> None:
         coordinator.close()
 
 
+async def _run_periodic_signal_processing(
+    aggregator: SignalAggregator,
+    graph,
+    interval_minutes: int = 30
+) -> None:
+    """Periodically process accumulated signals and submit autonomous orders.
+
+    Runs every N minutes (configurable via intervals.quant_analysis_minutes).
+    On each tick:
+    1. Fetch and aggregate high-confidence signals
+    2. Invoke graph with signal_batch state
+    3. PM decision node validates and approves signals
+    4. Risk guard validates orders
+    5. Execution pauses at HITL interrupt (order_executor_node)
+    6. User must approve/reject via /autonomous API endpoints
+
+    Args:
+        aggregator: SignalAggregator instance for fetching signals.
+        graph: Compiled LangGraph instance.
+        interval_minutes: Minutes between signal processing cycles.
+    """
+    logger.info(
+        f"[autonomous] periodic signal processing started "
+        f"(interval={interval_minutes}m)"
+    )
+
+    try:
+        while True:
+            try:
+                # Wait for next interval
+                await asyncio.sleep(interval_minutes * 60)
+
+                # Check if autonomous trading is enabled
+                autonomous_config = app_config.get("autonomous_trading", {})
+                if not autonomous_config.get("enabled", False):
+                    logger.debug("[autonomous] Skipping cycle (autonomous trading disabled)")
+                    continue
+
+                logger.info("[autonomous] Starting signal processing cycle...")
+
+                # Generate signal batch
+                signal_batch = await aggregator.generate_signal_batch(
+                    min_confidence=autonomous_config.get("min_signal_confidence", 0.65),
+                    lookback_minutes=interval_minutes
+                )
+
+                if not signal_batch or not signal_batch.signals:
+                    logger.info("[autonomous] No actionable signals found")
+                    continue
+
+                logger.info(
+                    f"[autonomous] Generated batch {signal_batch.batch_id} "
+                    f"with {len(signal_batch.signals)} signals"
+                )
+
+                # Prepare initial state for autonomous mode
+                import time
+                thread_id = f"autonomous_{int(time.time())}"
+                initial_state = make_initial_state(
+                    query="[Autonomous Trading] Processing periodic signals",
+                    thread_id=thread_id,
+                    backtest_mode=False
+                )
+
+                # Add autonomous-specific state
+                initial_state["signal_batch"] = signal_batch.model_dump()
+                initial_state["autonomous_mode"] = True
+
+                # Invoke graph starting at PM decision node
+                # Graph will route: pm_decision → risk_guard → order_reasoning → HITL (order_executor)
+                config = {
+                    "configurable": {
+                        "thread_id": thread_id
+                    }
+                }
+
+                logger.info(f"[autonomous] Invoking graph for thread {thread_id}")
+                result = await graph.ainvoke(initial_state, config)
+
+                # Execution stops at HITL gate (interrupt_before=["order_executor_node"])
+                # User must call /v1/approve/{thread_id} or /v1/reject/{thread_id} to continue
+                if result.get("_execute_orders"):
+                    logger.info(
+                        f"[autonomous] Orders ready for HITL approval (thread_id={thread_id}): "
+                        f"{result.get('pm_decision_reasoning')}"
+                    )
+                else:
+                    logger.info(
+                        f"[autonomous] No orders generated: {result.get('pm_decision_reasoning')}"
+                    )
+
+            except Exception as exc:
+                logger.error(f"[autonomous] Error in signal processing cycle: {exc}", exc_info=True)
+                # Continue running despite errors in individual cycles
+
+    except asyncio.CancelledError:
+        logger.info("[autonomous] periodic signal processing task cancelled")
+        raise
+
+
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 
 
@@ -119,13 +318,48 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Semi-Auto Portfolio Manager API (port 8000)...")
     logger.info("=" * 70)
 
+    _state._event_loop = asyncio.get_event_loop()
+    logger.info("[OK] Event loop reference stored for cross-thread telemetry")
+
     logger.info("Compiling LangGraph...")
-    _state._graph = build_graph()
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    checkpoint_path = project_root / "data" / "checkpoints.db"
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    _state._checkpointer_cm = AsyncSqliteSaver.from_conn_string(str(checkpoint_path))
+    _state._checkpointer = await _state._checkpointer_cm.__aenter__()
+    _state._graph = build_graph(checkpointer=_state._checkpointer)
     logger.info("[OK] Graph compiled with HITL interrupt_before=['executor_node']")
 
     logger.info("Pre-warming LLM singletons...")
     init_all_agents()
     logger.info("[OK] All LLM singletons initialized")
+
+    # ── Ensure historical data is loaded ───────────────────────────────────
+    watchlist = app_config.get_watchlist_symbols()
+    if watchlist:
+        try:
+            await _ensure_historical_data_loaded(watchlist, years=3)
+        except Exception as exc:
+            logger.warning(f"[startup] Historical data check failed: {exc}", exc_info=True)
+    else:
+        logger.warning("[startup] No watchlist symbols configured")
+
+    # ── Fetch account info at startup ──────────────────────────────────────
+    try:
+        from src.common.external.alpaca_portfolio import fetch_account_info, fetch_positions
+        account = fetch_account_info()
+        positions = fetch_positions()
+        logger.info("=" * 70)
+        logger.info(f"📊 Alpaca Account Status:")
+        logger.info(f"   Equity:        ${account['equity']:,.2f}")
+        logger.info(f"   Cash:          ${account['cash']:,.2f}")
+        logger.info(f"   Buying Power:  ${account['buying_power']:,.2f}")
+        logger.info(f"   Positions:     {len(positions)}")
+        if positions:
+            logger.info(f"   Symbols:       {', '.join(p['symbol'] for p in positions[:5])}")
+        logger.info("=" * 70)
+    except Exception as exc:
+        logger.warning(f"[startup] Could not fetch account info: {exc}")
 
     # ── Startup archival: clear stale live_trades from previous run ────────
     try:
@@ -162,6 +396,34 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"[streams] failed to start — continuing without live data: {exc}")
 
+    # ── Periodic autonomous signal processing ──────────────────────────────
+    _state._autonomous_task = None
+    autonomous_config = app_config.get("autonomous_trading", {})
+    if autonomous_config.get("enabled", False):
+        try:
+            logger.info("[autonomous] Initializing signal aggregator...")
+            _state._signal_aggregator = SignalAggregator()
+
+            # Get interval from config
+            interval = app_config.get("intervals", {}).get("quant_analysis_minutes", 30)
+
+            _state._autonomous_task = asyncio.create_task(
+                _run_periodic_signal_processing(
+                    _state._signal_aggregator,
+                    _state._graph,
+                    interval
+                ),
+                name="autonomous-signal-processing",
+            )
+            logger.info(
+                f"[OK] Autonomous signal processing task started "
+                f"(every {interval}m, HITL approval required)"
+            )
+        except Exception as exc:
+            logger.warning(f"[autonomous] Failed to start: {exc}", exc_info=True)
+    else:
+        logger.info("[autonomous] Autonomous trading disabled in config")
+
     logger.info("=" * 70)
     logger.info("API Server: http://localhost:8000")
     logger.info("Interactive Docs: http://localhost:8000/docs")
@@ -184,3 +446,17 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
     logger.info("[OK] Live streams stopped")
+    if _state._autonomous_task and not _state._autonomous_task.done():
+        _state._autonomous_task.cancel()
+        try:
+            await asyncio.wait_for(_state._autonomous_task, timeout=5.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    logger.info("[OK] Autonomous signal processing stopped")
+    if getattr(_state, '_checkpointer_cm', None) is not None:
+        try:
+            await _state._checkpointer_cm.__aexit__(None, None, None)
+        except Exception:
+            pass
+        _state._checkpointer_cm = None
+    logger.info("[OK] Checkpointer closed")

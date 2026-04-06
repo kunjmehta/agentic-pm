@@ -208,29 +208,34 @@ class PortfolioSkills:
         side: str,
         order_type: str = "market",
         limit_price: Optional[float] = None,
+        stop_price: Optional[float] = None,
+        time_in_force: str = "day",
     ) -> Dict:
         """Place a buy or sell order via Alpaca.
 
-        Routes to a market or limit order based on ``order_type``.
+        Routes to market, limit, stop, or stop-limit based on ``order_type``.
 
         Args:
             symbol: Stock ticker (e.g. "AAPL").
             qty: Number of shares.  Must be > 0.
             side: "buy" or "sell".
-            order_type: "market" (default) or "limit".
-            limit_price: Required when ``order_type == "limit"``.
+            order_type: "market" | "limit" | "stop" | "stop_limit".
+            limit_price: Required when ``order_type`` is "limit" or "stop_limit".
+            stop_price: Required when ``order_type`` is "stop" or "stop_limit".
+            time_in_force: "day" | "gtc" | "ioc" | "fok". Default "day".
 
         Returns:
-            Dict with order id, symbol, qty, side, type, status,
-            submitted_at, and optionally limit_price.
+            Dict with order id, symbol, qty, side, type, status, submitted_at,
+            and applicable price fields.
 
         Raises:
-            ValueError: If order_type is unsupported or limit_price is
-                missing for a limit order.
+            ValueError: If order_type is unsupported or required prices missing.
         """
         from src.common.external.alpaca_portfolio import (
             place_market_order,
             place_limit_order,
+            place_stop_order,
+            place_stop_limit_order,
         )
 
         if order_type == "market":
@@ -241,14 +246,87 @@ class PortfolioSkills:
                     f"limit_price must be > 0 for a limit order, got {limit_price}"
                 )
             return place_limit_order(
-                symbol=symbol,
-                qty=qty,
-                side=side,
-                limit_price=limit_price,
+                symbol=symbol, qty=qty, side=side,
+                limit_price=limit_price, time_in_force=time_in_force,
+            )
+        if order_type == "stop":
+            if stop_price is None or stop_price <= 0:
+                raise ValueError(
+                    f"stop_price must be > 0 for a stop order, got {stop_price}"
+                )
+            return place_stop_order(
+                symbol=symbol, qty=qty, side=side,
+                stop_price=stop_price, time_in_force=time_in_force,
+            )
+        if order_type == "stop_limit":
+            if stop_price is None or stop_price <= 0:
+                raise ValueError(
+                    f"stop_price must be > 0 for a stop-limit order, got {stop_price}"
+                )
+            if limit_price is None or limit_price <= 0:
+                raise ValueError(
+                    f"limit_price must be > 0 for a stop-limit order, got {limit_price}"
+                )
+            return place_stop_limit_order(
+                symbol=symbol, qty=qty, side=side,
+                stop_price=stop_price, limit_price=limit_price,
+                time_in_force=time_in_force,
             )
         raise ValueError(
-            f"Unsupported order_type '{order_type}'. Use 'market' or 'limit'."
+            f"Unsupported order_type '{order_type}'. "
+            "Use 'market', 'limit', 'stop', or 'stop_limit'."
         )
+
+    def place_stop_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        stop_price: float,
+        time_in_force: str = "day",
+    ) -> Dict:
+        """Place a stop (stop-market) order directly.
+
+        Args:
+            symbol: Stock ticker.
+            qty: Shares to trade.  Must be > 0.
+            side: "buy" or "sell".
+            stop_price: Trigger price.  Must be > 0.
+            time_in_force: "day" | "gtc" | "ioc" | "fok". Default "day".
+
+        Returns:
+            Dict with order details including stop_price.
+        """
+        from src.common.external.alpaca_portfolio import place_stop_order as _place
+        return _place(symbol=symbol, qty=qty, side=side,
+                      stop_price=stop_price, time_in_force=time_in_force)
+
+    def place_stop_limit_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        stop_price: float,
+        limit_price: float,
+        time_in_force: str = "day",
+    ) -> Dict:
+        """Place a stop-limit order directly.
+
+        Args:
+            symbol: Stock ticker.
+            qty: Shares to trade.  Must be > 0.
+            side: "buy" or "sell".
+            stop_price: Trigger price.  Must be > 0.
+            limit_price: Execution price cap/floor.  Must be > 0.
+            time_in_force: "day" | "gtc" | "ioc" | "fok". Default "day".
+
+        Returns:
+            Dict with order details including stop_price and limit_price.
+        """
+        from src.common.external.alpaca_portfolio import place_stop_limit_order as _place
+        return _place(symbol=symbol, qty=qty, side=side,
+                      stop_price=stop_price, limit_price=limit_price,
+                      time_in_force=time_in_force)
 
     def close_position(self, symbol: str) -> Dict:
         """Liquidate the full position for a symbol at market price.
@@ -350,7 +428,8 @@ class PortfolioSkills:
         # ── Compute target qty ───────────────────────────────────────────
         target_notional = equity * max(0.0, float(target_pct))
         target_qty = int(target_notional / current_price)  # whole shares only
-        delta_qty = target_qty - int(current_qty)
+        current_qty_int = int(round(current_qty))  # Round instead of truncate
+        delta_qty = target_qty - current_qty_int
 
         current_pct = (abs(current_qty) * current_price / equity) if equity > 0 else 0.0
 
@@ -358,7 +437,7 @@ class PortfolioSkills:
             "symbol": symbol.upper(),
             "target_pct": target_pct,
             "current_pct": round(current_pct, 4),
-            "current_qty": int(current_qty),
+            "current_qty": current_qty_int,
             "target_qty": target_qty,
             "delta_qty": delta_qty,
             "equity": equity,

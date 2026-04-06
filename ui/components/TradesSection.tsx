@@ -1,6 +1,7 @@
 'use client';
 
 import type { BacktestResult, Trade } from '@/types';
+import CompactTable, { type CompactTableColumn } from './CompactTable';
 
 function fmtPrice(v: unknown): string {
   const n = Number(v);
@@ -74,69 +75,56 @@ function SingleBacktest({ btRes }: SingleBacktestProps) {
         <div style={{ padding: '8px 12px', fontSize: 11, color: '#555' }}>No trade records in result.</div>
       ) : (
         <>
-          {/* Unified Trades table (closed + open, all columns) */}
-          <table className="trades-table">
-            <thead>
-              <tr>
-                <th className="tc-num">#</th>
-                <th>Side</th>
-                <th>Entry Date</th>
-                <th>Exit Date</th>
-                <th style={{ textAlign: 'right' }}>Entry $</th>
-                <th style={{ textAlign: 'right' }}>Exit $</th>
-                <th style={{ textAlign: 'right' }}>Shares</th>
-                <th>Exit Reason</th>
-                <th style={{ textAlign: 'right' }}>P&amp;L $</th>
-                <th style={{ textAlign: 'right' }}>P&amp;L %</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.slice(0, 200).map((trade, i) => {
-                const isClosed = trade.exit_date != null;
-                const side = (trade.side ?? 'long').toUpperCase().slice(0, 5);
-                const entryDate = fmtDate(trade.entry_date ?? trade.date ?? trade.timestamp);
-                const exitDate = isClosed ? fmtDate(trade.exit_date) : '—';
-                const ep = fmtPrice(trade.entry_price ?? trade.price);
-                const xp = isClosed ? fmtPrice(trade.exit_price) : '—';
-                const shares = fmtShares(trade);
-                const reason = isClosed
-                  ? String(trade.exit_reason ?? trade.reason ?? '—').replace(/_/g, ' ')
-                  : '—';
-
-                const pnlRaw = trade.pnl ?? trade.profit_loss ?? null;
-                const pnlPctRaw = trade.pnl_pct ?? null;
-                const pnlNum = pnlRaw !== null ? Number(pnlRaw) : null;
-                const pnlPctNum = pnlPctRaw !== null ? Number(pnlPctRaw) : null;
-                const pnlCls = pnlNum !== null ? (pnlNum >= 0 ? 'trade-pnl-pos' : 'trade-pnl-neg') : '';
-                const pnlStr = pnlNum !== null
-                  ? (pnlNum >= 0 ? '+$' : '-$') + Math.abs(pnlNum).toFixed(2)
-                  : '—';
-                const pnlPctStr = pnlPctNum !== null
-                  ? (pnlPctNum >= 0 ? '+' : '') + pnlPctNum.toFixed(2) + '%'
-                  : '—';
-
-                return (
-                  <tr key={i}>
-                    <td className="tc-num">{i + 1}</td>
-                    <td className={side === 'LONG' || side === 'BUY' ? 'trade-buy' : 'trade-sell'}>{side}</td>
-                    <td>{entryDate}</td>
-                    <td>{exitDate}</td>
-                    <td style={{ textAlign: 'right', color: '#6ee7b7' }}>${ep}</td>
-                    <td style={{ textAlign: 'right', color: isClosed ? '#f87171' : '#555' }}>{isClosed ? `$${xp}` : '—'}</td>
-                    <td style={{ textAlign: 'right' }}>{shares}</td>
-                    <td style={{ fontSize: 10, color: '#888' }}>{reason.slice(0, 18)}</td>
-                    <td style={{ textAlign: 'right' }} className={pnlCls}>{pnlStr}</td>
-                    <td style={{ textAlign: 'right' }} className={pnlCls}>{pnlPctStr}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {trades.length > 200 && (
-            <div style={{ padding: '2px 8px 4px', fontSize: 10, color: '#555', fontFamily: 'monospace' }}>
-              … {trades.length - 200} more trades not shown
-            </div>
-          )}
+          <CompactTable
+            columns={[
+              { key: 'num', label: '#', align: 'left' },
+              { key: 'side', label: 'Side', render: (v) => {
+                const side = String(v ?? 'LONG').toUpperCase().slice(0, 5);
+                const cls = side === 'LONG' || side === 'BUY' ? 'trade-buy' : 'trade-sell';
+                return <span className={cls}>{side}</span>;
+              }},
+              { key: 'entry_date', label: 'Entry Date', sortable: true },
+              { key: 'exit_date', label: 'Exit Date', sortable: true },
+              { key: 'entry_price', label: 'Entry $', align: 'right', render: (v) => <span style={{ color: '#6ee7b7' }}>${fmtPrice(v)}</span> },
+              { key: 'exit_price', label: 'Exit $', align: 'right', render: (v, row) => {
+                const isClosed = row.exit_date != null;
+                const color = isClosed ? '#f87171' : '#555';
+                const val = isClosed ? `$${fmtPrice(v)}` : '—';
+                return <span style={{ color }}>{val}</span>;
+              }},
+              { key: 'shares', label: 'Shares', align: 'right' },
+              { key: 'exit_reason', label: 'Exit Reason', render: (v) => <span style={{ fontSize: 10, color: '#888' }}>{String(v ?? '—').replace(/_/g, ' ').slice(0, 18)}</span> },
+              { key: 'pnl', label: 'P&L $', align: 'right', sortable: true, render: (v) => {
+                const pnlNum = v !== null && v !== undefined ? Number(v) : null;
+                if (pnlNum === null) return '—';
+                const cls = pnlNum >= 0 ? 'trade-pnl-pos' : 'trade-pnl-neg';
+                const str = (pnlNum >= 0 ? '+$' : '-$') + Math.abs(pnlNum).toFixed(2);
+                return <span className={cls}>{str}</span>;
+              }},
+              { key: 'pnl_pct', label: 'P&L %', align: 'right', sortable: true, render: (v) => {
+                const pnlPctNum = v !== null && v !== undefined ? Number(v) : null;
+                if (pnlPctNum === null) return '—';
+                const cls = pnlPctNum >= 0 ? 'trade-pnl-pos' : 'trade-pnl-neg';
+                const str = (pnlPctNum >= 0 ? '+' : '') + pnlPctNum.toFixed(2) + '%';
+                return <span className={cls}>{str}</span>;
+              }},
+            ]}
+            data={trades.map((trade, i) => ({
+              num: i + 1,
+              side: trade.side ?? 'long',
+              entry_date: fmtDate(trade.entry_date ?? trade.date ?? trade.timestamp),
+              exit_date: trade.exit_date != null ? fmtDate(trade.exit_date) : '—',
+              entry_price: trade.entry_price ?? trade.price,
+              exit_price: trade.exit_price,
+              shares: fmtShares(trade),
+              exit_reason: trade.exit_date != null ? (trade.exit_reason ?? trade.reason ?? '—') : '—',
+              pnl: trade.pnl ?? trade.profit_loss ?? null,
+              pnl_pct: trade.pnl_pct ?? null,
+            }))}
+            maxRows={50}
+            maxHeight={400}
+            showExport
+          />
           {open.length > 0 && (
             <div className="trades-open-note">
               ⏳ {open.length} position{open.length !== 1 ? 's' : ''} still open at end of backtest

@@ -19,12 +19,16 @@ logger = get_logger(__name__)
 class MeanReversionSkill:
     """Mean-reversion strategy analyser combining statistics, MAs, and bands.
 
+    Supports both intraday and daily timeframes.
+
     Workflow A (backtesting): ``analyze_bars(df, threshold, ma_period)``
     takes a pre-fetched DataFrame and returns signals without any DAO call.
 
     Workflow B (signal generation): ``generate_signals(symbol, ...)``
     fetches data from AlpacaDAO and returns the full analysis dict including
     a trade recommendation.
+
+    For daily timeframes, pass ``timeframe="1Day"`` to ``generate_signals``.
     """
 
     # ------------------------------------------------------------------
@@ -57,8 +61,13 @@ class MeanReversionSkill:
             Analysis dict with statistics, moving_averages, signals,
             levels, trade_recommendation.
         """
-        if df.empty or len(df) < 2:
-            return {"error": "Insufficient data for mean-reversion analysis"}
+        min_bars = max(lookback, sr_lookback, 50)
+        if df.empty or len(df) < min_bars:
+            return {
+                "error": f"Insufficient data for mean-reversion analysis (need {min_bars} bars, got {len(df)})",
+                "action": "hold",
+                "confidence": 0.0,
+            }
 
         current_price = float(df["close"].iloc[-1])
         stats = self._calc_statistics(df, lookback)
@@ -102,6 +111,9 @@ class MeanReversionSkill:
                 "ma_period": ma_period,
                 "sr_lookback": sr_lookback,
             },
+            # Add top-level keys for uniform access
+            "action": recommendation.get("action", "hold"),
+            "confidence": recommendation.get("confidence", 0.0),
         }
 
     # ------------------------------------------------------------------
@@ -152,6 +164,9 @@ class MeanReversionSkill:
         )
         result["symbol"] = symbol.upper()
         result["timestamp"] = datetime.now().isoformat()
+        # Add top-level keys for uniform access
+        result["action"] = result.get("trade_recommendation", {}).get("action", "hold")
+        result["confidence"] = result.get("trade_recommendation", {}).get("confidence", 0.0)
         return result
 
     # ------------------------------------------------------------------
@@ -227,9 +242,11 @@ class MeanReversionSkill:
         """
         if df.empty or len(df) < ma_period:
             return {}
+        if lookback < ma_period:
+            lookback = ma_period
         prices = df["close"].tail(lookback)
         sma = prices.rolling(ma_period).mean()
-        std = prices.rolling(ma_period).std(ddof=0)
+        std = prices.rolling(ma_period).std(ddof=1)  # Sample std (industry standard)
         return {
             "upper_band": round(float((sma + std * 2).iloc[-1]), 2),
             "middle_band": round(float(sma.iloc[-1]), 2),
@@ -395,9 +412,11 @@ class MeanReversionSkill:
                 "take_profit": round(mean, 2),
             }
         vwap_info = f" VWAP: ${vwap:.2f}." if vwap else ""
+        # Invert confidence for hold: close to mean = high confidence hold
+        hold_confidence = 1.0 - min(abs(z) / threshold, 0.9)  # z=0 → 1.0, z=threshold → 0.1
         return {
             "action": "hold",
-            "confidence": round(confidence, 2),
+            "confidence": round(max(hold_confidence, 0.1), 2),
             "reason": f"Price within normal range (Z={z:.2f}). No extreme deviation.{vwap_info}",
             "entry_price": None,
             "stop_loss": None,

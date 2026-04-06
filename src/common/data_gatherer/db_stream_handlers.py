@@ -20,6 +20,27 @@ from src.common.utils import get_logger, config
 # Initialize logger
 logger = get_logger(__name__)
 
+# Lazy-loaded ws_manager (to avoid circular import issues)
+_ws_manager = None
+
+
+def get_ws_manager():
+    """Get or create WebSocket manager instance.
+
+    Returns:
+        PortfolioWSManager instance (singleton)
+    """
+    global _ws_manager
+    if _ws_manager is None:
+        try:
+            from src.semi_auto.ws_manager import ws_manager
+            _ws_manager = ws_manager
+            logger.debug("WebSocket manager loaded for broadcasting")
+        except ImportError:
+            logger.warning("ws_manager not available - UI broadcasts disabled")
+            _ws_manager = None
+    return _ws_manager
+
 # Module-level DAO instance (singleton)
 _dao = None
 
@@ -223,6 +244,35 @@ async def flush_cache_to_db():
         logger.error(f"Failed to flush cache to DB: {e}", exc_info=True)
 
 
+async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
+    """Broadcast bar update to connected UI clients.
+
+    Args:
+        bar: Alpaca bar object
+        timeframe: Bar timeframe string (default: '1Min')
+    """
+    ws_mgr = get_ws_manager()
+    if ws_mgr is None:
+        return
+
+    try:
+        message = {
+            "type": "bar_update",
+            "symbol": bar.symbol,
+            "timestamp": bar.timestamp.isoformat(),
+            "timeframe": timeframe,
+            "open": float(bar.open),
+            "high": float(bar.high),
+            "low": float(bar.low),
+            "close": float(bar.close),
+            "volume": int(bar.volume),
+            "vwap": float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap else None,
+        }
+        await ws_mgr.broadcast(message)
+    except Exception as exc:
+        logger.debug(f"Failed to broadcast bar to UI: {exc}")
+
+
 async def save_bar_to_db(bar, timeframe: str = '1Min'):
     """Save bar data to database and automatically compute indicators.
 
@@ -256,6 +306,9 @@ async def save_bar_to_db(bar, timeframe: str = '1Min'):
         # Save bar to database
         dao.save_bars(bar_data, timeframe=timeframe)
         logger.debug(f"Saved bar to DB: {bar.symbol} @ {bar.timestamp}")
+
+        # Broadcast to UI (NEW)
+        await broadcast_bar_to_ui(bar, timeframe)
 
         # Auto-compute indicators if enabled
         etl_enabled = config.get("etl.enabled", default=True)
@@ -753,6 +806,30 @@ async def combined_trade_handler(trade):
     await save_trade_to_db(trade)
 
 
+async def broadcast_trade_to_ui(trade):
+    """Broadcast trade update to connected UI clients.
+
+    Args:
+        trade: Alpaca trade object
+    """
+    ws_mgr = get_ws_manager()
+    if ws_mgr is None:
+        return
+
+    try:
+        message = {
+            "type": "trade_update",
+            "symbol": trade.symbol,
+            "price": float(trade.price),
+            "size": int(trade.size),
+            "timestamp": trade.timestamp.isoformat(),
+            "exchange": trade.exchange if hasattr(trade, 'exchange') else None,
+        }
+        await ws_mgr.broadcast(message)
+    except Exception as exc:
+        logger.debug(f"Failed to broadcast trade to UI: {exc}")
+
+
 async def combined_trade_cache_handler(trade):
     """Combined handler: print AND save to cache for batched writes.
 
@@ -767,6 +844,9 @@ async def combined_trade_cache_handler(trade):
 
     # Save to cache
     await save_trade_to_cache(trade)
+
+    # Broadcast to UI (NEW)
+    await broadcast_trade_to_ui(trade)
 
 
 async def combined_bar_handler(bar, timeframe: str = '1Min'):

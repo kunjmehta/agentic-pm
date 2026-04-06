@@ -42,6 +42,12 @@ _BARS_LOOKBACK_DAYS: int = 90
 # Minimum bar count required to declare bars_available=True.
 _MIN_BARS: int = 120  # matches strategy.mean_reversion.lookback default
 
+# ── Cache for data availability checks ────────────────────────────────────────
+# Avoids repeated DuckDB queries for the same symbol within a short timeframe.
+# Cache TTL: 5 minutes (optimized for high-frequency queries during development).
+_CACHE_TTL_SECONDS: int = 300  # 5 minutes
+_data_availability_cache: Dict[tuple, tuple] = {}  # {(symbol, timeframe): (result, timestamp)}
+
 
 def _check_indicators(symbol: str, timeframe: str, now: datetime) -> Dict[str, Any]:
     """Check whether pre-computed indicators exist for *symbol* in the last 24 h.
@@ -146,12 +152,19 @@ def data_availability_node(state: dict) -> dict:
     reasoning nodes receive concrete availability flags instead of having to
     guess or query the DB themselves.
 
+    Now enhanced to read watchlist configuration and provide strategy-specific
+    guidance about indicator pre-computation vs on-demand fetching.
+
     Args:
         state: Current ``GraphState`` dict — must have ``symbol`` set by the
                classifier (may be ``None`` for portfolio-only queries).
 
     Returns:
-        Partial state update with ``data_availability`` dict.
+        Partial state update with ``data_availability`` dict including:
+        - Standard availability flags (indicators, bars, trades)
+        - Strategy list for this symbol from config
+        - Indicator pre-computation flag from config
+        - Timeframes configured for this symbol
     """
     symbol: Optional[str] = state.get("symbol")
     timeframe: str = "1Min"  # Intraday standard — indicators are always 1Min
@@ -173,12 +186,48 @@ def data_availability_node(state: dict) -> dict:
             "latest_indicator_ts": None,
             "latest_bar_ts": None,
             "checked_at": checked_at,
+            "strategies": [],
+            "timeframes": [],
+            "should_precompute_indicators": False,
             "note": "No symbol resolved — portfolio query",
         }
         logger.info("[data_avail] no symbol — skipping data checks")
         return {"data_availability": result}
 
-    logger.info(f"[data_avail] checking {symbol}/{timeframe} ...")
+    # ── Check cache first ──────────────────────────────────────────────────────
+    cache_key = (symbol, timeframe)
+    if cache_key in _data_availability_cache:
+        cached_result, cached_time = _data_availability_cache[cache_key]
+        age_seconds = (now.timestamp() - cached_time.timestamp())
+        if age_seconds < _CACHE_TTL_SECONDS:
+            logger.info(
+                f"[data_avail] cache HIT for {symbol}/{timeframe} "
+                f"(age={int(age_seconds)}s, TTL={_CACHE_TTL_SECONDS}s)"
+            )
+            # Return cached result with promoted flags
+            return {
+                "data_availability": cached_result,
+                "_indicators_available": cached_result["indicators_available"],
+                "_bars_available": cached_result["bars_available"],
+                "_trades_available": cached_result["trades_available"],
+                "_should_precompute_indicators": cached_result.get("should_precompute_indicators", False),
+            }
+        else:
+            logger.info(f"[data_avail] cache EXPIRED for {symbol}/{timeframe} (age={int(age_seconds)}s)")
+
+    # Get symbol configuration from watchlist
+    watchlist = config.get("watchlist", {})
+    symbol_config = watchlist.get(symbol, {}) if isinstance(watchlist, dict) else {}
+
+    # Extract strategy and indicator configuration
+    strategies = symbol_config.get("strategies", [])
+    configured_timeframes = symbol_config.get("timeframes", ["1Min", "1Hour", "1Day"])
+    should_precompute = symbol_config.get("auto_compute_indicators", True)
+
+    logger.info(
+        f"[data_avail] checking {symbol}/{timeframe} "
+        f"(strategies={len(strategies)}, precompute={should_precompute}) ..."
+    )
 
     ind = _check_indicators(symbol, timeframe, now)
     bars = _check_bars(symbol, timeframe, now)
@@ -198,16 +247,34 @@ def data_availability_node(state: dict) -> dict:
         "latest_indicator_ts": ind["latest_ts"],
         "latest_bar_ts": bars["latest_ts"],
         "checked_at": checked_at,
+        # ── Configuration-based guidance for reasoning agents ────────────────
+        "strategies": strategies,
+        "timeframes": configured_timeframes,
+        "should_precompute_indicators": should_precompute,
     }
 
     logger.info(
         f"[data_avail] {symbol}/{timeframe} — "
         f"indicators={ind['available']} ({ind['row_count']} rows)  "
         f"bars={bars['available']} ({bars['bar_count']} bars)  "
-        f"trades={trades['available']} ({trades['trade_count']} trades)"
+        f"trades={trades['available']} ({trades['trade_count']} trades)  "
+        f"strategies={len(strategies)}  "
+        f"precompute={should_precompute}"
     )
 
-    return {"data_availability": result}
+    # ── Update cache ───────────────────────────────────────────────────────────
+    _data_availability_cache[cache_key] = (result, now)
+    logger.debug(f"[data_avail] cache UPDATED for {symbol}/{timeframe} (TTL={_CACHE_TTL_SECONDS}s)")
+
+    return {
+        "data_availability": result,
+        # Promoted top-level flags — consumed directly by portfolio_node
+        # and graph routing without unpacking the nested dict.
+        "_indicators_available": ind["available"],
+        "_bars_available": bars["available"],
+        "_trades_available": trades["available"],
+        "_should_precompute_indicators": should_precompute,
+    }
 
 
 if __name__ == "__main__":

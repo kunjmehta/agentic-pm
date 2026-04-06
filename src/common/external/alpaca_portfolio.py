@@ -11,14 +11,16 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from datetime import datetime
-from typing import Optional, List, Dict
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Tuple
 import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     GetOrdersRequest,
     MarketOrderRequest,
     LimitOrderRequest,
+    StopOrderRequest,
+    StopLimitOrderRequest,
 )
 from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
 from src.common.utils import secrets, get_logger
@@ -33,6 +35,30 @@ SECRET_KEY = secrets.get("alpaca.secret_key")
 # Initialize trading client
 trading_client = TradingClient(API_KEY, SECRET_KEY)
 logger.info("Alpaca trading client initialized")
+
+# =============================================================================
+# Cache with TTL (Time To Live)
+# =============================================================================
+
+_CACHE_TTL_SECONDS = 30  # Cache portfolio data for 30 seconds
+_account_cache: Optional[Tuple[datetime, Dict]] = None  # (timestamp, data)
+_positions_cache: Optional[Tuple[datetime, List[Dict]]] = None  # (timestamp, data)
+
+
+def _is_cache_valid(cached_data: Optional[Tuple[datetime, any]], ttl_seconds: int = _CACHE_TTL_SECONDS) -> bool:
+    """Check if cached data is still valid based on TTL.
+
+    Args:
+        cached_data: Tuple of (timestamp, data) or None
+        ttl_seconds: Time to live in seconds
+
+    Returns:
+        True if cache exists and is within TTL window
+    """
+    if cached_data is None:
+        return False
+    timestamp, _ = cached_data
+    return (datetime.now() - timestamp).total_seconds() < ttl_seconds
 
 
 # =============================================================================
@@ -72,9 +98,10 @@ def _assert_trading_allowed() -> None:
 # =============================================================================
 
 def fetch_account_info() -> Dict:
-    """Fetch current account information from Alpaca.
+    """Fetch current account information from Alpaca with caching.
 
     Returns account equity, cash, buying power, and other account metrics.
+    Results are cached for 30 seconds to reduce API calls.
 
     Reference: https://docs.alpaca.markets/reference/getaccount-1
 
@@ -89,7 +116,15 @@ def fetch_account_info() -> Dict:
     Raises:
         Exception: If API request fails
     """
-    logger.info("Fetching account information from Alpaca")
+    global _account_cache
+
+    # Return cached data if valid
+    if _is_cache_valid(_account_cache):
+        _, account_data = _account_cache
+        logger.debug("Returning cached account info")
+        return account_data
+
+    logger.debug("Fetching account information from Alpaca")
 
     try:
         account = trading_client.get_account()
@@ -117,8 +152,11 @@ def fetch_account_info() -> Dict:
             "daytrade_count": account.daytrade_count,
         }
 
-        logger.info(f"Account info fetched: equity=${account_data['equity']:.2f}, "
-                   f"cash=${account_data['cash']:.2f}")
+        # Cache the result
+        _account_cache = (datetime.now(), account_data)
+
+        logger.debug(f"Account info fetched: equity=${account_data['equity']:.2f}, "
+                    f"cash=${account_data['cash']:.2f}")
 
         return account_data
 
@@ -133,10 +171,11 @@ def fetch_account_info() -> Dict:
 # =============================================================================
 
 def fetch_positions() -> List[Dict]:
-    """Fetch all current positions from Alpaca.
+    """Fetch all current positions from Alpaca with caching.
 
     Returns detailed position information including unrealized P&L,
     cost basis, and current market value for each position.
+    Results are cached for 30 seconds to reduce API calls.
 
     Reference: https://docs.alpaca.markets/reference/getallopenpositions-1
 
@@ -155,7 +194,15 @@ def fetch_positions() -> List[Dict]:
     Raises:
         Exception: If API request fails
     """
-    logger.info("Fetching all positions from Alpaca")
+    global _positions_cache
+
+    # Return cached data if valid
+    if _is_cache_valid(_positions_cache):
+        _, positions_list = _positions_cache
+        logger.debug(f"Returning cached positions ({len(positions_list)} positions)")
+        return positions_list
+
+    logger.debug("Fetching all positions from Alpaca")
 
     try:
         positions = trading_client.get_all_positions()
@@ -183,7 +230,10 @@ def fetch_positions() -> List[Dict]:
             }
             positions_list.append(position_data)
 
-        logger.info(f"Fetched {len(positions_list)} positions")
+        # Cache the result
+        _positions_cache = (datetime.now(), positions_list)
+
+        logger.debug(f"Fetched {len(positions_list)} positions")
 
         return positions_list
 
@@ -471,6 +521,184 @@ def place_limit_order(
                 f"Insufficient buying power for {side} {qty} {symbol} @ {limit_price}: {err_str}"
             ) from e
         error_msg = f"Failed to place limit order ({side} {qty} {symbol} @ {limit_price}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_stop_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    time_in_force: str = "day",
+) -> Dict:
+    """Place a stop (stop-market) order via Alpaca.
+
+    When the market price reaches ``stop_price`` the order becomes a market
+    order and fills at the next available price.  Commonly used as a stop-loss
+    on an existing position.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price.  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+
+    Returns:
+        Dict with order details: id, symbol, qty, side, type, stop_price,
+        status, submitted_at, time_in_force.
+
+    Raises:
+        ValueError: If qty <= 0 or stop_price <= 0.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    if stop_price <= 0:
+        raise ValueError(f"stop_price must be > 0, got {stop_price}")
+
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    tif_map = {
+        "day": TimeInForce.DAY,
+        "gtc": TimeInForce.GTC,
+        "ioc": TimeInForce.IOC,
+        "fok": TimeInForce.FOK,
+    }
+    tif_enum = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+    logger.info(f"[place_stop_order] {side.upper()} {qty} {symbol} stop@${stop_price:.2f}")
+
+    _assert_trading_allowed()
+
+    try:
+        request = StopOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            stop_price=stop_price,
+            time_in_force=tif_enum,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "stop_price": float(order.stop_price) if order.stop_price else stop_price,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_stop_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for stop {side} {qty} {symbol} @ {stop_price}: {err_str}"
+            ) from e
+        error_msg = f"Failed to place stop order ({side} {qty} {symbol} stop@{stop_price}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_stop_limit_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    limit_price: float,
+    time_in_force: str = "day",
+) -> Dict:
+    """Place a stop-limit order via Alpaca.
+
+    When the market price reaches ``stop_price`` a limit order at
+    ``limit_price`` is submitted.  Provides trigger control (stop) AND
+    execution price control (limit) — ideal for risk-managed entries/exits.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price that activates the limit order.  Must be > 0.
+        limit_price: Execution price cap (buy) or floor (sell).  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+
+    Returns:
+        Dict with order details: id, symbol, qty, side, type, stop_price,
+        limit_price, status, submitted_at, time_in_force.
+
+    Raises:
+        ValueError: If qty <= 0, stop_price <= 0, or limit_price <= 0.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    if stop_price <= 0:
+        raise ValueError(f"stop_price must be > 0, got {stop_price}")
+    if limit_price <= 0:
+        raise ValueError(f"limit_price must be > 0, got {limit_price}")
+
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    tif_map = {
+        "day": TimeInForce.DAY,
+        "gtc": TimeInForce.GTC,
+        "ioc": TimeInForce.IOC,
+        "fok": TimeInForce.FOK,
+    }
+    tif_enum = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+    logger.info(
+        f"[place_stop_limit_order] {side.upper()} {qty} {symbol} "
+        f"stop@${stop_price:.2f} limit@${limit_price:.2f}"
+    )
+
+    _assert_trading_allowed()
+
+    try:
+        request = StopLimitOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            stop_price=stop_price,
+            limit_price=limit_price,
+            time_in_force=tif_enum,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "stop_price": float(order.stop_price) if order.stop_price else stop_price,
+            "limit_price": float(order.limit_price) if order.limit_price else limit_price,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_stop_limit_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for stop-limit {side} {qty} {symbol}: {err_str}"
+            ) from e
+        error_msg = (
+            f"Failed to place stop-limit order "
+            f"({side} {qty} {symbol} stop@{stop_price} limit@{limit_price}): {err_str}"
+        )
         logger.error(error_msg, exc_info=True)
         raise Exception(error_msg)
 

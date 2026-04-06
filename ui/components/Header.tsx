@@ -39,13 +39,13 @@ export default function Header({
 
   return (
     <header className="header">
-      <span className="header-title">🤖 Portfolio Manager</span>
+      <span className="header-title text-orange-500 font-mono">█ BLOOMBERG TERMINAL</span>
       <div className="header-right">
-        {(['langgraph', 'agentic', 'semiAuto'] as ApiPreset[]).map((p) => {
+        {(['semiAuto'] as ApiPreset[]).map((p) => {
           const labels: Record<ApiPreset, string> = {
             langgraph: 'Graph',
             agentic: 'Agentic',
-            semiAuto: 'Semi-Auto',
+            semiAuto: 'Live Trading',
             custom: 'Custom',
           };
           return (

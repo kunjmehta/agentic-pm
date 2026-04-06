@@ -555,6 +555,11 @@ class AlpacaDAO(BaseDAO):
 
         try:
             with self.transaction():
+                # Count rows to be archived
+                count_query = "SELECT COUNT(*) as count FROM live_trades WHERE ingested_at < ?"
+                result = self.fetch_one(count_query, (cutoff_time,))
+                count = result['count'] if result else 0
+
                 # Insert into historical_trades
                 insert_query = """
                     INSERT INTO historical_trades
@@ -570,11 +575,6 @@ class AlpacaDAO(BaseDAO):
                 # Delete from live_trades
                 delete_query = "DELETE FROM live_trades WHERE ingested_at < ?"
                 self.execute(delete_query, (cutoff_time,))
-
-                # Get count of archived trades
-                count_query = "SELECT changes() as count"
-                result = self.fetch_one(count_query)
-                count = result['count'] if result else 0
 
                 logger.info(f"Successfully archived {count} live trades")
                 return count

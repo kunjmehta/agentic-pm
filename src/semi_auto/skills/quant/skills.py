@@ -88,8 +88,10 @@ class MomentumSkill:
             # and every major charting platform.
             gain = delta.where(delta > 0, 0.0).ewm(alpha=1 / 14, adjust=False).mean()
             loss = (-delta.where(delta < 0, 0.0)).ewm(alpha=1 / 14, adjust=False).mean()
-            rs = gain / loss.replace(0, np.nan)
-            rsi_series = 100 - (100 / (1 + rs))
+            # Fix: use .where() instead of .replace() to handle all-gain bars correctly
+            # All-gain bars should produce RSI=100, not NaN
+            rs = gain / loss.where(loss != 0, np.nan)
+            rsi_series = (100 - (100 / (1 + rs))).fillna(100)  # Fill NaN (all gains) with 100
             rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else None
 
         def _f(series):
@@ -162,7 +164,8 @@ class VolatilitySkill:
             return {"upper": None, "middle": None, "lower": None, "bandwidth": None}
 
         middle = df["close"].rolling(window=period).mean()
-        std = df["close"].rolling(window=period).std(ddof=0)
+        # Use ddof=1 (sample std) for traditional Bollinger Bands calculation
+        std = df["close"].rolling(window=period).std(ddof=1)
         upper = middle + std * num_std
         lower = middle - std * num_std
         bandwidth = (upper - lower) / middle * 100
@@ -451,8 +454,10 @@ class MeanReversionSkill:
             Analysis dict with statistics, moving_averages, signals,
             levels, trade_recommendation.
         """
-        if df.empty or len(df) < 2:
-            return {"error": "Insufficient data for mean-reversion analysis"}
+        # Guard: need enough data for all calculations
+        min_len = max(lookback, sr_lookback, 50)
+        if df.empty or len(df) < min_len:
+            return {"error": f"Insufficient data for mean-reversion analysis (need {min_len} bars, got {len(df)})"}
 
         current_price = float(df["close"].iloc[-1])
         stats = self._calc_statistics(df, lookback)
@@ -483,13 +488,20 @@ class MeanReversionSkill:
                 "take_profit": None,
             }
 
+        # Extract action and confidence to root level for consistency with other strategies
         return {
+            "action": recommendation.get("action", "hold"),
+            "confidence": recommendation.get("confidence", 0.0),
             "current_price": round(current_price, 2),
+            "entry_price": recommendation.get("entry_price"),
+            "stop_loss": recommendation.get("stop_loss"),
+            "take_profit": recommendation.get("take_profit"),
+            "reason": recommendation.get("reason", ""),
             "statistics": stats,
             "moving_averages": ma,
             "signals": signals,
             "levels": levels,
-            "trade_recommendation": recommendation,
+            "trade_recommendation": recommendation,  # Keep for backward compatibility
             "parameters": {"lookback": lookback, "threshold": threshold, "ma_period": ma_period, "sr_lookback": sr_lookback},
         }
 
@@ -617,8 +629,8 @@ class MeanReversionSkill:
             return {}
         prices = df["close"].tail(lookback)
         sma = prices.rolling(ma_period).mean()
-        # Population std (ddof=0) matches J. Bollinger's original definition
-        std = prices.rolling(ma_period).std(ddof=0)
+        # Use ddof=1 (sample std) for traditional Bollinger Bands
+        std = prices.rolling(ma_period).std(ddof=1)
         return {
             "upper_band": round(float((sma + std * 2).iloc[-1]), 2),
             "middle_band": round(float(sma.iloc[-1]), 2),
@@ -685,19 +697,22 @@ class MeanReversionSkill:
             else "neutral"
         )
 
-        # Combined overall signal
-        if z < -2.0 and bb_sig == "oversold":
+        # Combined overall signal (use threshold param, not hardcoded values)
+        strong_threshold = threshold
+        weak_threshold = threshold * 0.75  # 75% of threshold for weaker signals
+
+        if z < -strong_threshold and bb_sig == "oversold":
             overall = "strong_buy"
-        elif z > 2.0 and bb_sig == "overbought":
+        elif z > strong_threshold and bb_sig == "overbought":
             overall = "strong_sell"
-        elif z < -1.5 or (z_sig == "oversold" and ma_sig == "bearish"):
+        elif z < -weak_threshold or (z_sig == "oversold" and ma_sig == "bearish"):
             overall = "buy"
-        elif z > 1.5 or (z_sig == "overbought" and ma_sig == "bullish"):
+        elif z > weak_threshold or (z_sig == "overbought" and ma_sig == "bullish"):
             overall = "sell"
         else:
             overall = "hold"
 
-        state = "overbought" if z > 1.5 else "oversold" if z < -1.5 else "neutral"
+        state = "overbought" if z > weak_threshold else "oversold" if z < -weak_threshold else "neutral"
         return {
             "current_state": state,
             "z_score_signal": z_sig,
@@ -846,11 +861,6 @@ from src.semi_auto.skills.quant.breakout_52w import (  # noqa: E402
     breakout_52w_skill,
     make_breakout_52w_signals,
 )
-from src.semi_auto.skills.quant.mean_reversion_daily import (  # noqa: E402
-    MeanReversionDailySkill,
-    mean_reversion_daily_skill,
-    make_mean_reversion_daily_signals,
-)
 from src.semi_auto.skills.quant.earnings_drift import (  # noqa: E402
     EarningsDriftSkill,
     earnings_drift_skill,
@@ -904,7 +914,6 @@ __all__ = [
     # Swing strategy classes
     "GoldenCrossSkill",
     "Breakout52WeekSkill",
-    "MeanReversionDailySkill",
     "EarningsDriftSkill",
     # Core singletons
     "momentum_skill",
@@ -919,7 +928,6 @@ __all__ = [
     "momentum_burst_skill",
     "golden_cross_skill",
     "breakout_52w_skill",
-    "mean_reversion_daily_skill",
     "earnings_drift_skill",
     # Signal factory functions (backtester compatible)
     "make_vwap_reversion_signals",
@@ -928,7 +936,6 @@ __all__ = [
     "make_momentum_burst_signals",
     "make_golden_cross_signals",
     "make_breakout_52w_signals",
-    "make_mean_reversion_daily_signals",
     "make_earnings_drift_signals",
     # Legacy function aliases
     "calc_momentum_package",

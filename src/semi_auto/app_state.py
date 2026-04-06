@@ -22,6 +22,21 @@ _ARCHIVAL_CUTOFF_MINUTES: int = 120  # archive rows older than 2 hours
 # ── Runtime state (mutated by lifespan, read-only for routers) ────────────────
 
 _graph = None
+_checkpointer = None       # AsyncSqliteSaver instance
+_checkpointer_cm = None    # context manager handle for cleanup
 _data_coordinator = None
 _stream_task: asyncio.Task | None = None
 _archival_task: asyncio.Task | None = None
+_autonomous_task: asyncio.Task | None = None
+_signal_aggregator = None
+
+# ── Live execution telemetry ───────────────────────────────────────────────────
+
+# Per-thread asyncio queues for streaming execution progress events.
+# Keys: thread_id → asyncio.Queue[dict | str]
+# Values are SSE event dicts; sentinel "__done__" signals end of stream.
+_execution_queues: dict[str, asyncio.Queue] = {}
+
+# Reference to the running event loop — stored at startup so executor_node
+# (which runs in a ThreadPoolExecutor) can safely call call_soon_threadsafe.
+_event_loop: asyncio.AbstractEventLoop | None = None

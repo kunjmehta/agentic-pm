@@ -38,14 +38,26 @@ class OpeningRangeBreakoutSkill:
             Dict with action, confidence, range_high, range_low, current_price,
             entry_price, stop_loss, take_profit, reason.
         """
-        if len(df) <= range_bars:
-            return {"action": "hold", "confidence": 0.0, "reason": "Insufficient data for opening range"}
+        # Session filter: keep only today's bars for intraday strategies
+        if isinstance(df.index, pd.DatetimeIndex):
+            if df.index.tzinfo is not None:
+                today = pd.Timestamp.now(tz=df.index.tzinfo).normalize()
+            else:
+                today = pd.Timestamp.now().normalize()
+            today_df = df[df.index >= today]
+        else:
+            # If no datetime index, use all data (assume already filtered to today)
+            today_df = df
 
-        opening = df.iloc[:range_bars]
+        # Min-bars check AFTER session filter (check today's bars only)
+        if len(today_df) <= range_bars:
+            return {"action": "hold", "confidence": 0.0, "reason": f"Insufficient data for opening range (need {range_bars + 1} bars today, got {len(today_df)})"}
+
+        opening = today_df.iloc[:range_bars]
         range_high = float(opening["high"].max())
         range_low = float(opening["low"].min())
         range_size = range_high - range_low
-        current = float(df["close"].iloc[-1])
+        current = float(today_df["close"].iloc[-1])
 
         if range_size <= 0:
             return {"action": "hold", "confidence": 0.0, "reason": "Zero opening range"}
@@ -65,26 +77,61 @@ class OpeningRangeBreakoutSkill:
             confidence = round(min((range_low - current) / range_size * 2, 1.0), 2)
             reason = f"Price broke below opening range low {range_low:.2f}"
         else:
+            # Calculate hold confidence based on position within range
+            # High confidence hold = price in middle of range
+            # Low confidence hold = price near edges (almost breaking out)
+            if range_size > 0:
+                position_pct = (current - range_low) / range_size  # 0.0 = at low, 1.0 = at high, 0.5 = middle
+                # Distance from center (0.5): 0.0 = at center, 0.5 = at edge
+                distance_from_center = abs(position_pct - 0.5)
+                # Convert to confidence: center = 0.8, edges = 0.2
+                hold_confidence = round(0.8 - (distance_from_center * 1.2), 2)
+            else:
+                hold_confidence = 0.5  # Uncertain if zero range
+
             return {
                 "action": "hold",
-                "confidence": 0.0,
-                "range_high": round(range_high, 2),
-                "range_low": round(range_low, 2),
+                "confidence": max(hold_confidence, 0.2),
                 "current_price": round(current, 2),
                 "reason": "Price within opening range",
+                # Structured data fields
+                "indicators": {
+                    "range_high": round(range_high, 2),
+                    "range_low": round(range_low, 2),
+                    "range_size": round(range_size, 4),
+                    "price_vs_high": round(current - range_high, 2),
+                    "price_vs_low": round(current - range_low, 2),
+                },
+                "statistics": {
+                    "position_in_range_pct": round(((current - range_low) / range_size * 100) if range_size > 0 else 50, 1),
+                },
+                "parameters": {
+                    "range_bars": range_bars,
+                },
             }
 
         return {
             "action": action,
             "confidence": confidence,
-            "range_high": round(range_high, 2),
-            "range_low": round(range_low, 2),
             "current_price": round(current, 2),
-            "range_size": round(range_size, 4),
             "entry_price": round(entry, 2),
             "stop_loss": stop,
             "take_profit": target,
             "reason": reason,
+            # Structured data fields
+            "indicators": {
+                "range_high": round(range_high, 2),
+                "range_low": round(range_low, 2),
+                "range_size": round(range_size, 4),
+                "breakout_distance": round(abs(current - (range_high if action == "buy" else range_low)), 2),
+            },
+            "statistics": {
+                "breakout_type": "bullish" if action == "buy" else "bearish",
+                "breakout_strength_pct": round((abs(current - (range_high if action == "buy" else range_low)) / range_size * 100), 1),
+            },
+            "parameters": {
+                "range_bars": range_bars,
+            },
         }
 
     def generate_signals(

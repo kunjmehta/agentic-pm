@@ -895,6 +895,85 @@ class OpenOrdersResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+
+class ConfigResponse(BaseModel):
+    """Response for GET /v1/config.
+
+    Attributes:
+        config: Full configuration dictionary.
+        timestamp: ISO-8601 UTC timestamp.
+    """
+
+    config: Dict[str, Any]
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class ConfigSectionResponse(BaseModel):
+    """Response for GET /v1/config/{section}.
+
+    Attributes:
+        section: Section name requested.
+        config: Configuration dict for the requested section.
+        timestamp: ISO-8601 UTC timestamp.
+    """
+
+    section: str
+    config: Dict[str, Any]
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class WatchlistEntryResponse(BaseModel):
+    """Response for POST /v1/config/watchlist/add and DELETE /v1/config/watchlist/{symbol}.
+
+    Attributes:
+        status: "success" | "error".
+        action: "added" | "removed".
+        symbol: Ticker symbol.
+        watchlist: Updated watchlist array.
+        message: Human-readable confirmation.
+        error: Error message on failure.
+        timestamp: ISO-8601 UTC timestamp.
+    """
+
+    status: str
+    action: Optional[str] = None
+    symbol: Optional[str] = None
+    watchlist: Optional[List[str]] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+class ConfigReloadResponse(BaseModel):
+    """Response for POST /v1/config/reload.
+
+    Attributes:
+        status: "success" | "error".
+        message: Human-readable confirmation.
+        config: Reloaded configuration dict.
+        error: Error message on failure.
+        timestamp: ISO-8601 UTC timestamp.
+    """
+
+    status: str
+    message: str
+    config: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+
+# ---------------------------------------------------------------------------
 # Root
 # ---------------------------------------------------------------------------
 

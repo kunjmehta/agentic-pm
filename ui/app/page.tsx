@@ -3,11 +3,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useChat } from '@/hooks/useChat';
 import Header from '@/components/Header';
-import MessageList from '@/components/MessageList';
-import InputBar from '@/components/InputBar';
+import Dashboard from '@/components/Dashboard';
+import ChatPanel from '@/components/ChatPanel';
+import ConfigPanel from '@/components/ConfigPanel';
+import LiveTelemetry from '@/components/LiveTelemetry';
+import LivePortfolio from '@/components/LivePortfolio';
+import MarketTicker from '@/components/MarketTicker';
+import OrderBook from '@/components/OrderBook';
+import BacktestResults from '@/components/BacktestResults';
 
-const DEFAULT_API = 'http://localhost:8001/v1';
+const DEFAULT_API = 'http://localhost:8000/v1';
 const STORED_API  = 'pm_apiUrl';
+
+type Tab = 'dashboard' | 'backtest' | 'config';
 
 export default function Page() {
   const { state, send, newChat, handleApprove, handleReject } = useChat();
@@ -15,6 +23,7 @@ export default function Page() {
 
   const [apiUrl, setApiUrlState] = useState<string>(DEFAULT_API);
   const [backtestMode, setBacktestMode] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
 
   // Hydrate apiUrl from localStorage on client
   useEffect(() => {
@@ -42,8 +51,10 @@ export default function Page() {
     [handleReject, threadId, apiUrl],
   );
 
+  const isChatCollapsed = activeTab === 'config' || activeTab === 'backtest';
+
   return (
-    <>
+    <div className="app-container">
       <Header
         apiUrl={apiUrl}
         onApiChange={setApiUrl}
@@ -52,13 +63,52 @@ export default function Page() {
         threadId={threadId}
         onNewChat={newChat}
       />
-      <MessageList
-        messages={messages}
-        onApprove={onApprove}
-        onReject={onReject}
-        onSuggestion={onSend}
-      />
-      <InputBar onSend={onSend} disabled={isStreaming} />
-    </>
+      <nav className="nav-tabs">
+        <button
+          className={`nav-tab ${activeTab === 'dashboard' ? 'active' : ''}`}
+          onClick={() => setActiveTab('dashboard')}
+        >
+          Dashboard
+        </button>
+        <button
+          className={`nav-tab ${activeTab === 'backtest' ? 'active' : ''}`}
+          onClick={() => setActiveTab('backtest')}
+        >
+          Backtest
+        </button>
+        <button
+          className={`nav-tab ${activeTab === 'config' ? 'active' : ''}`}
+          onClick={() => setActiveTab('config')}
+        >
+          Config
+        </button>
+      </nav>
+      <div className={`main-grid ${isChatCollapsed ? 'chat-collapsed' : ''}`}>
+        <Dashboard>
+          {activeTab === 'dashboard' ? (
+            <>
+              <MarketTicker apiUrl={apiUrl} />
+              <LiveTelemetry apiUrl={apiUrl} threadId={threadId} enabled={isStreaming} />
+              <LivePortfolio apiUrl={apiUrl} enabled />
+              <OrderBook apiUrl={apiUrl} />
+            </>
+          ) : activeTab === 'backtest' ? (
+            <>
+              <BacktestResults />
+            </>
+          ) : (
+            <ConfigPanel apiUrl={apiUrl} />
+          )}
+        </Dashboard>
+        <ChatPanel
+          messages={messages}
+          isStreaming={isStreaming}
+          onSend={onSend}
+          onApprove={onApprove}
+          onReject={onReject}
+          isCollapsed={isChatCollapsed}
+        />
+      </div>
+    </div>
   );
 }

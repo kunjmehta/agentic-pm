@@ -12,7 +12,6 @@ Individual modules (one class per file):
     momentum_burst.py          — MomentumBurstSkill
     golden_cross.py            — GoldenCrossSkill
     breakout_52w.py            — Breakout52WeekSkill
-    mean_reversion_daily.py    — MeanReversionDailySkill
     earnings_drift.py          — EarningsDriftSkill
 
 The ``skills.py`` shim also re-exports all of these for backward compat.
@@ -78,11 +77,6 @@ from src.semi_auto.skills.quant.breakout_52w import (
     breakout_52w_skill,
     make_breakout_52w_signals,
 )
-from src.semi_auto.skills.quant.mean_reversion_daily import (
-    MeanReversionDailySkill,
-    mean_reversion_daily_skill,
-    make_mean_reversion_daily_signals,
-)
 from src.semi_auto.skills.quant.earnings_drift import (
     EarningsDriftSkill,
     earnings_drift_skill,
@@ -119,7 +113,6 @@ __all__ = [
     "momentum_burst_skill",
     "golden_cross_skill",
     "breakout_52w_skill",
-    "mean_reversion_daily_skill",
     "earnings_drift_skill",
     # Signal factory functions
     "make_vwap_reversion_signals",
@@ -128,7 +121,6 @@ __all__ = [
     "make_momentum_burst_signals",
     "make_golden_cross_signals",
     "make_breakout_52w_signals",
-    "make_mean_reversion_daily_signals",
     "make_earnings_drift_signals",
     # Legacy aliases
     "calc_momentum_package",

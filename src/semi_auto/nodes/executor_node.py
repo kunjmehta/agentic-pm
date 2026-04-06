@@ -25,7 +25,66 @@ from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
-MAX_WORKERS = 4  # Conservative — DuckDB write-lock on Windows
+
+# ── Live telemetry ────────────────────────────────────────────────────────────
+
+def _push_event(thread_id: Optional[str], event: dict) -> None:
+    """Thread-safe push to the execution event queue for a thread.
+
+    Called from within ThreadPoolExecutor workers to stream per-task
+    progress events to the SSE ``/approve/stream/{thread_id}`` endpoint.
+
+    Args:
+        thread_id: Conversation thread ID; no-op if None or no queue registered.
+        event: SSE event payload dict to push.
+    """
+    if not thread_id:
+        return
+    try:
+        import src.semi_auto.app_state as _state
+        q = _state._execution_queues.get(thread_id)
+        loop = _state._event_loop
+        if q is not None and loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(q.put_nowait, event)
+    except Exception:
+        pass  # telemetry failures must never break execution
+
+MAX_READ_WORKERS = 12  # Read-heavy tasks (fetch, analyze, compute)
+MAX_WRITE_WORKERS = 4  # Write tasks (orders, DB writes) — conservative for DuckDB
+
+# Read-only functions that can run with higher parallelism
+READ_ONLY_FUNCTIONS = frozenset({
+    "get_portfolio_status",
+    "get_positions_summary",
+    "check_portfolio_health",
+    "check_data_availability",
+    "calc_momentum",
+    "calc_volatility",
+    "calc_volume",
+    "analyze_candles",
+    "calc_mean_reversion",
+    "backtest_strategy",
+    "snapshot_worth",
+    # Strategy signal functions
+    "vwap_reversion_signal",
+    "opening_range_breakout_signal",
+    "rsi_divergence_scalp_signal",
+    "momentum_burst_signal",
+    "golden_cross_signal",
+    "breakout_52w_signal",
+    "mean_reversion_daily_signal",
+    "earnings_drift_signal",
+})
+
+# Write functions that require conservative parallelism
+WRITE_FUNCTIONS = frozenset({
+    "execute_order",
+    "close_position",
+    "scale_position",
+    "execute_strategy_signal",
+    "save_eod_snapshot",
+    "swap_positions",
+})
 
 # Task-level metadata keys that must never be passed as function parameters.
 # These are top-level planning fields emitted by the LLM agents alongside params.
@@ -243,16 +302,76 @@ def _run_queue(
     independent = [t for t in all_tasks if not t.get("depends_on") and t.get("priority", 1) < 3]
     sequential = [t for t in all_tasks if t.get("depends_on") or t.get("priority", 1) >= 3]
 
-    logger.info(f"[executor/{label}] parallel={len(independent)} sequential={len(sequential)}")
+    # Categorize independent tasks as read vs write for optimal parallelism
+    read_tasks = [t for t in independent if t.get("function_name") in READ_ONLY_FUNCTIONS]
+    write_tasks = [t for t in independent if t.get("function_name") in WRITE_FUNCTIONS]
+    # Unknown functions default to write (conservative)
+    unknown_tasks = [t for t in independent if t.get("function_name") not in READ_ONLY_FUNCTIONS and t.get("function_name") not in WRITE_FUNCTIONS]
+    write_tasks.extend(unknown_tasks)
 
-    if independent:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(_run_task, t, {}): t for t in independent}
+    thread_id: Optional[str] = state.get("thread_id")
+    logger.info(
+        f"[executor/{label}] parallel={len(independent)} (read={len(read_tasks)}, write={len(write_tasks)}) "
+        f"sequential={len(sequential)}"
+    )
+
+    # Execute read tasks with high parallelism
+    if read_tasks:
+        with ThreadPoolExecutor(max_workers=MAX_READ_WORKERS) as pool:
+            futures = {}
+            for t in read_tasks:
+                _push_event(thread_id, {
+                    "type": "tool_call",
+                    "data": {
+                        "task_id": t.get("task_id"),
+                        "function_name": t.get("function_name"),
+                        "status": "started",
+                    },
+                })
+                futures[pool.submit(_run_task, t, {})] = t
             for future in as_completed(futures):
                 result = future.result()
                 execution_results[result["task_id"]] = result
                 if result.get("timing"):
                     tool_timings.append(result["timing"])
+                _push_event(thread_id, {
+                    "type": "tool_call",
+                    "data": {
+                        "task_id": result["task_id"],
+                        "function_name": result["function_name"],
+                        "status": result["status"],
+                        "duration_ms": result.get("timing", {}).get("duration_ms"),
+                    },
+                })
+
+    # Execute write tasks with conservative parallelism
+    if write_tasks:
+        with ThreadPoolExecutor(max_workers=MAX_WRITE_WORKERS) as pool:
+            futures = {}
+            for t in write_tasks:
+                _push_event(thread_id, {
+                    "type": "tool_call",
+                    "data": {
+                        "task_id": t.get("task_id"),
+                        "function_name": t.get("function_name"),
+                        "status": "started",
+                    },
+                })
+                futures[pool.submit(_run_task, t, {})] = t
+            for future in as_completed(futures):
+                result = future.result()
+                execution_results[result["task_id"]] = result
+                if result.get("timing"):
+                    tool_timings.append(result["timing"])
+                _push_event(thread_id, {
+                    "type": "tool_call",
+                    "data": {
+                        "task_id": result["task_id"],
+                        "function_name": result["function_name"],
+                        "status": result["status"],
+                        "duration_ms": result.get("timing", {}).get("duration_ms"),
+                    },
+                })
 
     for task in sequential:
         retry_count = task.get("retry_count", 0)
@@ -270,18 +389,52 @@ def _run_queue(
             dep_result = execution_results.get(dep_id, {})
             injected.update(_extract_dep_params(dep_id, dep_result, fn_name))
 
+        _push_event(thread_id, {
+            "type": "tool_call",
+            "data": {
+                "task_id": task.get("task_id"),
+                "function_name": fn_name,
+                "status": "started",
+            },
+        })
         result = _run_task(task, injected)
         execution_results[task["task_id"]] = result
         if result.get("timing"):
             tool_timings.append(result["timing"])
+        _push_event(thread_id, {
+            "type": "tool_call",
+            "data": {
+                "task_id": result["task_id"],
+                "function_name": result["function_name"],
+                "status": result["status"],
+                "duration_ms": result.get("timing", {}).get("duration_ms"),
+            },
+        })
 
         if result["status"] == "error":
             logger.warning(f"[executor/{label}] retrying failed task {task['task_id']}")
             task["retry_count"] = retry_count + 1
+            _push_event(thread_id, {
+                "type": "tool_call",
+                "data": {
+                    "task_id": task["task_id"],
+                    "function_name": fn_name,
+                    "status": "started",
+                },
+            })
             retry_result = _run_task(task, injected)
             execution_results[task["task_id"]] = retry_result
             if retry_result.get("timing"):
                 tool_timings.append(retry_result["timing"])
+            _push_event(thread_id, {
+                "type": "tool_call",
+                "data": {
+                    "task_id": retry_result["task_id"],
+                    "function_name": retry_result["function_name"],
+                    "status": retry_result["status"],
+                    "duration_ms": retry_result.get("timing", {}).get("duration_ms"),
+                },
+            })
 
     success_count = sum(1 for r in execution_results.values() if r.get("status") == "success")
     error_count = sum(1 for r in execution_results.values() if r.get("status") == "error")
@@ -329,120 +482,6 @@ def order_executor_node(state: dict) -> dict:
         queue_specs=[("ord", "order_task_queue")],
         label="order",
     )
-
-
-def _executor_node_legacy(state: dict) -> dict:
-    """Legacy full-queue executor — kept for backward-compat tests only.
-
-    Processes ALL four queues (portfolio + quant + backtester + order) in one pass.
-    Not used in the live graph; used by existing functional tests that mock state
-    with all queues populated.
-
-    Args:
-        state: Current GraphState dict with populated task queues.
-
-    Returns:
-        Partial state update with execution_results and tool_timings.
-    """
-    # Short-circuit: upstream error already set — skip execution
-    if state.get("error"):
-        logger.warning(f"[executor] skipping — upstream error: {state['error']}")
-        return {"execution_results": {}, "tool_timings": []}
-
-    # Collect all queues — normalise quant/bt simple {function_name, params} to full task dicts
-    all_tasks: List[Dict[str, Any]] = []
-
-    pm_queue = state.get("portfolio_task_queue") or []
-    all_tasks.extend(pm_queue)  # already full TaskItem dicts
-
-    for prefix, queue_key in (("qa", "quant_task_queue"), ("bt", "backtester_task_queue"), ("ord", "order_task_queue")):
-        queue = state.get(queue_key) or []
-        for i, call in enumerate(queue):
-            # FunctionCall format: {function_name, params} — normalise to task dict
-            if "task_id" not in call:
-                call = {
-                    "task_id": f"{prefix}_{i + 1:03d}",
-                    "function_name": call.get("function_name", ""),
-                    "params": call.get("params", {}),
-                    "priority": 1,
-                    "depends_on": [],
-                    "retry_count": 0,
-                    "description": "",
-                }
-            all_tasks.append(call)
-
-    if not all_tasks:
-        logger.info("[executor] no tasks in any queue — skipping execution")
-        return {"execution_results": {}, "tool_timings": []}
-
-    logger.info(f"[executor] processing {len(all_tasks)} total tasks")
-
-    execution_results: Dict[str, Any] = {}
-    tool_timings: List[Dict[str, Any]] = []
-
-    # Separate independent (parallel) from dependent/sequential tasks
-    independent = [
-        t for t in all_tasks
-        if not t.get("depends_on") and t.get("priority", 1) < 3
-    ]
-    sequential = [
-        t for t in all_tasks
-        if t.get("depends_on") or t.get("priority", 1) >= 3
-    ]
-
-    logger.info(f"[executor] parallel={len(independent)} sequential={len(sequential)}")
-
-    # ── Pass 1: Parallel execution ────────────────────────────────────────────
-    if independent:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(_run_task, t, {}): t for t in independent}
-            for future in as_completed(futures):
-                result = future.result()
-                execution_results[result["task_id"]] = result
-                if result.get("timing"):
-                    tool_timings.append(result["timing"])
-
-    # ── Pass 2: Sequential execution with dependency injection ─────────────────
-    for task in sequential:
-        retry_count = task.get("retry_count", 0)
-        if retry_count >= 1:
-            logger.warning(f"[executor] skipping {task.get('task_id')} — already retried once")
-            execution_results[task["task_id"]] = {
-                "task_id": task["task_id"],
-                "function_name": task.get("function_name"),
-                "status": "skipped",
-                "error": "Max retries reached",
-            }
-            continue
-
-        fn_name = task.get("function_name", "")
-        injected = {}
-        for dep_id in task.get("depends_on", []):
-            dep_result = execution_results.get(dep_id, {})
-            injected.update(_extract_dep_params(dep_id, dep_result, fn_name))
-
-        result = _run_task(task, injected)
-        execution_results[task["task_id"]] = result
-        if result.get("timing"):
-            tool_timings.append(result["timing"])
-
-        # Single retry on failure
-        if result["status"] == "error":
-            logger.warning(f"[executor] retrying failed task {task['task_id']}")
-            task["retry_count"] = retry_count + 1
-            retry_result = _run_task(task, injected)
-            execution_results[task["task_id"]] = retry_result
-            if retry_result.get("timing"):
-                tool_timings.append(retry_result["timing"])
-
-    success_count = sum(1 for r in execution_results.values() if r.get("status") == "success")
-    error_count = sum(1 for r in execution_results.values() if r.get("status") == "error")
-    logger.info(f"[executor] done: {success_count} success, {error_count} errors")
-
-    return {
-        "execution_results": execution_results,
-        "tool_timings": tool_timings,
-    }
 
 
 if __name__ == "__main__":

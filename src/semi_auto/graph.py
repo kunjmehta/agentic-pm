@@ -8,10 +8,17 @@ Graph topology:
       ↓
     classify_intent           ← keyword tier1 + LLM tier2 fallback
       ↓
+    data_availability_node    ← DB pre-check; sets data_availability dict AND top-level flags:
+      │                           _indicators_available, _bars_available, _trades_available
+      │                         True  = data exists in DB → agents READ from DB (no fetch)
+      │                         False = data absent/stale → agent must schedule fetch first
+      ↓
     market_hours_guard        ← bypass if backtest_mode
       ↓ routing_error? ─yes─→ synthesizer_node → END
       ↓ no
     portfolio_reasoning_node  ← plans PM tasks + sets delegation flags
+      │                         reads _indicators_available/_bars_available/_trades_available
+      │                         to decide: DB read vs API fetch per sub-agent
       ↓
       ├─ _delegate_quant ──→ quant_reasoning_node ──┐
       │                    (_delegate_backtester?)  │
@@ -25,11 +32,24 @@ Graph topology:
                                    ↓ approved=True
                         *** interrupt_before=["executor_node"] ***
                                 executor_node
-                                   ↓ approved=False → synthesizer_node
+                                   ↓
+                             pm_decision_node  ← decide if orders should execute
+                                   ↓ _execute_orders=True
+                             risk_guard_node   ← validate orders against risk limits
+                                   ↓ violations? ─yes─→ synthesizer_node
+                                   ↓ no (approved)
+                             order_reasoning_node ← plan order tasks
+                                   ↓
+                             order_executor_node  ← execute approved orders
+                                   ↓
                              synthesizer_node → END
 
 All sub-agent task lists propagate through shared state so pm_review_node
 sees the full combined plan before presenting a single HITL approval to the user.
+
+Data availability flags (_indicators_available, _bars_available, _trades_available)
+are set by data_availability_node and consumed by portfolio_reasoning_node to
+prevent redundant API fetches when data is already in the DB.
 """
 
 import sys
@@ -40,7 +60,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from src.semi_auto.state import GraphState, make_initial_state
 from src.semi_auto.nodes.classifier import classify_intent
@@ -54,6 +74,7 @@ from src.semi_auto.nodes.order_node import order_reasoning_node
 from src.semi_auto.nodes.pm_review_node import pm_review_node
 from src.semi_auto.nodes.executor_node import executor_node, order_executor_node
 from src.semi_auto.nodes.pm_decision_node import pm_decision_node
+from src.semi_auto.nodes.risk_guard_node import risk_guard_node
 from src.semi_auto.nodes.synthesizer import synthesizer_node
 from src.common.utils import get_logger
 
@@ -166,22 +187,6 @@ def route_after_backtester(state: GraphState) -> str:
     return "pm_review_node"
 
 
-def route_after_order(state: GraphState) -> str:
-    """After order agent: always go to PM review.
-
-    Args:
-        state: Current GraphState.
-
-    Returns:
-        Next node name string.
-    """
-    if state.get("error"):
-        logger.info("[route] error after order_node → synthesizer_node")
-        return "synthesizer_node"
-    logger.info("[route] order_node done → pm_review_node")
-    return "pm_review_node"
-
-
 def route_after_pm_review(state: GraphState) -> str:
     """PM review gate: approved → executor (HITL), rejected → revise or synthesizer.
 
@@ -220,7 +225,7 @@ def route_after_pm_review(state: GraphState) -> str:
 def route_after_pm_decision(state: GraphState) -> str:
     """Fan-out after PM decision node.
 
-    When _execute_orders is True, sends state to order_reasoning_node.
+    When _execute_orders is True, sends state to risk_guard_node for validation.
     Synthesizer always runs (order results will be merged into execution_results
     by order_executor_node before synthesizer reads them only when orders run first).
 
@@ -231,27 +236,49 @@ def route_after_pm_decision(state: GraphState) -> str:
         Next node name string.
     """
     if state.get("_execute_orders"):
-        logger.info("[route] PM decision → order_reasoning_node + synthesizer_node (parallel)")
-        return "order_reasoning_node"
+        logger.info("[route] PM decision → risk_guard_node (order validation)")
+        return "risk_guard_node"
     logger.info("[route] PM decision → synthesizer_node (no orders)")
     return "synthesizer_node"
+
+
+def route_after_risk_guard(state: GraphState) -> str:
+    """Route after risk guard validation.
+
+    If risk guard passes (no error), proceed to order_reasoning_node.
+    If risk guard blocks orders (error set), go to synthesizer to report violations.
+
+    Args:
+        state: Current GraphState.
+
+    Returns:
+        Next node name string.
+    """
+    if state.get("error"):
+        logger.info("[route] risk_guard blocked orders → synthesizer_node")
+        return "synthesizer_node"
+    logger.info("[route] risk_guard approved → order_reasoning_node")
+    return "order_reasoning_node"
 
 
 # ── Graph assembly ─────────────────────────────────────────────────────────────
 
 
-def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
+def build_graph(checkpointer: Optional[AsyncSqliteSaver] = None) -> StateGraph:
     """Build and compile the semi-auto multi-agent StateGraph.
 
     Args:
-        checkpointer: Optional MemorySaver for conversation persistence.
-                      Defaults to a new MemorySaver instance.
+        checkpointer: AsyncSqliteSaver for conversation persistence.
+                      Must be provided; created and owned by the lifespan context.
 
     Returns:
         Compiled LangGraph StateGraph with interrupt_before=["executor_node"].
     """
     if checkpointer is None:
-        checkpointer = MemorySaver()
+        raise ValueError(
+            "checkpointer is required. Create an AsyncSqliteSaver in the lifespan "
+            "context and pass it here."
+        )
 
     builder = StateGraph(GraphState)
 
@@ -267,6 +294,7 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
     builder.add_node("pm_review_node", pm_review_node)
     builder.add_node("executor_node", executor_node)
     builder.add_node("pm_decision_node", pm_decision_node)
+    builder.add_node("risk_guard_node", risk_guard_node)
     builder.add_node("order_executor_node", order_executor_node)
     builder.add_node("synthesizer_node", synthesizer_node)
 
@@ -335,14 +363,27 @@ def build_graph(checkpointer: Optional[MemorySaver] = None) -> StateGraph:
         "pm_decision_node",
         route_after_pm_decision,
         {
+            "risk_guard_node": "risk_guard_node",
+            "synthesizer_node": "synthesizer_node",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "risk_guard_node",
+        route_after_risk_guard,
+        {
             "order_reasoning_node": "order_reasoning_node",
             "synthesizer_node": "synthesizer_node",
         },
     )
 
+    # HITL interrupts:
+    # 1. executor_node: Query-driven analysis task approval
+    # 2. order_executor_node: Autonomous order approval (when autonomous_mode=True)
+    # Note: Both interrupts are always active. The graph routing determines which is hit.
     return builder.compile(
         checkpointer=checkpointer,
-        interrupt_before=["executor_node"],  # HITL: unified task approval pause
+        interrupt_before=["executor_node", "order_executor_node"],
     )
 
 

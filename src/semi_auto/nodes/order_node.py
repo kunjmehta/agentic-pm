@@ -67,8 +67,25 @@ ORDER PLACEMENT FUNCTIONS ⚠  REQUIRE HUMAN APPROVAL
   Use for: "buy X at $Y limit", "sell X if it hits $Y".
   Set priority=3.
 
+- place_stop_order
+  params: {symbol, qty, side, stop_price, time_in_force="day"}
+  stop_price: trigger price — becomes a market order when hit.
+  Use for: "set a stop-loss at $Y on AAPL", "stop out below $Y", "buy breakout above $Y".
+  SELL stop-loss: stop_price BELOW current market price.
+  BUY breakout stop: stop_price ABOVE current market price.
+  Set priority=3.
+
+- place_stop_limit_order
+  params: {symbol, qty, side, stop_price, limit_price, time_in_force="day"}
+  stop_price: trigger that activates the limit order.
+  limit_price: execution cap (buy) or floor (sell).
+  Use for: "stop-limit sell at $Y trigger, $Z limit", "enter above $Y only if price stays below $Z".
+  Prefer over place_stop_order when the user needs price control on the fill.
+  Set priority=3.
+
 - execute_order
-  params: {symbol, qty, side, order_type="market", limit_price=None}
+  params: {symbol, qty, side, order_type="market", limit_price=None, stop_price=None, time_in_force="day"}
+  order_type: "market" | "limit" | "stop" | "stop_limit"
   Higher-level wrapper that routes to market or limit based on order_type.
   Prefer place_market_order / place_limit_order for direct user requests.
   Use execute_order for signal-driven qty-specified trades.

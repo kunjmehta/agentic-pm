@@ -102,84 +102,39 @@ false positives (placing an unwanted order). When uncertain, set should_execute_
 def pm_decision_node(state: dict) -> dict:
     """Review analysis execution results and decide whether to place orders.
 
+    Supports two modes:
+    1. Query-driven: execution_results from executor_node (existing logic)
+    2. Autonomous: signal_batch from periodic signal aggregator (new)
+
     Uses get_llm("pm_decision") singleton with structured output to produce a
     PMDecision. Retries up to MAX_RETRIES on validation or LLM failure.
 
     Args:
-        state: Current GraphState dict with execution_results populated by executor_node.
+        state: Current GraphState dict with execution_results or signal_batch.
 
     Returns:
         Partial state update with pm_decision_reasoning, _execute_orders,
         and optionally order_task_queue.
     """
     try:
-        from pydantic import ValidationError
-
-        query: str = state.get("query", "")
-        symbol: Optional[str] = state.get("symbol")
         execution_results: Dict[str, Any] = state.get("execution_results") or {}
-        backtest_mode: bool = state.get("backtest_mode", False)
+        signal_batch: Optional[Dict[str, Any]] = state.get("signal_batch")
+        autonomous_mode: bool = state.get("autonomous_mode", False)
 
-        logger.info(
-            f"[pm_decision] reviewing {len(execution_results)} task results "
-            f"for query='{query[:60]}' backtest_mode={backtest_mode}"
-        )
-
-        # Summarise execution results for the LLM
-        results_summary = _summarise_results(execution_results)
-
-        user_message = (
-            f"User query: {query}\n"
-            f"Symbol: {symbol or 'None'}\n"
-            f"Backtest mode: {backtest_mode}\n\n"
-            f"ANALYSIS RESULTS:\n{results_summary}"
-        )
-
-        structured_llm = get_llm("pm_decision").with_structured_output(
-            PMDecision, method="function_calling"
-        )
-        messages = [
-            {"role": "system", "content": _DECISION_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ]
-
-        decision: Optional[PMDecision] = None
-        last_error: Optional[str] = None
-
-        for attempt in range(1, MAX_RETRIES + 1):
-            try:
-                decision = structured_llm.invoke(messages)
-                logger.info(
-                    f"[pm_decision] decision on attempt {attempt}: "
-                    f"execute={decision.should_execute_orders} "
-                    f"signals={len(decision.order_signals)}"
-                )
-                break
-            except (ValidationError, Exception) as exc:
-                last_error = str(exc)
-                logger.warning(f"[pm_decision] attempt {attempt}/{MAX_RETRIES} failed: {exc}")
-
-        if decision is None:
-            logger.error(f"[pm_decision] all {MAX_RETRIES} attempts failed: {last_error}")
-            decision = PMDecision(
-                should_execute_orders=False,
-                order_rationale="PM decision failed — defaulting to no order execution.",
-                order_signals=[],
-            )
-
-        # Build order_task_queue from signals (only populated when executing)
-        order_task_queue = None
-        if decision.should_execute_orders and decision.order_signals:
-            order_task_queue = _signals_to_task_queue(decision.order_signals)
-            logger.info(
-                f"[pm_decision] generated {len(order_task_queue)} order tasks from signals"
-            )
-
-        return {
-            "pm_decision_reasoning": decision.order_rationale,
-            "_execute_orders": decision.should_execute_orders,
-            "order_task_queue": order_task_queue,
-        }
+        # Detect execution mode
+        if signal_batch and autonomous_mode:
+            logger.info("[pm_decision] Processing autonomous signal batch")
+            return _process_autonomous_signals(state, signal_batch)
+        elif execution_results:
+            logger.info("[pm_decision] Processing query-driven execution results")
+            return _process_query_driven_signals(state, execution_results)
+        else:
+            logger.warning("[pm_decision] No signals to process (no execution_results or signal_batch)")
+            return {
+                "pm_decision_reasoning": "No signals available for PM review",
+                "_execute_orders": False,
+                "order_task_queue": None,
+            }
 
     except Exception as exc:
         logger.error(f"[pm_decision] unexpected error: {exc}", exc_info=True)
@@ -188,6 +143,178 @@ def pm_decision_node(state: dict) -> dict:
             "_execute_orders": False,
             "order_task_queue": None,
         }
+
+
+def _process_query_driven_signals(state: dict, execution_results: Dict[str, Any]) -> dict:
+    """Process query-driven execution results (existing logic).
+
+    Args:
+        state: GraphState dict.
+        execution_results: Task results from executor_node.
+
+    Returns:
+        Partial state update.
+    """
+    from pydantic import ValidationError
+
+    query: str = state.get("query", "")
+    symbol: Optional[str] = state.get("symbol")
+    backtest_mode: bool = state.get("backtest_mode", False)
+
+    logger.info(
+        f"[pm_decision] reviewing {len(execution_results)} task results "
+        f"for query='{query[:60]}' backtest_mode={backtest_mode}"
+    )
+
+    # Summarise execution results for the LLM
+    results_summary = _summarise_results(execution_results)
+
+    user_message = (
+        f"User query: {query}\n"
+        f"Symbol: {symbol or 'None'}\n"
+        f"Backtest mode: {backtest_mode}\n\n"
+        f"ANALYSIS RESULTS:\n{results_summary}"
+    )
+
+    structured_llm = get_llm("pm_decision").with_structured_output(
+        PMDecision, method="function_calling"
+    )
+    messages = [
+        {"role": "system", "content": _DECISION_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+
+    decision: Optional[PMDecision] = None
+    last_error: Optional[str] = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            decision = structured_llm.invoke(messages)
+            logger.info(
+                f"[pm_decision] decision on attempt {attempt}: "
+                f"execute={decision.should_execute_orders} "
+                f"signals={len(decision.order_signals)}"
+            )
+            break
+        except (ValidationError, Exception) as exc:
+            last_error = str(exc)
+            logger.warning(f"[pm_decision] attempt {attempt}/{MAX_RETRIES} failed: {exc}")
+
+    if decision is None:
+        logger.error(f"[pm_decision] all {MAX_RETRIES} attempts failed: {last_error}")
+        decision = PMDecision(
+            should_execute_orders=False,
+            order_rationale="PM decision failed — defaulting to no order execution.",
+            order_signals=[],
+        )
+
+    # Build order_task_queue from signals (only populated when executing)
+    order_task_queue = None
+    if decision.should_execute_orders and decision.order_signals:
+        order_task_queue = _signals_to_task_queue(decision.order_signals)
+        logger.info(
+            f"[pm_decision] generated {len(order_task_queue)} order tasks from signals"
+        )
+
+    return {
+        "pm_decision_reasoning": decision.order_rationale,
+        "_execute_orders": decision.should_execute_orders,
+        "order_task_queue": order_task_queue,
+    }
+
+
+def _process_autonomous_signals(state: dict, signal_batch: Dict[str, Any]) -> dict:
+    """Process autonomous signal batch from periodic aggregator.
+
+    Validates signals against recent orders and portfolio constraints,
+    then converts approved signals to order_task_queue.
+
+    Args:
+        state: GraphState dict.
+        signal_batch: SignalBatch dict from signal aggregator.
+
+    Returns:
+        Partial state update with order_task_queue.
+    """
+    from src.common.dao.orders_dao import OrdersDAO
+    from src.semi_auto.models.autonomous_signals import AggregatedSignal
+
+    signals_data = signal_batch.get("signals", [])
+    if not signals_data:
+        logger.info("[pm_decision] No signals in batch")
+        return {
+            "pm_decision_reasoning": "No signals in autonomous batch",
+            "_execute_orders": False,
+            "order_task_queue": None,
+        }
+
+    # Parse signals into Pydantic models
+    signals = []
+    for sig_data in signals_data:
+        try:
+            signals.append(AggregatedSignal(**sig_data))
+        except Exception as exc:
+            logger.warning(f"[pm_decision] Failed to parse signal: {exc}")
+            continue
+
+    logger.info(f"[pm_decision] Processing {len(signals)} autonomous signals")
+
+    # Check each signal against recent orders
+    orders_dao = OrdersDAO()
+    approved_signals = []
+
+    for signal in signals:
+        try:
+            # Check for recent orders (duplicate prevention)
+            recent_orders = orders_dao.get_recent_orders_for_symbol(
+                symbol=signal.symbol,
+                side=signal.action,
+                lookback_hours=24
+            )
+
+            if recent_orders:
+                logger.info(
+                    f"[pm_decision] {signal.symbol}: skipping (found {len(recent_orders)} "
+                    f"recent {signal.action} order(s))"
+                )
+                continue
+
+            # Signal passed checks
+            approved_signals.append(signal)
+            logger.info(
+                f"[pm_decision] {signal.symbol}: approved {signal.action} @ {signal.confidence:.2f}"
+            )
+
+        except Exception as exc:
+            logger.error(f"[pm_decision] Error processing {signal.symbol}: {exc}", exc_info=True)
+            continue
+
+    # Close DAO
+    orders_dao.close()
+
+    if not approved_signals:
+        logger.info("[pm_decision] No signals approved after validation")
+        return {
+            "pm_decision_reasoning": "All autonomous signals filtered out (duplicates or constraints)",
+            "_execute_orders": False,
+            "order_task_queue": None,
+        }
+
+    # Convert approved signals to order_task_queue
+    order_task_queue = _autonomous_signals_to_task_queue(approved_signals)
+
+    reasoning = (
+        f"Approved {len(approved_signals)}/{len(signals)} autonomous signals for execution: "
+        + ", ".join([f"{s.symbol} {s.action}" for s in approved_signals])
+    )
+
+    logger.info(f"[pm_decision] {reasoning}")
+
+    return {
+        "pm_decision_reasoning": reasoning,
+        "_execute_orders": True,
+        "order_task_queue": order_task_queue,
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -258,6 +385,46 @@ def _signals_to_task_queue(signals: List[OrderSignal]) -> List[Dict[str, Any]]:
             "description": (
                 f"Execute {sig.action.upper()} signal for {sig.symbol} "
                 f"(confidence={sig.confidence:.2f})"
+            ),
+        })
+    return tasks
+
+
+def _autonomous_signals_to_task_queue(signals) -> List[Dict[str, Any]]:
+    """Convert autonomous AggregatedSignal objects to order_task_queue.
+
+    Args:
+        signals: List of AggregatedSignal objects from signal aggregator.
+
+    Returns:
+        List of task dicts compatible with order_executor_node.
+    """
+    tasks = []
+    for i, sig in enumerate(signals):
+        if sig.action == "hold":
+            continue  # Don't create tasks for hold signals
+
+        task_id = f"auto_ord_{i + 1:03d}"
+        tasks.append({
+            "task_id": task_id,
+            "function_name": "execute_strategy_signal",
+            "params": {
+                "symbol": sig.symbol,
+                "action": sig.action,
+                "confidence": sig.confidence,
+                "suggested_qty": None,  # Let order_reasoning_node size the position
+                "entry_price": sig.entry_price,
+                "stop_loss": sig.stop_loss,
+                "take_profit": sig.take_profit,
+                "strategies": sig.strategies,
+                "reason": sig.reason,
+            },
+            "priority": 3,  # sequential — order execution runs last
+            "depends_on": [],
+            "retry_count": 0,
+            "description": (
+                f"[AUTONOMOUS] Execute {sig.action.upper()} signal for {sig.symbol} "
+                f"(confidence={sig.confidence:.2f}, {sig.strategy_count} strategies)"
             ),
         })
     return tasks

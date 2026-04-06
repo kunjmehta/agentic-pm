@@ -1,6 +1,7 @@
 'use client';
 
 import type { ExecutionResult } from '@/types';
+import CompactTable from './CompactTable';
 
 interface Props { results: ExecutionResult[] }
 
@@ -15,28 +16,29 @@ export default function TelemetryPanel({ results }: Props) {
         ⚡ Telemetry — {results.length} task{results.length !== 1 ? 's' : ''},{' '}
         {totalMs.toFixed(0)} ms{errorCount ? `, ${errorCount} error${errorCount !== 1 ? 's' : ''}` : ''}
       </summary>
-      <table className="telemetry-table">
-        <thead>
-          <tr>
-            <th>Task ID</th>
-            <th>Function</th>
-            <th>Status</th>
-            <th>Duration</th>
-          </tr>
-        </thead>
-        <tbody>
-          {results.map((r, i) => (
-            <tr key={r.task_id ?? i}>
-              <td>{r.task_id ?? '—'}</td>
-              <td>{r.function_name}</td>
-              <td style={{ color: r.status === 'success' ? '#6ee7b7' : r.status === 'error' ? '#f87171' : '#888' }}>
-                {r.status}
-              </td>
-              <td>{r.duration_ms != null ? `${r.duration_ms.toFixed(0)} ms` : '—'}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div style={{ padding: '8px 12px' }}>
+        <CompactTable
+          columns={[
+            { key: 'task_id', label: 'Task ID', sortable: true },
+            { key: 'function_name', label: 'Function', sortable: true },
+            { key: 'status', label: 'Status', sortable: true, render: (v) => {
+              const status = String(v);
+              const color = status === 'success' ? '#6ee7b7' : status === 'error' ? '#f87171' : '#888';
+              return <span style={{ color }}>{status}</span>;
+            }},
+            { key: 'duration_ms', label: 'Duration', align: 'right', sortable: true, render: (v) =>
+              v != null ? `${Number(v).toFixed(0)} ms` : '—'
+            },
+          ]}
+          data={results.map((r) => ({
+            task_id: r.task_id ?? '—',
+            function_name: r.function_name,
+            status: r.status,
+            duration_ms: r.duration_ms,
+          }))}
+          maxHeight={300}
+        />
+      </div>
     </details>
   );
 }

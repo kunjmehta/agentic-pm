@@ -17,7 +17,7 @@ export default function ThinkingSection({ block }: Props) {
 
   return (
     <details className="thinking" open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary>💭 {label}{suffix}</summary>
+      <summary>{label}{suffix}</summary>
       <div className="thinking-content">{block.content}</div>
     </details>
   );

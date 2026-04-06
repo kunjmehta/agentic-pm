@@ -3,12 +3,11 @@
 import { useCallback, useEffect, useReducer } from 'react';
 
 const uuidv4 = () => crypto.randomUUID();
-import { approve, loadConversation, reject, streamQuery } from '@/lib/api';
+import { loadConversation, reject, streamApprove, streamQuery } from '@/lib/api';
 import type {
   ExecutionResult,
   Message,
   MessageContent,
-  SemiAutoResponse,
   TaskPreviewData,
 } from '@/types';
 
@@ -230,45 +229,70 @@ export function useChat() {
   // ── handleApprove ────────────────────────────────────────────────────────
   const handleApprove = useCallback(
     async (msgId: string, threadId: string, currentApiUrl: string) => {
-      // Remove task_preview from that message, add telemetry + final text
       dispatch({
         type: 'APPEND_CONTENT',
         id: msgId,
         content: { type: 'text', markdown: '⏳ Executing…' },
       });
       try {
-        const result: SemiAutoResponse = await approve(currentApiUrl, threadId);
-        // Strip the "Executing…" text and task_preview
-        const exec = result.execution_results ?? [];
-        const richContent: MessageContent[] = [];
-        const healthRes = exec.find(
-          (r) => r.function_name === 'check_portfolio_health' && r.status === 'success',
-        );
-        if (healthRes) richContent.push({ type: 'health', result: healthRes });
+        const liveTools = new Set<string>();
+        for await (const evt of streamApprove(currentApiUrl, threadId)) {
+          if (evt.type === 'tool_call') {
+            const tc = (evt as { type: 'tool_call'; data: { function_name: string; status: string; duration_ms?: number | null } }).data;
+            if (tc.status === 'started' && !liveTools.has(tc.function_name)) {
+              liveTools.add(tc.function_name);
+              dispatch({
+                type: 'APPEND_CONTENT',
+                id: msgId,
+                content: { type: 'tool_badge', name: tc.function_name },
+              });
+            }
+          } else if (evt.type === 'telemetry') {
+            const data = (evt as { type: 'telemetry'; data: Record<string, unknown> }).data;
+            const exec = (data.execution_results as ExecutionResult[]) ?? [];
+            const richContent: MessageContent[] = [];
 
-        const statsRes = exec.find(
-          (r) =>
-            (r.function_name === 'get_portfolio_status' ||
-              r.function_name === 'get_positions_summary') &&
-            r.status === 'success',
-        );
-        if (statsRes) richContent.push({ type: 'portfolio_stats', result: statsRes });
+            const healthRes = exec.find(
+              (r) => r.function_name === 'check_portfolio_health' && r.status === 'success',
+            );
+            if (healthRes) richContent.push({ type: 'health', result: healthRes });
 
-        const btResults = exec.filter(
-          (r) => r.function_name === 'backtest_strategy' && r.status === 'success',
-        ) as ExecutionResult[];
-        if (btResults.length) {
-          richContent.push({
-            type: 'trades',
-            results: btResults as import('@/types').BacktestResult[],
-          });
-        }
+            const statsRes = exec.find(
+              (r) =>
+                (r.function_name === 'get_portfolio_status' ||
+                  r.function_name === 'get_positions_summary') &&
+                r.status === 'success',
+            );
+            if (statsRes) richContent.push({ type: 'portfolio_stats', result: statsRes });
 
-        if (exec.length) richContent.push({ type: 'telemetry', results: exec });
-        richContent.push({ type: 'text', markdown: result.final_response ?? '(no response)' });
+            const btResults = exec.filter(
+              (r) => r.function_name === 'backtest_strategy' && r.status === 'success',
+            ) as ExecutionResult[];
+            if (btResults.length) {
+              richContent.push({
+                type: 'trades',
+                results: btResults as import('@/types').BacktestResult[],
+              });
+            }
 
-        for (const c of richContent) {
-          dispatch({ type: 'APPEND_CONTENT', id: msgId, content: c });
+            if (exec.length) richContent.push({ type: 'telemetry', results: exec });
+            richContent.push({
+              type: 'text',
+              markdown: (data.final_response as string) ?? '(no response)',
+            });
+
+            for (const c of richContent) {
+              dispatch({ type: 'APPEND_CONTENT', id: msgId, content: c });
+            }
+          } else if (evt.type === 'error') {
+            dispatch({
+              type: 'APPEND_CONTENT',
+              id: msgId,
+              content: { type: 'error', msg: (evt as { type: 'error'; content: string }).content ?? 'Execution error' },
+            });
+          } else if (evt.type === 'done') {
+            break;
+          }
         }
       } catch (e) {
         dispatch({
@@ -312,8 +336,19 @@ async function runSemiAuto(
 
   const stream = streamQuery(apiUrl, { query, thread_id: threadId, backtest_mode: backtestMode });
 
+  const nodeSet = new Set<string>();
   for await (const evt of stream) {
-    if (evt.type === 'thought_delta' && evt.agent && evt.token) {
+    if (evt.type === 'node') {
+      const nd = (evt as { type: 'node'; data: { node: string; label: string; status: string } }).data;
+      if (nd.status === 'started' && !nodeSet.has(nd.node)) {
+        nodeSet.add(nd.node);
+        dispatch({
+          type: 'APPEND_CONTENT',
+          id: assistantId,
+          content: { type: 'tool_badge', name: nd.label },
+        });
+      }
+    } else if (evt.type === 'thought_delta' && evt.agent && evt.token) {
       dispatch({ type: 'UPDATE_THINKING', id: assistantId, agent: evt.agent as string, token: evt.token as string });
     } else if (evt.type === 'reasoning' && evt.agent) {
       dispatch({
@@ -383,7 +418,9 @@ async function runLegacyStream(
     } else if (evt.type === 'text' && evt.content) {
       dispatch({ type: 'APPEND_CONTENT', id: assistantId, content: { type: 'text', markdown: evt.content as string } });
     } else if (evt.type === 'tool_call') {
-      const name = extractToolName(evt.content);
+      const name = 'data' in evt && evt.data && typeof evt.data === 'object' && 'function_name' in evt.data
+        ? String(evt.data.function_name)
+        : null;
       if (name && !toolSet.has(name)) {
         toolSet.add(name);
         dispatch({ type: 'APPEND_CONTENT', id: assistantId, content: { type: 'tool_badge', name } });
@@ -399,9 +436,12 @@ async function runLegacyStream(
         market_hours_guard: 'market hours',
         portfolio_guard: 'portfolio guard',
       };
-      const label = NODE_LABELS[evt.node as string];
-      if (label && !toolSet.has(evt.node as string)) {
-        toolSet.add(evt.node as string);
+      const nodeName = 'data' in evt && evt.data && typeof evt.data === 'object' && 'node' in evt.data
+        ? String(evt.data.node)
+        : null;
+      const label = nodeName ? NODE_LABELS[nodeName] : null;
+      if (label && nodeName && !toolSet.has(nodeName)) {
+        toolSet.add(nodeName);
         dispatch({ type: 'APPEND_CONTENT', id: assistantId, content: { type: 'tool_badge', name: label } });
       }
     } else if (evt.type === 'error') {
