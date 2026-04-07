@@ -13,8 +13,8 @@ import { useMarketStream, MarketMessage } from '../hooks/useMarketStream';
 interface TickerData {
   symbol: string;
   price: number;
-  change: number;
-  changePercent: number;
+  prev_close: number | null;
+  pct_change: number | null;
   timestamp: string;
 }
 
@@ -29,16 +29,12 @@ export default function MarketTicker({ apiUrl }: Props) {
     if (msg.type === 'bar_update' && msg.symbol && msg.close !== undefined) {
       setTickers((prev) => {
         const newMap = new Map(prev);
-        const existing = newMap.get(msg.symbol!);
-        const prevPrice = existing?.price || msg.close!;
-        const change = msg.close! - prevPrice;
-        const changePercent = prevPrice !== 0 ? (change / prevPrice) * 100 : 0;
 
         newMap.set(msg.symbol!, {
           symbol: msg.symbol!,
           price: msg.close!,
-          change,
-          changePercent,
+          prev_close: msg.prev_close ?? null,
+          pct_change: msg.pct_change ?? null,
           timestamp: msg.timestamp || new Date().toISOString(),
         });
 
@@ -81,14 +77,15 @@ export default function MarketTicker({ apiUrl }: Props) {
           {scrollingTickers.length > 0 ? (
             <div className="flex gap-8 animate-scroll-left">
               {scrollingTickers.map((ticker, index) => {
+                const pctChange = ticker.pct_change ?? 0;
                 const changeColor =
-                  ticker.change > 0
+                  pctChange > 0
                     ? 'text-green-400'
-                    : ticker.change < 0
+                    : pctChange < 0
                     ? 'text-red-400'
                     : 'text-gray-400';
 
-                const arrow = ticker.change > 0 ? '↑' : ticker.change < 0 ? '↓' : '';
+                const arrow = pctChange > 0 ? '▲' : pctChange < 0 ? '▼' : '';
 
                 return (
                   <div
@@ -97,9 +94,11 @@ export default function MarketTicker({ apiUrl }: Props) {
                   >
                     <span className="text-white font-semibold">{ticker.symbol}</span>
                     <span className="text-orange-500">${ticker.price.toFixed(2)}</span>
-                    <span className={`${changeColor} text-xs`}>
-                      {arrow} {Math.abs(ticker.changePercent).toFixed(2)}%
-                    </span>
+                    {ticker.pct_change !== null && (
+                      <span className={`${changeColor} text-xs`}>
+                        {arrow} {Math.abs(pctChange).toFixed(2)}%
+                      </span>
+                    )}
                   </div>
                 );
               })}

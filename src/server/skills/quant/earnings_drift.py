@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Union, Dict
 
 import pandas as pd
 
@@ -11,12 +11,14 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.server.skills.quant._utils import _fetch_bars
+from src.server.skills.quant.base_strategy import QuantStrategy
+from src.server.skills.backtester.core.bt_types import StrategySignal, StrategyError
 from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
 
-class EarningsDriftSkill:
+class EarningsDriftSkill(QuantStrategy):
     """Earnings Drift — 3-day post-earnings momentum continuation.
 
     Assumes an external data source provides earnings dates.  Without that,
@@ -39,7 +41,7 @@ class EarningsDriftSkill:
         min_move: float = 0.04,
         vol_mult: float = 2.0,
         hold_days: int = 5,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Detect and signal an earnings drift setup.
 
         Args:
@@ -56,21 +58,13 @@ class EarningsDriftSkill:
         """
         min_len = lookback + hold_days + 21
         if len(df) < min_len:
-            return {
-                "action": "hold",
-                "confidence": 0.5,  # Neutral confidence for data issues
-                "reason": "Insufficient data"
-            }
+            return StrategyError(error=f"Insufficient data (need {min_len} bars, got {len(df)})")
 
         avg_vol = float(df["volume"].iloc[-21:-1].mean())
         # Require minimum average volume to avoid zero-volume edge cases
         MIN_AVG_VOLUME = 1000.0
         if avg_vol < MIN_AVG_VOLUME:
-            return {
-                "action": "hold",
-                "confidence": 0.5,  # Neutral confidence for data quality issues
-                "reason": "Insufficient volume data"
-            }
+            return StrategyError(error=f"Insufficient volume data (avg volume: {avg_vol:.0f})")
 
         # Scan window: lookback bars, excluding the most recent hold_days
         # Example: if lookback=10, hold_days=5, scan df[-15:-5]
@@ -124,11 +118,12 @@ class EarningsDriftSkill:
             vol_factor = 1.0 - min(max_vol_ratio / vol_mult, 1.0)  # 1.0 = low vol, 0.0 = at threshold
             hold_confidence = round((move_factor * 0.6 + vol_factor * 0.4), 2)
 
-            return {
-                "action": "hold",
-                "confidence": max(hold_confidence, 0.4),  # Minimum 0.4
-                "reason": "No earnings catalyst detected"
-            }
+            return StrategySignal(
+                action="hold",
+                confidence=max(hold_confidence, 0.4),  # Minimum 0.4
+                current_price=round(float(df["close"].iloc[-1]), 2),
+                reason="No earnings catalyst detected"
+            )
 
         days_since = len(df) - 1 - catalyst_idx
         current = float(df["close"].iloc[-1])
@@ -147,12 +142,16 @@ class EarningsDriftSkill:
                 # Just outside the window (hold_days < days_since <= hold_days+3)
                 time_factor = 0.5
 
-            return {
-                "action": "hold",
-                "confidence": time_factor,
-                "days_since_catalyst": days_since,
-                "reason": f"Outside drift window (days_since={days_since}, hold={hold_days})",
-            }
+            return StrategySignal(
+                action="hold",
+                confidence=time_factor,
+                current_price=round(current, 2),
+                reason=f"Outside drift window (days_since={days_since}, hold={hold_days})",
+                indicators={
+                    "days_since_catalyst": days_since,
+                    "catalyst_move_pct": round(catalyst_move * 100, 2),
+                }
+            )
 
         action = "buy" if catalyst_move > 0 else "sell"
         stop_distance = abs(catalyst_close * catalyst_move * 0.5)
@@ -160,36 +159,32 @@ class EarningsDriftSkill:
         target = round(current + stop_distance * 2, 2) if action == "buy" else round(current - stop_distance * 2, 2)
         confidence = round(min(abs(catalyst_move) / (min_move * 2), 1.0), 2)
 
-        return {
-            "action": action,
-            "confidence": confidence,
-            "catalyst_move_pct": round(catalyst_move * 100, 2),
-            "days_since_catalyst": days_since,
-            "hold_days_remaining": hold_days - days_since,
-            "current_price": round(current, 2),
-            "entry_price": round(current, 2),
-            "stop_loss": stop,
-            "take_profit": target,
-            "reason": (
+        return StrategySignal(
+            action=action,
+            confidence=confidence,
+            current_price=round(current, 2),
+            entry_price=round(current, 2),
+            stop_loss=stop,
+            take_profit=target,
+            reason=(
                 f"Earnings drift day {days_since}/{hold_days}: catalyst {catalyst_move * 100:.1f}% move"
             ),
-            # Structured data fields
-            "indicators": {
+            indicators={
                 "catalyst_move_pct": round(catalyst_move * 100, 2),
                 "days_since_catalyst": days_since,
                 "catalyst_close": round(catalyst_close, 2),
             },
-            "statistics": {
+            statistics={
                 "hold_days_remaining": hold_days - days_since,
                 "drift_direction": "up" if catalyst_move > 0 else "down",
             },
-            "parameters": {
+            parameters={
                 "lookback": lookback,
                 "min_move": min_move,
                 "vol_mult": vol_mult,
                 "hold_days": hold_days,
             },
-        }
+        )
 
     def generate_signals(
         self,
@@ -200,7 +195,7 @@ class EarningsDriftSkill:
         min_move: float = 0.04,
         vol_mult: float = 2.0,
         hold_days: int = 5,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Fetch daily bars and compute earnings drift signal.
 
         Args:
@@ -217,11 +212,18 @@ class EarningsDriftSkill:
         """
         df = _fetch_bars(symbol, timeframe=timeframe, lookback_days=lookback_days)
         if df is None:
-            return {"error": f"No data for {symbol}/{timeframe}"}
+            return StrategyError(error=f"No data for {symbol}/{timeframe}", symbol=symbol)
         result = self.analyze_bars(
             df, lookback=lookback, min_move=min_move, vol_mult=vol_mult, hold_days=hold_days
         )
-        result.update({"symbol": symbol, "timeframe": timeframe, "timestamp": datetime.now().isoformat()})
+        # Inject metadata for live trading
+        if isinstance(result, StrategySignal):
+            result.symbol = symbol
+            result.timeframe = timeframe
+            result.timestamp = datetime.now()
+        elif isinstance(result, StrategyError):
+            result.symbol = symbol
+        
         return result
 
 
@@ -229,35 +231,13 @@ class EarningsDriftSkill:
 earnings_drift_skill = EarningsDriftSkill()
 
 
-def make_earnings_drift_signals(lookback: int = 10, min_move: float = 0.04, vol_mult: float = 2.0, hold_days: int = 5) -> Callable:
-    """Factory: Earnings drift signal function for backtester.
-
-    Args:
-        lookback: Catalyst scan window in bars. Default 10.
-        min_move: Minimum catalyst-day move. Default 4%.
-        vol_mult: Volume multiplier for catalyst day. Default 2×.
-        hold_days: Drift hold window. Default 5.
-
-    Returns:
-        Signal function ``(symbol, bars_df) -> "buy" | "sell" | "hold"``.
-    """
-    _skill = EarningsDriftSkill()
-
-    def signal_fn(symbol: str, bars_df: pd.DataFrame) -> str:
-        if bars_df is None or bars_df.empty:
-            return "hold"
-        return _skill.analyze_bars(bars_df, lookback=lookback, min_move=min_move, vol_mult=vol_mult, hold_days=hold_days).get("action", "hold")
-
-    return signal_fn
-
-
-__all__ = ["EarningsDriftSkill", "earnings_drift_skill", "make_earnings_drift_signals"]
+__all__ = ["EarningsDriftSkill", "earnings_drift_skill"]
 
 
 if __name__ == "__main__":
     import numpy as np
 
-    print("--- EarningsDriftSkill smoke test ---")
+    print("--- EarningsDriftSkill smoke test (Pydantic) ---")
     rng = np.random.default_rng(55)
     n = 100
     prices = 100.0 + np.cumsum(rng.normal(0, 0.5, n))
@@ -272,8 +252,7 @@ if __name__ == "__main__":
         "close": prices,
         "volume": volumes,
     })
-    r = EarningsDriftSkill().analyze_bars(df)
-    print(f"action={r['action']}, confidence={r.get('confidence')}")
-    fn = make_earnings_drift_signals()
-    print(f"factory: {fn('TEST', df)}")
+    skill = EarningsDriftSkill()
+    result = skill.analyze_bars(df)
+    print(f"action={result.action}, confidence={result.confidence}")
     print("OK")

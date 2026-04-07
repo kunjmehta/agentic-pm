@@ -94,7 +94,7 @@ export default function Page() {
             </>
           ) : activeTab === 'backtest' ? (
             <>
-              <BacktestResults />
+              <BacktestResults apiUrl={apiUrl} />
             </>
           ) : (
             <ConfigPanel apiUrl={apiUrl} />
@@ -107,6 +107,9 @@ export default function Page() {
           onApprove={onApprove}
           onReject={onReject}
           isCollapsed={isChatCollapsed}
+          apiUrl={apiUrl}
+          threadId={threadId}
+          backtestMode={backtestMode}
         />
       </div>
     </div>

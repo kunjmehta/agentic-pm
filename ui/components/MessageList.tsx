@@ -16,9 +16,12 @@ interface Props {
   onApprove: (msgId: string) => void;
   onReject: (msgId: string) => void;
   onSuggestion: (text: string) => void;
+  apiUrl: string;
+  threadId: string;
+  backtestMode: boolean;
 }
 
-export default function MessageList({ messages, onApprove, onReject, onSuggestion }: Props) {
+export default function MessageList({ messages, onApprove, onReject, onSuggestion, apiUrl, threadId, backtestMode }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -52,7 +55,7 @@ export default function MessageList({ messages, onApprove, onReject, onSuggestio
             <div className="bubble user">{msg.content.map((c) => (c.type === 'text' ? c.markdown : '')).join('')}</div>
           ) : (
             <div className="bubble assistant">
-              <AssistantBubble message={msg} onApprove={onApprove} onReject={onReject} />
+              <AssistantBubble message={msg} onApprove={onApprove} onReject={onReject} apiUrl={apiUrl} threadId={threadId} backtestMode={backtestMode} />
             </div>
           )}
         </div>

@@ -53,14 +53,10 @@ function StepIndicator({ step, isActive }: { step: TelemetryStep; isActive: bool
     <div
       className="telemetry-step"
       style={{
-        background: statusBg[step.status],
-        borderColor: statusColors[step.status],
-        opacity: isActive || step.status !== 'pending' ? 1 : 0.5,
+        borderLeftColor: statusColors[step.status],
+        opacity: isActive || step.status !== 'pending' ? 1 : 0.4,
       }}
     >
-      <div className="step-icon" style={{ color: statusColors[step.status] }}>
-        {statusIcon[step.status]}
-      </div>
       <div className="step-content">
         <div className="step-label">{step.label}</div>
         {step.status === 'active' && elapsed > 0 && (
@@ -74,12 +70,20 @@ function StepIndicator({ step, isActive }: { step: TelemetryStep; isActive: bool
   );
 }
 
+function calculateProgress(steps: TelemetryStep[]): number {
+  if (steps.length === 0) return 0;
+  const completed = steps.filter((s) => s.status === 'completed').length;
+  return (completed / steps.length) * 100;
+}
+
 export default function LiveTelemetry({ apiUrl, threadId, enabled = true }: Props) {
   const { steps, currentStep, isConnected } = useTelemetry(apiUrl, threadId, enabled);
 
   if (!enabled || steps.length === 0) {
     return null;
   }
+
+  const progress = calculateProgress(steps);
 
   return (
     <div className="live-telemetry">
@@ -90,6 +94,24 @@ export default function LiveTelemetry({ apiUrl, threadId, enabled = true }: Prop
           <span className="telemetry-status disconnected">○ Completed</span>
         )}
       </div>
+
+      {/* Progress Bar */}
+      <div className="progress-bar-container">
+        <div className="progress-bar-bg">
+          <div
+            className="progress-bar-fill"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+        <div className="progress-text">
+          {progress < 100 ? (
+            <>Processing... {Math.round(progress)}% complete</>
+          ) : (
+            <>Workflow completed</>
+          )}
+        </div>
+      </div>
+
       <div className="telemetry-stepper">
         {steps.map((step, idx) => (
           <StepIndicator key={`${step.node}-${idx}`} step={step} isActive={idx === currentStep} />

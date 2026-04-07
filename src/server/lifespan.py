@@ -424,6 +424,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("[autonomous] Autonomous trading disabled in config")
 
+    # ── Scheduled backtests ────────────────────────────────────────────────
+    try:
+        from src.server.services.backtest_scheduler import backtest_scheduler
+        backtest_scheduler.start()
+        logger.info("[OK] Backtest scheduler started")
+    except Exception as exc:
+        logger.warning(f"[backtest-scheduler] Failed to start: {exc}", exc_info=True)
+
     logger.info("=" * 70)
     logger.info("API Server: http://localhost:8000")
     logger.info("Interactive Docs: http://localhost:8000/docs")
@@ -453,6 +461,12 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
     logger.info("[OK] Autonomous signal processing stopped")
+    try:
+        from src.server.services.backtest_scheduler import backtest_scheduler
+        backtest_scheduler.stop()
+        logger.info("[OK] Backtest scheduler stopped")
+    except Exception as exc:
+        logger.warning(f"[backtest-scheduler] Shutdown error: {exc}")
     if getattr(_state, '_checkpointer_cm', None) is not None:
         try:
             await _state._checkpointer_cm.__aexit__(None, None, None)

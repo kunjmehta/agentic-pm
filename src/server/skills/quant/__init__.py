@@ -48,39 +48,38 @@ from src.server.skills.quant.mean_reversion import (
 from src.server.skills.quant.vwap_reversion import (
     VWAPReversionSkill,
     vwap_reversion_skill,
-    make_vwap_reversion_signals,
 )
 from src.server.skills.quant.opening_range_breakout import (
     OpeningRangeBreakoutSkill,
     opening_range_breakout_skill,
-    make_opening_range_breakout_signals,
 )
 from src.server.skills.quant.rsi_divergence_scalp import (
     RSIDivergenceScalpSkill,
     rsi_divergence_scalp_skill,
-    make_rsi_divergence_signals,
 )
 from src.server.skills.quant.momentum_burst import (
     MomentumBurstSkill,
     momentum_burst_skill,
-    make_momentum_burst_signals,
 )
 
 # Swing strategy classes
 from src.server.skills.quant.golden_cross import (
     GoldenCrossSkill,
     golden_cross_skill,
-    make_golden_cross_signals,
 )
 from src.server.skills.quant.breakout_52w import (
     Breakout52WeekSkill,
     breakout_52w_skill,
-    make_breakout_52w_signals,
 )
 from src.server.skills.quant.earnings_drift import (
     EarningsDriftSkill,
     earnings_drift_skill,
-    make_earnings_drift_signals,
+)
+
+# Buy-and-hold strategy
+from src.server.skills.quant.buy_and_hold import (
+    BuyAndHoldSkill,
+    buy_and_hold_skill,
 )
 
 __all__ = [
@@ -100,6 +99,7 @@ __all__ = [
     "Breakout52WeekSkill",
     "MeanReversionDailySkill",
     "EarningsDriftSkill",
+    "BuyAndHoldSkill",
     # Core singletons
     "momentum_skill",
     "volatility_skill",
@@ -114,14 +114,7 @@ __all__ = [
     "golden_cross_skill",
     "breakout_52w_skill",
     "earnings_drift_skill",
-    # Signal factory functions
-    "make_vwap_reversion_signals",
-    "make_opening_range_breakout_signals",
-    "make_rsi_divergence_signals",
-    "make_momentum_burst_signals",
-    "make_golden_cross_signals",
-    "make_breakout_52w_signals",
-    "make_earnings_drift_signals",
+    "buy_and_hold_skill",
     # Legacy aliases
     "calc_momentum_package",
     "calc_volatility_bands",

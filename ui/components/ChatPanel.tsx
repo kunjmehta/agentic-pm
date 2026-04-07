@@ -12,6 +12,9 @@ interface Props {
   onApprove: (msgId: string) => void;
   onReject: (msgId: string) => void;
   isCollapsed?: boolean;
+  apiUrl: string;
+  threadId: string;
+  backtestMode: boolean;
 }
 
 export default function ChatPanel({
@@ -21,6 +24,9 @@ export default function ChatPanel({
   onApprove,
   onReject,
   isCollapsed = false,
+  apiUrl,
+  threadId,
+  backtestMode,
 }: Props) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -45,6 +51,9 @@ export default function ChatPanel({
         onApprove={onApprove}
         onReject={onReject}
         onSuggestion={onSend}
+        apiUrl={apiUrl}
+        threadId={threadId}
+        backtestMode={backtestMode}
       />
       <InputBar onSend={onSend} disabled={isStreaming} />
     </div>

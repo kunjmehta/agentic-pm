@@ -47,7 +47,7 @@ class SwapPositionsSkill:
         try:
             from src.common.dao.portfolio_dao import PortfolioDAO
             from src.common.dao.alpaca_dao import AlpacaDAO
-            from src.agentic.agents.backtester.core.controller import run_swap_simulation
+            from src.server.skills.backtester.core.controller import run_swap_simulation
 
             snap_date = datetime.strptime(snapshot_date, "%Y-%m-%d").date()
             end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()

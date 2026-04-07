@@ -33,6 +33,7 @@ class GraphState(TypedDict):
     query: str
     thread_id: str
     backtest_mode: bool
+    is_feedback: bool  # True → skip classifier, route directly to PM review
 
     # ── Multi-turn context ──────────────────────────────────────────────────
     conversation_id: Optional[str]          # app-level session UUID
@@ -111,6 +112,7 @@ def make_initial_state(
     thread_id: str,
     backtest_mode: bool = False,
     conversation_id: Optional[str] = None,
+    is_feedback: bool = False,
 ) -> GraphState:
     """Create a minimal initial GraphState for a new query.
 
@@ -119,6 +121,7 @@ def make_initial_state(
         thread_id: LangGraph MemorySaver checkpoint key.
         backtest_mode: If True, bypass market/portfolio guards.
         conversation_id: App-level session UUID; generated if None.
+        is_feedback: If True, skip classifier and route to PM review for plan revision.
 
     Returns:
         Fully initialised GraphState with all optional fields set to None.
@@ -128,6 +131,7 @@ def make_initial_state(
         "query": query,
         "thread_id": thread_id,
         "backtest_mode": backtest_mode,
+        "is_feedback": is_feedback,
         "conversation_id": conversation_id or str(_uuid.uuid4()),
         "turn_number": None,
         "prior_turns": None,

@@ -161,6 +161,16 @@ export default function OrderBook({ apiUrl }: Props) {
         </div>
       </div>
 
+      {/* Memory Warning */}
+      {orders.length >= 40 && (
+        <div className="bg-amber-950 border-b border-amber-800 px-4 py-2 flex items-center gap-2">
+          <span className="text-amber-400 text-sm">⚠</span>
+          <span className="text-amber-300 text-xs font-mono">
+            Showing last {orders.length} orders (memory limit). Older orders are being evicted.
+          </span>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="bg-gray-950 px-4 py-2 border-b border-gray-800 flex gap-3 flex-wrap items-center">
         <div className="flex items-center gap-2">

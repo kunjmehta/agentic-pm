@@ -834,37 +834,30 @@ volatility_skill = VolatilitySkill()
 from src.server.skills.quant.vwap_reversion import (  # noqa: E402
     VWAPReversionSkill,
     vwap_reversion_skill,
-    make_vwap_reversion_signals,
 )
 from src.server.skills.quant.opening_range_breakout import (  # noqa: E402
     OpeningRangeBreakoutSkill,
     opening_range_breakout_skill,
-    make_opening_range_breakout_signals,
 )
 from src.server.skills.quant.rsi_divergence_scalp import (  # noqa: E402
     RSIDivergenceScalpSkill,
     rsi_divergence_scalp_skill,
-    make_rsi_divergence_signals,
 )
 from src.server.skills.quant.momentum_burst import (  # noqa: E402
     MomentumBurstSkill,
     momentum_burst_skill,
-    make_momentum_burst_signals,
 )
 from src.server.skills.quant.golden_cross import (  # noqa: E402
     GoldenCrossSkill,
     golden_cross_skill,
-    make_golden_cross_signals,
 )
 from src.server.skills.quant.breakout_52w import (  # noqa: E402
     Breakout52WeekSkill,
     breakout_52w_skill,
-    make_breakout_52w_signals,
 )
 from src.server.skills.quant.earnings_drift import (  # noqa: E402
     EarningsDriftSkill,
     earnings_drift_skill,
-    make_earnings_drift_signals,
 )
 
 
@@ -930,13 +923,7 @@ __all__ = [
     "breakout_52w_skill",
     "earnings_drift_skill",
     # Signal factory functions (backtester compatible)
-    "make_vwap_reversion_signals",
-    "make_opening_range_breakout_signals",
-    "make_rsi_divergence_signals",
-    "make_momentum_burst_signals",
-    "make_golden_cross_signals",
-    "make_breakout_52w_signals",
-    "make_earnings_drift_signals",
+    # Note: These functions don't exist yet - using skill singletons instead
     # Legacy function aliases
     "calc_momentum_package",
     "calc_volatility_bands",

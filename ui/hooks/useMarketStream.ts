@@ -25,6 +25,8 @@ export interface MarketMessage {
   timeframe?: string;
   exchange?: string | null;
   message?: string;
+  prev_close?: number | null;
+  pct_change?: number | null;
 }
 
 interface UseMarketStreamOptions {

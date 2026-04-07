@@ -1,229 +1,244 @@
 /**
- * BacktestResults component - Historical backtest performance display
+ * BacktestResults component - Historical backtest performance display with scheduled backtests
  *
- * Shows backtest results with filters for strategy, symbol, and date range.
+ * Shows:
+ * 1. Scheduled post-EOD backtests (editable)
+ * 2. Historical backtest results from backtest.duckdb
+ *
  * Uses Bloomberg terminal styling with monospace fonts and orange accents.
  */
 
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { BacktestEditor } from './BacktestEditor';
 
-interface BacktestTrade {
-  id: string;
+interface ScheduledBacktest {
+  name: string;
+  description: string;
   strategy: string;
-  symbol: string;
-  side: 'buy' | 'sell';
-  entry_date: string;
-  exit_date: string;
-  entry_price: number;
-  exit_price: number;
-  qty: number;
-  pnl: number;
-  pnl_pct: number;
+  workflow_type: string;
+  prompt: string;
+  timeframe: string;
+  lookback_days: number;
+  parameters: Record<string, any>;
 }
 
-interface BacktestSummary {
-  total_trades: number;
-  winning_trades: number;
-  losing_trades: number;
-  total_pnl: number;
-  avg_pnl: number;
-  win_rate: number;
-  sharpe_ratio: number;
-  max_drawdown: number;
+interface BacktestRun {
+  run_id: string;
+  strategy_name: string;
+  symbol?: string;
+  start_date: string;
+  end_date: string;
+  total_return_pct?: number;
+  sharpe_ratio?: number;
+  max_drawdown_pct?: number;
+  win_rate?: number;
+  total_trades?: number;
 }
 
-export default function BacktestResults() {
-  const [trades] = useState<BacktestTrade[]>([
-    // Mock data for demonstration
-    {
-      id: '1',
-      strategy: 'mean-reversion',
-      symbol: 'AAPL',
-      side: 'buy',
-      entry_date: '2024-01-15',
-      exit_date: '2024-01-16',
-      entry_price: 180.50,
-      exit_price: 182.30,
-      qty: 100,
-      pnl: 180.00,
-      pnl_pct: 1.0,
-    },
-  ]);
+interface Props {
+  apiUrl: string;
+}
 
-  // Filters
-  const [strategyFilter, setStrategyFilter] = useState<string>('all');
-  const [symbolFilter, setSymbolFilter] = useState<string>('');
-  const [dateRangeFilter, setDateRangeFilter] = useState<string>('30d');
+export default function BacktestResults({ apiUrl }: Props) {
+  const [runs, setRuns] = useState<BacktestRun[]>([]);
+  const [scheduledBacktests, setScheduledBacktests] = useState<ScheduledBacktest[]>([]);
+  const [editingBacktest, setEditingBacktest] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  // Get unique strategies and symbols for filter dropdowns
-  const strategies = useMemo(() => {
-    const unique = new Set(trades.map((t) => t.strategy));
-    return ['all', ...Array.from(unique)];
-  }, [trades]);
+  // Load data on mount
+  useEffect(() => {
+    loadData();
+  }, [apiUrl]);
 
-  // Apply filters
-  const filteredTrades = useMemo(() => {
-    return trades.filter((trade) => {
-      // Strategy filter
-      if (strategyFilter !== 'all' && trade.strategy !== strategyFilter) {
-        return false;
+  const loadData = async () => {
+    setLoading(true);
+    try {
+      // Load scheduled backtest configs
+      const configRes = await fetch(`${apiUrl}/config/scheduled_backtests`);
+      if (configRes.ok) {
+        const configData = await configRes.json();
+        const backtests = configData.config?.default_backtests || configData.default_backtests || [];
+        setScheduledBacktests(backtests);
       }
 
-      // Symbol filter
-      if (symbolFilter && !trade.symbol.toLowerCase().includes(symbolFilter.toLowerCase())) {
-        return false;
+      // Load backtest runs from /backtest/runs API
+      const runsRes = await fetch(`${apiUrl}/backtest/runs?limit=50`);
+      if (runsRes.ok) {
+        const runsData = await runsRes.json();
+        setRuns(runsData.runs || []);
+      }
+    } catch (error) {
+      console.error('Failed to load backtest data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateBacktest = async (name: string, updates: Partial<ScheduledBacktest>) => {
+    try {
+      // Fetch current config section
+      const getRes = await fetch(`${apiUrl}/config/scheduled_backtests`);
+      if (!getRes.ok) {
+        throw new Error('Failed to fetch current config');
       }
 
-      // Date range filter (simplified - implement proper date filtering)
-      // For now, just return all trades
-      return true;
-    });
-  }, [trades, strategyFilter, symbolFilter, dateRangeFilter]);
+      const currentData = await getRes.json();
+      const config = currentData.config || currentData;
 
-  // Calculate summary stats
-  const summary: BacktestSummary = useMemo(() => {
-    const winning = filteredTrades.filter((t) => t.pnl > 0);
-    const losing = filteredTrades.filter((t) => t.pnl < 0);
-    const totalPnl = filteredTrades.reduce((sum, t) => sum + t.pnl, 0);
+      // Find and update the backtest
+      const backtests = config.default_backtests || [];
+      const idx = backtests.findIndex((bt: ScheduledBacktest) => bt.name === name);
 
-    return {
-      total_trades: filteredTrades.length,
-      winning_trades: winning.length,
-      losing_trades: losing.length,
-      total_pnl: totalPnl,
-      avg_pnl: filteredTrades.length > 0 ? totalPnl / filteredTrades.length : 0,
-      win_rate: filteredTrades.length > 0 ? (winning.length / filteredTrades.length) * 100 : 0,
-      sharpe_ratio: 1.5, // Mock value
-      max_drawdown: -5.2, // Mock value
-    };
-  }, [filteredTrades]);
+      if (idx === -1) {
+        throw new Error(`Backtest ${name} not found`);
+      }
+
+      backtests[idx] = { ...backtests[idx], ...updates };
+
+      // Update the entire section
+      const putRes = await fetch(`${apiUrl}/config/scheduled_backtests`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config: { ...config, default_backtests: backtests } })
+      });
+
+      if (putRes.ok) {
+        // Reload configs
+        await loadData();
+        setEditingBacktest(null);
+      } else {
+        const errorData = await putRes.json().catch(() => ({}));
+        console.error('Failed to update backtest:', errorData);
+        alert(`Failed to update backtest: ${errorData.detail || putRes.statusText}`);
+      }
+    } catch (error) {
+      console.error('Failed to update backtest:', error);
+      alert(`Failed to update backtest: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  const getWorkflowIcon = (workflow_type: string) => {
+    switch (workflow_type) {
+      case 'A': return '🛡️';
+      case 'B': return '⚡';
+      case 'C': return '📈';
+      default: return '📊';
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="bg-black border border-gray-800 rounded-lg overflow-hidden p-8 text-center">
+        <div className="text-gray-500 font-mono text-sm">Loading backtest data...</div>
+      </div>
+    );
+  }
 
   return (
-    <div className="bg-black border border-gray-800 rounded-lg overflow-hidden">
-      {/* Header */}
-      <div className="bg-gray-900 px-4 py-2 border-b border-gray-800">
-        <span className="text-orange-500 font-semibold text-sm font-mono">
-          BACKTEST RESULTS
-        </span>
-      </div>
+    <div className="space-y-6">
+      {/* Scheduled Backtests Section */}
+      <div className="bg-black border border-gray-800 rounded-lg overflow-hidden">
+        <div className="bg-gray-900 px-4 py-2 border-b border-gray-800">
+          <span className="text-orange-500 font-semibold text-sm font-mono">
+            SCHEDULED POST-EOD BACKTESTS
+          </span>
+        </div>
 
-      {/* Filters */}
-      <div className="bg-gray-950 px-4 py-3 border-b border-gray-800 flex gap-3 flex-wrap items-center">
-        <div className="flex items-center gap-2">
-          <label className="text-gray-500 text-xs font-mono">STRATEGY:</label>
-          <select
-            value={strategyFilter}
-            onChange={(e) => setStrategyFilter(e.target.value)}
-            className="bg-gray-900 border border-gray-700 text-white text-xs font-mono px-2 py-1 rounded focus:outline-none focus:border-orange-500"
-          >
-            {strategies.map((s) => (
-              <option key={s} value={s}>
-                {s.toUpperCase()}
-              </option>
+        <div className="p-4">
+          <p className="text-sm text-gray-400 mb-4 font-mono">
+            These backtests run automatically after market close (4 PM ET) every trading day.
+          </p>
+
+          <div className="space-y-4">
+            {scheduledBacktests.map((bt) => (
+              <div key={bt.name} className="bg-gray-900 border border-gray-700 rounded p-3">
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <h3 className="font-semibold text-white font-mono text-sm">
+                      {getWorkflowIcon(bt.workflow_type)} {bt.name}
+                    </h3>
+                    <p className="text-xs text-gray-400 font-mono mt-1">{bt.description}</p>
+                  </div>
+                  <button
+                    onClick={() => setEditingBacktest(bt.name === editingBacktest ? null : bt.name)}
+                    className="text-blue-400 text-xs font-mono hover:underline"
+                  >
+                    {bt.name === editingBacktest ? 'Cancel' : 'Edit'}
+                  </button>
+                </div>
+
+                {bt.name === editingBacktest ? (
+                  <BacktestEditor
+                    backtest={bt}
+                    onSave={(updates) => updateBacktest(bt.name, updates)}
+                    onCancel={() => setEditingBacktest(null)}
+                  />
+                ) : (
+                  <div className="text-xs text-gray-300 font-mono space-y-1">
+                    <div><span className="text-gray-500">Strategy:</span> {bt.strategy}</div>
+                    <div><span className="text-gray-500">Timeframe:</span> {bt.timeframe}</div>
+                    <div><span className="text-gray-500">Lookback:</span> {bt.lookback_days} days</div>
+                    <div className="mt-2 bg-black p-2 rounded font-mono text-xs text-gray-400 border border-gray-800">
+                      {bt.prompt}
+                    </div>
+                  </div>
+                )}
+              </div>
             ))}
-          </select>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <label className="text-gray-500 text-xs font-mono">SYMBOL:</label>
-          <input
-            type="text"
-            value={symbolFilter}
-            onChange={(e) => setSymbolFilter(e.target.value)}
-            placeholder="Filter..."
-            className="bg-gray-900 border border-gray-700 text-white text-xs font-mono px-2 py-1 rounded w-24 focus:outline-none focus:border-orange-500"
-          />
-        </div>
-
-        <div className="flex items-center gap-2">
-          <label className="text-gray-500 text-xs font-mono">PERIOD:</label>
-          <select
-            value={dateRangeFilter}
-            onChange={(e) => setDateRangeFilter(e.target.value)}
-            className="bg-gray-900 border border-gray-700 text-white text-xs font-mono px-2 py-1 rounded focus:outline-none focus:border-orange-500"
-          >
-            <option value="7d">7 DAYS</option>
-            <option value="30d">30 DAYS</option>
-            <option value="90d">90 DAYS</option>
-            <option value="1y">1 YEAR</option>
-            <option value="all">ALL TIME</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Summary Stats */}
-      <div className="bg-gray-950 px-4 py-3 border-b border-gray-800 grid grid-cols-4 gap-4">
-        <div className="text-center">
-          <div className="text-gray-500 text-xs font-mono mb-1">TOTAL TRADES</div>
-          <div className="text-white text-lg font-mono font-semibold">{summary.total_trades}</div>
-        </div>
-        <div className="text-center">
-          <div className="text-gray-500 text-xs font-mono mb-1">WIN RATE</div>
-          <div className="text-green-400 text-lg font-mono font-semibold">
-            {summary.win_rate.toFixed(1)}%
-          </div>
-        </div>
-        <div className="text-center">
-          <div className="text-gray-500 text-xs font-mono mb-1">TOTAL P&L</div>
-          <div className={`text-lg font-mono font-semibold ${summary.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            ${summary.total_pnl.toFixed(2)}
-          </div>
-        </div>
-        <div className="text-center">
-          <div className="text-gray-500 text-xs font-mono mb-1">SHARPE</div>
-          <div className="text-orange-500 text-lg font-mono font-semibold">
-            {summary.sharpe_ratio.toFixed(2)}
           </div>
         </div>
       </div>
 
-      {/* Trades Table */}
-      <div className="overflow-auto max-h-96">
-        {filteredTrades.length > 0 ? (
-          <table className="w-full text-xs font-mono">
-            <thead className="bg-gray-900 sticky top-0 z-10">
-              <tr className="border-b border-gray-800">
-                <th className="px-4 py-2 text-left text-gray-500">STRATEGY</th>
-                <th className="px-4 py-2 text-left text-gray-500">SYMBOL</th>
-                <th className="px-4 py-2 text-left text-gray-500">SIDE</th>
-                <th className="px-4 py-2 text-right text-gray-500">ENTRY</th>
-                <th className="px-4 py-2 text-right text-gray-500">EXIT</th>
-                <th className="px-4 py-2 text-right text-gray-500">QTY</th>
-                <th className="px-4 py-2 text-right text-gray-500">P&L</th>
-                <th className="px-4 py-2 text-right text-gray-500">P&L %</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTrades.map((trade) => (
-                <tr
-                  key={trade.id}
-                  className="border-b border-gray-800 hover:bg-gray-900 transition-colors"
-                >
-                  <td className="px-4 py-2 text-gray-400">{trade.strategy}</td>
-                  <td className="px-4 py-2 text-white font-semibold">{trade.symbol}</td>
-                  <td className={`px-4 py-2 uppercase ${trade.side === 'buy' ? 'text-green-400' : 'text-red-400'}`}>
-                    {trade.side}
-                  </td>
-                  <td className="px-4 py-2 text-right text-white">${trade.entry_price.toFixed(2)}</td>
-                  <td className="px-4 py-2 text-right text-white">${trade.exit_price.toFixed(2)}</td>
-                  <td className="px-4 py-2 text-right text-white">{trade.qty}</td>
-                  <td className={`px-4 py-2 text-right font-semibold ${trade.pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    ${trade.pnl.toFixed(2)}
-                  </td>
-                  <td className={`px-4 py-2 text-right font-semibold ${trade.pnl_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                    {trade.pnl_pct >= 0 ? '+' : ''}{trade.pnl_pct.toFixed(2)}%
-                  </td>
+      {/* Recent Backtest Results */}
+      <div className="bg-black border border-gray-800 rounded-lg overflow-hidden">
+        <div className="bg-gray-900 px-4 py-2 border-b border-gray-800">
+          <span className="text-orange-500 font-semibold text-sm font-mono">
+            RECENT BACKTEST RESULTS
+          </span>
+        </div>
+
+        <div className="overflow-x-auto">
+          {runs.length > 0 ? (
+            <table className="w-full text-xs font-mono">
+              <thead className="text-gray-400 bg-gray-950 sticky top-0">
+                <tr className="border-b border-gray-800">
+                  <th className="text-left p-2">RUN ID</th>
+                  <th className="text-left p-2">STRATEGY</th>
+                  <th className="text-left p-2">SYMBOL</th>
+                  <th className="text-left p-2">PERIOD</th>
+                  <th className="text-right p-2">RETURN</th>
+                  <th className="text-right p-2">SHARPE</th>
+                  <th className="text-right p-2">MAX DD</th>
+                  <th className="text-right p-2">WIN RATE</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div className="h-64 flex items-center justify-center text-gray-600 text-sm font-mono">
-            No backtest data available. Run a backtest to see results.
-          </div>
-        )}
+              </thead>
+              <tbody className="text-white">
+                {runs.map((run) => (
+                  <tr key={run.run_id} className="border-b border-gray-800 hover:bg-gray-900">
+                    <td className="p-2 font-mono text-xs">{run.run_id.slice(0, 8)}</td>
+                    <td className="p-2">{run.strategy_name}</td>
+                    <td className="p-2">{run.symbol || 'Multi'}</td>
+                    <td className="p-2 text-xs">
+                      {run.start_date} to {run.end_date}
+                    </td>
+                    <td className={`p-2 text-right ${run.total_return_pct && run.total_return_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {run.total_return_pct?.toFixed(2)}%
+                    </td>
+                    <td className="p-2 text-right">{run.sharpe_ratio?.toFixed(2)}</td>
+                    <td className="p-2 text-right text-red-400">{run.max_drawdown_pct?.toFixed(2)}%</td>
+                    <td className="p-2 text-right">{run.win_rate?.toFixed(1)}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div className="h-64 flex items-center justify-center text-gray-600 text-sm font-mono">
+              No backtest results yet. Backtests will appear here after running.
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

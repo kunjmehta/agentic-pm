@@ -47,13 +47,15 @@ class TradeCache:
     def __init__(
         self,
         batch_interval_minutes: int = 5,
-        max_size: int = 100000
+        max_size: int = 100000,
+        max_memory_mb: int = 500
     ):
         """Initialize TradeCache.
 
         Args:
             batch_interval_minutes: Minutes between automatic flushes (default: 5)
             max_size: Maximum trades before forced flush (default: 100,000)
+            max_memory_mb: Maximum memory usage in MB before forced flush (default: 500)
         """
         # Changed from deque to dict for O(1) lookup/update/delete
         self._cache: Dict[Tuple[str, int], Dict] = {}
@@ -61,12 +63,13 @@ class TradeCache:
         self._batch_interval = timedelta(minutes=batch_interval_minutes)
         self._last_flush = datetime.now()
         self._max_size = max_size
+        self._max_memory_bytes = max_memory_mb * 1024 * 1024
         self._correction_count = 0
         self._cancellation_count = 0
 
         logger.info(
             f"TradeCache initialized: batch_interval={batch_interval_minutes}min, "
-            f"max_size={max_size:,}, supports corrections/cancellations"
+            f"max_size={max_size:,}, max_memory={max_memory_mb}MB, supports corrections/cancellations"
         )
 
     def add_trade(self, trade_data: Dict) -> bool:
@@ -91,6 +94,15 @@ class TradeCache:
 
             key = (symbol, trade_id)
             self._cache[key] = trade_data
+
+            # Check memory usage first (higher priority than other triggers)
+            current_memory = self._estimate_memory_usage()
+            if current_memory > self._max_memory_bytes:
+                logger.warning(
+                    f"Cache memory exceeded {self._max_memory_bytes / 1024 / 1024:.0f}MB "
+                    f"(current: {current_memory / 1024 / 1024:.1f}MB), forcing flush"
+                )
+                return True
 
             should_flush = self._should_flush()
 
@@ -177,6 +189,20 @@ class TradeCache:
                     f"{symbol} trade_id={trade_id}"
                 )
                 return False
+
+    def _estimate_memory_usage(self) -> int:
+        """Estimate cache memory usage in bytes.
+
+        Uses rough estimate: each trade dict ~200 bytes
+        (symbol, timestamp, trade_id, price, size, exchange, conditions, etc.)
+
+        Returns:
+            Estimated memory usage in bytes
+
+        Note: Assumes caller holds lock
+        """
+        # Rough estimate: each trade ~200 bytes
+        return len(self._cache) * 200
 
     def _should_flush(self) -> bool:
         """Check if cache should be flushed.
@@ -294,6 +320,7 @@ def get_cache() -> TradeCache:
     Reads configuration from config file:
     - cache.batch_interval_minutes (default: 5)
     - cache.max_size (default: 100000)
+    - cache.max_memory_mb (default: 500)
 
     Returns:
         TradeCache singleton instance
@@ -308,10 +335,12 @@ def get_cache() -> TradeCache:
             if _cache_instance is None:
                 batch_interval = config.get("cache.batch_interval_minutes", default=5)
                 max_size = config.get("cache.max_size", default=100000)
+                max_memory_mb = config.get("cache.max_memory_mb", default=500)
 
                 _cache_instance = TradeCache(
                     batch_interval_minutes=batch_interval,
-                    max_size=max_size
+                    max_size=max_size,
+                    max_memory_mb=max_memory_mb
                 )
 
     return _cache_instance

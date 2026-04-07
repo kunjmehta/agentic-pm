@@ -27,13 +27,14 @@ class StrategyDAO(BaseDAO):
 
     def __init__(self, db_path: Optional[str] = None):
         """Initialize StrategyDAO and create schema.
-        
+
         Args:
-            db_path: Optional path to DuckDB database file. If None, uses default from config.
+            db_path: Optional path to DuckDB database file. If None, uses analysis.duckdb.
         """
-        super().__init__(db_path=db_path)
+        # Use 'analysis' db_type to store strategy results in data/analysis.duckdb
+        super().__init__(db_path=db_path, db_type='analysis' if db_path is None else None)
         self._initialize_schema()
-        logger.info("Strategy schema initialized")
+        logger.debug("Strategy schema initialized")
 
     def _initialize_schema(self):
         """Create strategy_results table if it doesn't exist."""

@@ -406,6 +406,85 @@ async def update_ui_config(ui_config: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.get("/scheduled-backtests")
+async def get_scheduled_backtests():
+    """Get current scheduled backtest configurations.
+
+    Returns:
+        Dictionary with scheduled backtest settings including
+        enabled flag, schedule, default backtests, and symbols.
+    """
+    logger.info("[config/scheduled-backtests] fetching configuration")
+
+    try:
+        config = _read_config()
+        scheduled_backtests = config.get("scheduled_backtests", {})
+
+        return {
+            "enabled": scheduled_backtests.get("enabled", False),
+            "schedule": scheduled_backtests.get("schedule", "0 17 * * 1-5"),
+            "default_backtests": scheduled_backtests.get("default_backtests", []),
+            "apply_to_symbols": scheduled_backtests.get("apply_to_symbols", [])
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[config/scheduled-backtests] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.put("/scheduled-backtests/{backtest_name}")
+async def update_scheduled_backtest(backtest_name: str, updated_config: Dict[str, Any]):
+    """Update a specific scheduled backtest configuration.
+
+    Args:
+        backtest_name: Name of the backtest to update
+        updated_config: Updated configuration fields
+
+    Returns:
+        Dictionary with status and updated backtest configuration
+    """
+    logger.info(f"[config/scheduled-backtests/update] updating {backtest_name}")
+
+    try:
+        config = _read_config()
+        scheduled_backtests = config.get("scheduled_backtests", {})
+        backtests = scheduled_backtests.get("default_backtests", [])
+
+        # Find and update the backtest
+        found = False
+        for idx, bt in enumerate(backtests):
+            if bt.get('name') == backtest_name:
+                # Update only provided fields
+                backtests[idx].update(updated_config)
+                found = True
+                logger.info(f"[config/scheduled-backtests/update] {backtest_name} updated")
+                break
+
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Backtest '{backtest_name}' not found"
+            )
+
+        # Write back to config
+        scheduled_backtests['default_backtests'] = backtests
+        config['scheduled_backtests'] = scheduled_backtests
+        _write_config(config)
+
+        return {
+            "status": "updated",
+            "backtest": backtests[idx]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[config/scheduled-backtests/update] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @router.get("/{section}", response_model=ConfigSectionResponse)
 async def get_config_section(section: str):
     """Retrieve a specific configuration section.

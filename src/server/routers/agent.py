@@ -59,6 +59,7 @@ _REASONING_NODE_TO_AGENT = {
 
 _NODE_LABELS = {
     "classify_intent": "Classifying intent",
+    "feedback_handler_node": "Processing user feedback",
     "portfolio_reasoning_node": "PM planning tasks",
     "quant_reasoning_node": "Quant analyst planning",
     "backtester_reasoning_node": "Backtester planning",
@@ -97,6 +98,7 @@ async def query_endpoint(request: SemiAutoQueryRequest):
         thread_id=thread_id,
         backtest_mode=request.backtest_mode,
         conversation_id=conversation_id,
+        is_feedback=request.is_feedback,
     )
 
     logger.info(f"[api/query] thread={thread_id} query='{request.query[:60]}'")
@@ -180,11 +182,12 @@ async def query_stream(request: SemiAutoQueryRequest):
         thread_id=thread_id,
         backtest_mode=request.backtest_mode,
         conversation_id=conversation_id,
+        is_feedback=request.is_feedback,
     )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         def _fmt(data: dict) -> str:
-            return f"data: {json.dumps(data)}\n\n"
+            return f"data: {json.dumps(data, default=str)}\n\n"
 
         try:
             async for event in graph.astream_events(initial, config=config, version="v2"):
@@ -427,7 +430,7 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
 
     async def event_generator() -> AsyncGenerator[str, None]:
         def _fmt(data: dict) -> str:
-            return f"data: {json.dumps(data)}\n\n"
+            return f"data: {json.dumps(data, default=str)}\n\n"
 
         async def _run_graph():
             try:

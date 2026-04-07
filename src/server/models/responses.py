@@ -136,6 +136,8 @@ class SemiAutoQueryRequest(BaseModel):
         conversation_id: App-level session UUID. Auto-generated if omitted.
         backtest_mode: If True, bypass market-hours and portfolio guards.
         stream_reasoning: If True, SSE stream includes reasoning trace events.
+        is_feedback: If True, skip classifier and route directly to PM review.
+                     Used when user provides feedback on a proposed plan.
     """
 
     query: str = Field(..., min_length=1)
@@ -143,6 +145,7 @@ class SemiAutoQueryRequest(BaseModel):
     conversation_id: Optional[str] = None
     backtest_mode: bool = False
     stream_reasoning: bool = False
+    is_feedback: bool = False
 
 
 # ===========================================================================

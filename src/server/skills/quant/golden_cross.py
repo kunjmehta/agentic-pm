@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Union, Dict
 
 import pandas as pd
 
@@ -11,12 +11,16 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.server.skills.quant._utils import _fetch_bars
+from src.server.skills.quant.base_strategy import QuantStrategy
+from src.server.skills.backtester.core.bt_types import StrategySignal, StrategyError
+from src.server.skills.quant.base_strategy import QuantStrategy
+from src.server.skills.backtester.core.bt_types import StrategySignal, StrategyError
 from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
 
-class GoldenCrossSkill:
+class GoldenCrossSkill(QuantStrategy):
     """Golden / Death Cross — 50 SMA vs 200 SMA crossover on daily bars.
 
     Signal: 50 SMA crosses above 200 SMA (golden cross → buy) or below (death cross → sell).
@@ -26,7 +30,7 @@ class GoldenCrossSkill:
     Workflow B (signal generation): ``generate_signals(symbol, ...)``.
     """
 
-    def analyze_bars(self, df: pd.DataFrame, fast: int = 50, slow: int = 200) -> Dict:
+    def analyze_bars(self, df: pd.DataFrame, fast: int = 50, slow: int = 200) -> Union[StrategySignal, StrategyError]:
         """Compute golden/death cross signal.
 
         Args:
@@ -39,7 +43,7 @@ class GoldenCrossSkill:
             current_price.
         """
         if len(df) < slow + 1:
-            return {"action": "hold", "confidence": 0.0, "reason": f"Need ≥ {slow + 1} bars"}
+            return StrategyError(error=f"Need ≥ {slow + 1} bars")
 
         closes = df["close"]
         sma_fast = closes.rolling(fast).mean()
@@ -63,32 +67,28 @@ class GoldenCrossSkill:
             stop = round(cur_slow * 0.98, 2)  # 2% below slow SMA
             target = round(current_price * 1.05, 2)  # 5% profit target
 
-            return {
-                "action": "buy",
-                "confidence": confidence,
-                "sma_fast": round(cur_fast, 2),
-                "sma_slow": round(cur_slow, 2),
-                "spread_pct": round(spread_pct, 3),
-                "current_price": round(current_price, 2),
-                "entry_price": round(current_price, 2),
-                "stop_loss": stop,
-                "take_profit": target,
-                "reason": f"Golden cross: {fast}SMA ({cur_fast:.2f}) crossed above {slow}SMA ({cur_slow:.2f})",
-                # Structured data fields
-                "indicators": {
+            return StrategySignal(
+                action="buy",
+                confidence=confidence,
+                current_price=round(current_price, 2),
+                entry_price=round(current_price, 2),
+                stop_loss=stop,
+                take_profit=target,
+                reason=f"Golden cross: {fast}SMA ({cur_fast:.2f}) crossed above {slow}SMA ({cur_slow:.2f})",
+                indicators={
                     "sma_fast": round(cur_fast, 2),
                     "sma_slow": round(cur_slow, 2),
                     "spread_pct": round(spread_pct, 3),
                 },
-                "statistics": {
+                statistics={
                     "crossover_type": "golden",
                     "sma_spread": round(cur_fast - cur_slow, 2),
                 },
-                "parameters": {
+                parameters={
                     "fast": fast,
                     "slow": slow,
                 },
-            }
+            )
 
         if prev_fast >= prev_slow and cur_fast < cur_slow:
             # Confidence: same logic as golden cross
@@ -100,32 +100,28 @@ class GoldenCrossSkill:
             stop = round(cur_slow * 1.02, 2)  # 2% above slow SMA
             target = round(current_price * 0.95, 2)  # 5% profit target (for short)
 
-            return {
-                "action": "sell",
-                "confidence": confidence,
-                "sma_fast": round(cur_fast, 2),
-                "sma_slow": round(cur_slow, 2),
-                "spread_pct": round(spread_pct, 3),
-                "current_price": round(current_price, 2),
-                "entry_price": round(current_price, 2),
-                "stop_loss": stop,
-                "take_profit": target,
-                "reason": f"Death cross: {fast}SMA ({cur_fast:.2f}) crossed below {slow}SMA ({cur_slow:.2f})",
-                # Structured data fields
-                "indicators": {
+            return StrategySignal(
+                action="sell",
+                confidence=confidence,
+                current_price=round(current_price, 2),
+                entry_price=round(current_price, 2),
+                stop_loss=stop,
+                take_profit=target,
+                reason=f"Death cross: {fast}SMA ({cur_fast:.2f}) crossed below {slow}SMA ({cur_slow:.2f})",
+                indicators={
                     "sma_fast": round(cur_fast, 2),
                     "sma_slow": round(cur_slow, 2),
                     "spread_pct": round(spread_pct, 3),
                 },
-                "statistics": {
+                statistics={
                     "crossover_type": "death",
                     "sma_spread": round(cur_fast - cur_slow, 2),
                 },
-                "parameters": {
+                parameters={
                     "fast": fast,
                     "slow": slow,
                 },
-            }
+            )
 
         # Calculate hold confidence based on SMA spread
         # High confidence hold = SMAs are well separated (strong trend established)
@@ -142,33 +138,29 @@ class GoldenCrossSkill:
             # Weak trend or consolidation, lower confidence
             hold_confidence = round(0.3 + spread_magnitude / 1.5 * 0.2, 2)
 
-        return {
-            "action": "hold",
-            "confidence": max(hold_confidence, 0.3),  # Minimum 0.3 for valid decision
-            "sma_fast": round(cur_fast, 2),
-            "sma_slow": round(cur_slow, 2),
-            "spread_pct": round(spread_pct, 3),
-            "current_price": round(current_price, 2),
-            "reason": "No SMA crossover" + (
+        return StrategySignal(
+            action="hold",
+            confidence=max(hold_confidence, 0.3),  # Minimum 0.3 for valid decision
+            current_price=round(current_price, 2),
+            reason="No SMA crossover" + (
                 f" (spread={spread_pct:.2f}% - strong {'bullish' if spread_pct > 0 else 'bearish'} trend)"
                 if spread_magnitude >= 2.0
                 else f" (spread={spread_pct:.2f}% - consolidating)"
             ),
-            # Structured data fields
-            "indicators": {
+            indicators={
                 "sma_fast": round(cur_fast, 2),
                 "sma_slow": round(cur_slow, 2),
                 "spread_pct": round(spread_pct, 3),
             },
-            "statistics": {
+            statistics={
                 "crossover_type": "none",
                 "sma_spread": round(cur_fast - cur_slow, 2),
             },
-            "parameters": {
+            parameters={
                 "fast": fast,
                 "slow": slow,
             },
-        }
+        )
 
     def generate_signals(
         self,
@@ -177,7 +169,7 @@ class GoldenCrossSkill:
         lookback_days: int = 400,
         fast: int = 50,
         slow: int = 200,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Fetch daily bars and compute golden/death cross signal.
 
         Args:
@@ -192,9 +184,16 @@ class GoldenCrossSkill:
         """
         df = _fetch_bars(symbol, timeframe=timeframe, lookback_days=lookback_days)
         if df is None:
-            return {"error": f"No data for {symbol}/{timeframe}"}
+            return StrategyError(error=f"No data for {symbol}/{timeframe}", symbol=symbol)
         result = self.analyze_bars(df, fast=fast, slow=slow)
-        result.update({"symbol": symbol, "timeframe": timeframe, "timestamp": datetime.now().isoformat()})
+        # Inject metadata for live trading
+        if isinstance(result, StrategySignal):
+            result.symbol = symbol
+            result.timeframe = timeframe
+            result.timestamp = datetime.now()
+        elif isinstance(result, StrategyError):
+            result.symbol = symbol
+        
         return result
 
 
@@ -202,24 +201,4 @@ class GoldenCrossSkill:
 golden_cross_skill = GoldenCrossSkill()
 
 
-def make_golden_cross_signals(fast: int = 50, slow: int = 200) -> Callable:
-    """Factory: Golden/death cross signal function for backtester.
-
-    Args:
-        fast: Fast SMA period. Default 50.
-        slow: Slow SMA period. Default 200.
-
-    Returns:
-        Signal function ``(symbol, bars_df) -> "buy" | "sell" | "hold"``.
-    """
-    _skill = GoldenCrossSkill()
-
-    def signal_fn(symbol: str, bars_df: pd.DataFrame) -> str:
-        if bars_df is None or bars_df.empty:
-            return "hold"
-        return _skill.analyze_bars(bars_df, fast=fast, slow=slow).get("action", "hold")
-
-    return signal_fn
-
-
-__all__ = ["GoldenCrossSkill", "golden_cross_skill", "make_golden_cross_signals"]
+__all__ = ["GoldenCrossSkill", "golden_cross_skill"]

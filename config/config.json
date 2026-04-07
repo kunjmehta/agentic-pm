@@ -60,7 +60,8 @@
   "cache": {
     "enabled": true,
     "batch_interval_minutes": 5,
-    "max_size": 100000
+    "max_size": 100000,
+    "max_memory_mb": 500
   },
   "etl": {
     "enabled": true,
@@ -160,5 +161,60 @@
     "model_temperature": 0.0,
     "synthesizer_temperature": 0.2,
     "max_tokens": 2048
+  },
+  "scheduled_backtests": {
+    "enabled": true,
+    "schedule": "0 17 * * 1-5",
+    "_schedule_note": "5 PM ET weekdays (post-market close)",
+    "default_backtests": [
+      {
+        "name": "workflow_a_conservative",
+        "description": "Conservative mean-reversion with tight stops",
+        "strategy": "mean-reversion",
+        "workflow_type": "A",
+        "prompt": "Run backtest using mean-reversion strategy with conservative position sizing (max 5% per trade), stop loss at 1%, and take profit at 3%. Use 1-minute bars and analyze last 30 days.",
+        "timeframe": "1Min",
+        "lookback_days": 30,
+        "parameters": {
+          "threshold": 2.5,
+          "ma_period": 20,
+          "stop_loss_pct": 0.01,
+          "take_profit_pct": 0.03,
+          "max_position_pct": 0.05
+        }
+      },
+      {
+        "name": "workflow_b_momentum",
+        "description": "Momentum-burst scalping strategy",
+        "strategy": "momentum-burst",
+        "workflow_type": "B",
+        "prompt": "Execute momentum-burst backtest targeting 3x volume spikes with 0.5% minimum price move. Scale in aggressively (up to 10% position) and trail stops at 0.2%. Test on 1-minute bars for last 14 days.",
+        "timeframe": "1Min",
+        "lookback_days": 14,
+        "parameters": {
+          "vol_mult": 3.0,
+          "min_move": 0.005,
+          "trail_pct": 0.002,
+          "max_position_pct": 0.10
+        }
+      },
+      {
+        "name": "workflow_c_swing",
+        "description": "Daily swing trading with golden cross",
+        "strategy": "golden-cross",
+        "workflow_type": "C",
+        "prompt": "Backtest golden cross strategy (50/200 MA crossover) on daily bars over 1 year. Use 15% position sizing with 5% stop loss and 15% take profit. Exit on crossover reversal.",
+        "timeframe": "1Day",
+        "lookback_days": 365,
+        "parameters": {
+          "fast": 50,
+          "slow": 200,
+          "max_position_pct": 0.15,
+          "stop_loss_pct": 0.05,
+          "take_profit_pct": 0.15
+        }
+      }
+    ],
+    "apply_to_symbols": ["AAPL", "MSFT", "GOOGL", "TSLA"]
   }
 }

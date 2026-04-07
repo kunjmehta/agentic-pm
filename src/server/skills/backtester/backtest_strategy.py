@@ -12,6 +12,7 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+from src.server.skills.backtester.core.controller import run_backtest
 
 logger = get_logger(__name__)
 
@@ -86,21 +87,12 @@ class BacktestStrategySkill:
         try:
             from src.common.dao.alpaca_dao import AlpacaDAO
             from src.common.dao.backtest_dao import BacktestDAO
-            from src.agentic.agents.backtester.core.controller import run_backtest
-            from src.agentic.agents.backtester.core.strategies import (
-                make_buy_and_hold_signals,
-                make_mean_reversion_signals,
-            )
-            from src.server.skills.quant.skills import (
-                make_vwap_reversion_signals,
-                make_opening_range_breakout_signals,
-                make_rsi_divergence_signals,
-                make_momentum_burst_signals,
-                make_golden_cross_signals,
-                make_breakout_52w_signals,
-                make_mean_reversion_daily_signals,
-                make_earnings_drift_signals,
-            )
+            from src.server.skills.backtester.core.bt_types import StrategyError
+            from src.server.skills.quant.buy_and_hold import BuyAndHoldSkill
+            from src.server.skills.quant.vwap_reversion import VWAPReversionSkill
+            from src.server.skills.quant.opening_range_breakout import OpeningRangeBreakoutSkill
+            from src.server.skills.quant.rsi_divergence_scalp import RSIDivergenceScalpSkill
+            from src.server.skills.quant.momentum_burst import MomentumBurstSkill
 
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
             end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -129,7 +121,7 @@ class BacktestStrategySkill:
             if bars_df.empty:
                 logger.info(f"[BacktestStrategySkill] No local data for {ticker} — auto-fetching")
                 try:
-                    from src.agentic.agents.portfolio.skills.datamanagement.data import (
+                    from src.server.skills.portfolio.skills import (
                         fetch_historical_data_core,
                     )
                     fetch_result = fetch_historical_data_core(
@@ -175,51 +167,63 @@ class BacktestStrategySkill:
 
             logger.info(f"[BacktestStrategySkill] {len(bars_df)} bars fetched for {ticker}")
 
-            # Build strategy signals
+            # Build strategy signals using Pydantic-based skill classes
             _sp = strategy_params or {}
-            strategy_map = {
-                "mean-reversion": lambda: make_mean_reversion_signals(
-                    z_score_entry=float(_sp.get("z_score_entry", 2.0)),
-                    z_score_exit=float(_sp.get("z_score_exit", 0.5)),
-                    lookback=int(_sp.get("lookback", 20)),
-                ),
-                "buy-and-hold": make_buy_and_hold_signals,
-                # Day trading strategies
-                "vwap-reversion": lambda: make_vwap_reversion_signals(
-                    dev_pct=float(_sp.get("dev_pct", 0.005)),
-                    vol_mult=float(_sp.get("vol_mult", 2.0)),
-                ),
-                "opening-range-breakout": lambda: make_opening_range_breakout_signals(
-                    range_bars=int(_sp.get("range_bars", 15)),
-                ),
-                "rsi-divergence": lambda: make_rsi_divergence_signals(
-                    lookback=int(_sp.get("lookback", 20)),
-                    oversold=float(_sp.get("oversold", 35.0)),
-                ),
-                "momentum-burst": lambda: make_momentum_burst_signals(
-                    vol_mult=float(_sp.get("vol_mult", 3.0)),
-                    min_move=float(_sp.get("min_move", 0.005)),
-                ),
-                # Swing strategies
-                "golden-cross": lambda: make_golden_cross_signals(
-                    fast=int(_sp.get("fast", 50)),
-                    slow=int(_sp.get("slow", 200)),
-                ),
-                "breakout-52w": lambda: make_breakout_52w_signals(
-                    lookback=int(_sp.get("lookback", 252)),
-                    vol_mult=float(_sp.get("vol_mult", 1.5)),
-                ),
-                "mean-reversion-daily": lambda: make_mean_reversion_daily_signals(
-                    lookback=int(_sp.get("lookback", 20)),
-                    threshold=float(_sp.get("threshold", 2.5)),
-                ),
-                "earnings-drift": lambda: make_earnings_drift_signals(
-                    min_move=float(_sp.get("min_move", 0.04)),
-                    hold_days=int(_sp.get("hold_days", 5)),
-                ),
+
+            # Map strategy names to skill classes
+            strategy_class_map = {
+                "buy-and-hold": BuyAndHoldSkill,
+                "vwap-reversion": VWAPReversionSkill,
+                "opening-range-breakout": OpeningRangeBreakoutSkill,
+                "rsi-divergence": RSIDivergenceScalpSkill,
+                "momentum-burst": MomentumBurstSkill,
             }
-            factory = strategy_map.get(strategy, make_buy_and_hold_signals)
-            strategy_signals = factory()
+
+            # Get skill class and instantiate
+            SkillClass = strategy_class_map.get(strategy, BuyAndHoldSkill)
+            skill_instance = SkillClass()
+
+            # Create signal function that calls analyze_bars() and extracts action
+            def strategy_signals(symbol: str, current_day_bars: pd.DataFrame) -> str:
+                """Signal function compatible with backtester engine."""
+                if current_day_bars is None or current_day_bars.empty:
+                    return "hold"
+
+                # Call analyze_bars with strategy-specific parameters
+                if strategy == "vwap-reversion":
+                    result = skill_instance.analyze_bars(
+                        current_day_bars,
+                        dev_pct=float(_sp.get("dev_pct", 0.005)),
+                        vol_mult=float(_sp.get("vol_mult", 2.0)),
+                    )
+                elif strategy == "opening-range-breakout":
+                    result = skill_instance.analyze_bars(
+                        current_day_bars,
+                        range_bars=int(_sp.get("range_bars", 15)),
+                    )
+                elif strategy == "rsi-divergence":
+                    result = skill_instance.analyze_bars(
+                        current_day_bars,
+                        lookback=int(_sp.get("lookback", 20)),
+                        oversold=float(_sp.get("oversold", 35.0)),
+                    )
+                elif strategy == "momentum-burst":
+                    result = skill_instance.analyze_bars(
+                        current_day_bars,
+                        vol_mult=float(_sp.get("vol_mult", 3.0)),
+                        min_move=float(_sp.get("min_move", 0.005)),
+                    )
+                else:
+                    # Default: no parameters (buy-and-hold)
+                    result = skill_instance.analyze_bars(current_day_bars)
+
+                # Handle StrategyError
+                if isinstance(result, StrategyError):
+                    logger.warning(f"Strategy error for {symbol}: {result.error}")
+                    return "hold"
+
+                # Extract action from validated StrategySignal
+                return result.action
 
             result = run_backtest(
                 strategy_name=strategy,

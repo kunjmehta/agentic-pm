@@ -5,7 +5,9 @@ Graph topology:
     START
       ↓
     context_node              ← load prior_turns, resolve conversation_id/turn_number
-      ↓
+      ↓ (conditional: is_feedback?)
+      ├─ is_feedback=True ──→ feedback_handler_node → pm_review_node (skip analysis)
+      ↓ is_feedback=False
     classify_intent           ← keyword tier1 + LLM tier2 fallback
       ↓
     data_availability_node    ← DB pre-check; sets data_availability dict AND top-level flags:
@@ -66,6 +68,7 @@ from src.server.state import GraphState, make_initial_state
 from src.server.nodes.classifier import classify_intent
 from src.server.nodes.context_node import context_node
 from src.server.nodes.data_availability_node import data_availability_node
+from src.server.nodes.feedback_handler_node import feedback_handler_node
 from src.server.nodes.guards import market_hours_guard
 from src.server.nodes.portfolio_node import portfolio_reasoning_node
 from src.server.nodes.quant_node import quant_reasoning_node
@@ -82,6 +85,26 @@ logger = get_logger(__name__)
 
 
 # ── Conditional edge functions ────────────────────────────────────────────────
+
+
+def route_after_context(
+    state: GraphState,
+) -> Literal["feedback_handler_node", "classify_intent"]:
+    """Route after context_node based on is_feedback flag.
+
+    If is_feedback=True, skip classifier and route directly to feedback handler,
+    which prepares state for PM review to revise the plan based on user feedback.
+
+    Args:
+        state: Current GraphState.
+
+    Returns:
+        Next node name.
+    """
+    if state.get("is_feedback"):
+        logger.info("[route] is_feedback=True → feedback_handler_node")
+        return "feedback_handler_node"
+    return "classify_intent"
 
 
 def route_after_market_guard(
@@ -284,6 +307,7 @@ def build_graph(checkpointer: Optional[AsyncSqliteSaver] = None) -> StateGraph:
 
     # ── Register nodes ─────────────────────────────────────────────────────
     builder.add_node("context_node", context_node)
+    builder.add_node("feedback_handler_node", feedback_handler_node)
     builder.add_node("classify_intent", classify_intent)
     builder.add_node("data_availability_node", data_availability_node)
     builder.add_node("market_hours_guard", market_hours_guard)
@@ -300,7 +324,7 @@ def build_graph(checkpointer: Optional[AsyncSqliteSaver] = None) -> StateGraph:
 
     # ── Fixed edges ────────────────────────────────────────────────────────
     builder.add_edge(START, "context_node")
-    builder.add_edge("context_node", "classify_intent")
+    builder.add_edge("feedback_handler_node", "pm_review_node")
     builder.add_edge("classify_intent", "data_availability_node")
     builder.add_edge("data_availability_node", "market_hours_guard")
     builder.add_edge("executor_node", "pm_decision_node")
@@ -309,6 +333,15 @@ def build_graph(checkpointer: Optional[AsyncSqliteSaver] = None) -> StateGraph:
     builder.add_edge("synthesizer_node", END)
 
     # ── Conditional edges ──────────────────────────────────────────────────
+    builder.add_conditional_edges(
+        "context_node",
+        route_after_context,
+        {
+            "feedback_handler_node": "feedback_handler_node",
+            "classify_intent": "classify_intent",
+        },
+    )
+
     builder.add_conditional_edges(
         "market_hours_guard",
         route_after_market_guard,
@@ -409,8 +442,8 @@ if __name__ == "__main__":
         print(f"       {src} -> {tgt}")
 
     expected_nodes = {
-        "context_node", "classify_intent", "data_availability_node",
-        "market_hours_guard",
+        "context_node", "feedback_handler_node", "classify_intent",
+        "data_availability_node", "market_hours_guard",
         "portfolio_reasoning_node", "quant_reasoning_node",
         "backtester_reasoning_node", "order_reasoning_node",
         "pm_review_node",

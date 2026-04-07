@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Union, Dict
 
 import pandas as pd
 
@@ -11,12 +11,14 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.server.skills.quant._utils import _fetch_bars
+from src.server.skills.quant.base_strategy import QuantStrategy
+from src.server.skills.backtester.core.bt_types import StrategySignal, StrategyError
 from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
 
-class VWAPReversionSkill:
+class VWAPReversionSkill(QuantStrategy):
     """VWAP Reversion — intraday price snap-back to VWAP after deviation.
 
     Signal: price deviates > ``dev_pct`` from VWAP AND volume spike (> ``vol_mult`` × avg).
@@ -34,7 +36,7 @@ class VWAPReversionSkill:
         dev_pct: float = 0.005,
         vol_mult: float = 2.0,
         stop_pct: float = 0.003,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Compute VWAP reversion signal from a pre-fetched DataFrame.
 
         Args:
@@ -44,8 +46,8 @@ class VWAPReversionSkill:
             stop_pct: Stop-loss distance from entry as fraction of price. Default 0.3%.
 
         Returns:
-            Dict with action, confidence, vwap, current_price, reason, entry_price,
-            stop_loss, take_profit, deviation_pct.
+            StrategySignal with action, confidence, prices, and indicator data.
+            StrategyError if data is insufficient or invalid.
         """
         # Filter to today's session for intraday VWAP (resets daily)
         if hasattr(df.index, 'date'):
@@ -53,11 +55,11 @@ class VWAPReversionSkill:
             df = df[df.index.date == today]
 
         if len(df) < 20:
-            return {"action": "hold", "confidence": 0.0, "reason": "Insufficient data for today's session"}
+            return StrategyError(error="Insufficient data for today's session (need >= 20 bars)")
 
         cum_vol = df["volume"].cumsum()
         if cum_vol.iloc[-1] == 0:
-            return {"action": "hold", "confidence": 0.0, "reason": "Zero volume, cannot calculate VWAP"}
+            return StrategyError(error="Zero volume, cannot calculate VWAP")
         cum_vwap = (df["close"] * df["volume"]).cumsum() / cum_vol
         vwap = float(cum_vwap.iloc[-1])
         current = float(df["close"].iloc[-1])
@@ -67,7 +69,7 @@ class VWAPReversionSkill:
         # Data quality check: VWAP must be above minimum threshold
         MIN_VWAP = 0.01  # Penny stocks below 1 cent are suspicious
         if vwap < MIN_VWAP:
-            return {"action": "hold", "confidence": 0.0, "reason": f"VWAP too low ({vwap:.4f}), data quality issue"}
+            return StrategyError(error=f"VWAP too low ({vwap:.4f}), data quality issue")
 
         deviation = (current - vwap) / vwap
         vol_ok = cur_vol >= avg_vol * vol_mult
@@ -89,32 +91,31 @@ class VWAPReversionSkill:
                 f"Price {deviation * 100:.2f}% {'above' if deviation > 0 else 'below'} VWAP "
                 f"with {vol_ratio:.1f}× volume spike"
             )
-            return {
-                "action": action,
-                "confidence": confidence,
-                "current_price": round(current, 2),
-                "entry_price": round(entry, 2),
-                "stop_loss": stop,
-                "take_profit": target,
-                "reason": reason,
-                # Structured data fields
-                "indicators": {
+            return StrategySignal(
+                action=action,
+                confidence=confidence,
+                current_price=round(current, 2),
+                entry_price=round(entry, 2),
+                stop_loss=stop,
+                take_profit=target,
+                reason=reason,
+                indicators={
                     "vwap": round(vwap, 2),
                     "deviation_pct": round(deviation * 100, 3),
                     "deviation_abs": round(current - vwap, 2),
                     "volume_ratio": round(vol_ratio, 2),
                     "avg_volume_20": round(avg_vol, 0),
                 },
-                "statistics": {
+                statistics={
                     "price_vs_vwap": "above" if deviation > 0 else "below",
                     "volume_spike_multiplier": round(vol_ratio, 2),
                 },
-                "parameters": {
+                parameters={
                     "dev_pct": dev_pct,
                     "vol_mult": vol_mult,
                     "stop_pct": stop_pct,
                 },
-            }
+            )
 
         vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 0.0
 
@@ -125,32 +126,31 @@ class VWAPReversionSkill:
         volume_normalcy = 1.0 - min(abs(vol_ratio - 1.0) / vol_mult, 1.0)  # 1.0 at avg, 0.0 at spike
         hold_confidence = round((proximity_to_vwap * 0.6 + volume_normalcy * 0.4), 2)
 
-        return {
-            "action": "hold",
-            "confidence": max(hold_confidence, 0.1),  # Minimum 0.1 to indicate "valid decision"
-            "current_price": round(current, 2),
-            "reason": "No VWAP deviation signal" + (
+        return StrategySignal(
+            action="hold",
+            confidence=max(hold_confidence, 0.1),  # Minimum 0.1 to indicate "valid decision"
+            current_price=round(current, 2),
+            reason="No VWAP deviation signal" + (
                 f" (dev={abs(deviation)*100:.2f}% < {dev_pct*100:.1f}%)" if abs(deviation) < dev_pct
                 else f" (vol={vol_ratio:.1f}× < {vol_mult}×)"
             ),
-            # Structured data fields
-            "indicators": {
+            indicators={
                 "vwap": round(vwap, 2),
                 "deviation_pct": round(deviation * 100, 3),
                 "deviation_abs": round(current - vwap, 2),
                 "volume_ratio": round(vol_ratio, 2),
                 "avg_volume_20": round(avg_vol, 0),
             },
-            "statistics": {
+            statistics={
                 "price_vs_vwap": "above" if deviation > 0 else "below",
                 "volume_spike_multiplier": round(vol_ratio, 2),
             },
-            "parameters": {
+            parameters={
                 "dev_pct": dev_pct,
                 "vol_mult": vol_mult,
                 "stop_pct": stop_pct,
             },
-        }
+        )
 
     def generate_signals(
         self,
@@ -160,7 +160,7 @@ class VWAPReversionSkill:
         dev_pct: float = 0.005,
         vol_mult: float = 2.0,
         stop_pct: float = 0.003,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Fetch intraday bars and compute VWAP reversion signal.
 
         Args:
@@ -172,13 +172,22 @@ class VWAPReversionSkill:
             stop_pct: Stop-loss distance from entry.
 
         Returns:
-            Signal dict or ``{"error": "..."}`` on failure.
+            StrategySignal with action and metadata, or StrategyError on failure.
         """
         df = _fetch_bars(symbol, timeframe=timeframe, lookback_days=lookback_days)
         if df is None:
-            return {"error": f"No data for {symbol}/{timeframe}"}
+            return StrategyError(error=f"No data for {symbol}/{timeframe}", symbol=symbol)
+
         result = self.analyze_bars(df, dev_pct=dev_pct, vol_mult=vol_mult, stop_pct=stop_pct)
-        result.update({"symbol": symbol, "timeframe": timeframe, "timestamp": datetime.now().isoformat()})
+
+        # Inject metadata for live trading
+        if isinstance(result, StrategySignal):
+            result.symbol = symbol
+            result.timeframe = timeframe
+            result.timestamp = datetime.now()
+        elif isinstance(result, StrategyError):
+            result.symbol = symbol
+
         return result
 
 
@@ -186,25 +195,4 @@ class VWAPReversionSkill:
 vwap_reversion_skill = VWAPReversionSkill()
 
 
-def make_vwap_reversion_signals(dev_pct: float = 0.005, vol_mult: float = 2.0, stop_pct: float = 0.003) -> Callable:
-    """Factory: VWAP reversion signal function for backtester.
-
-    Args:
-        dev_pct: Minimum VWAP deviation to trigger. Default 0.5%.
-        vol_mult: Volume spike multiplier. Default 2×.
-        stop_pct: Stop-loss distance from entry. Default 0.3%.
-
-    Returns:
-        Signal function ``(symbol, bars_df) -> "buy" | "sell" | "hold"``.
-    """
-    _skill = VWAPReversionSkill()
-
-    def signal_fn(symbol: str, bars_df: pd.DataFrame) -> str:
-        if bars_df is None or bars_df.empty:
-            return "hold"
-        return _skill.analyze_bars(bars_df, dev_pct=dev_pct, vol_mult=vol_mult, stop_pct=stop_pct).get("action", "hold")
-
-    return signal_fn
-
-
-__all__ = ["VWAPReversionSkill", "vwap_reversion_skill", "make_vwap_reversion_signals"]
+__all__ = ["VWAPReversionSkill", "vwap_reversion_skill"]

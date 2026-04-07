@@ -16,9 +16,12 @@ interface Props {
   message: Message;
   onApprove?: (msgId: string) => void;
   onReject?: (msgId: string) => void;
+  apiUrl: string;
+  threadId: string;
+  backtestMode: boolean;
 }
 
-function renderBlock(block: MessageContent, idx: number, msg: Message, onApprove?: Props['onApprove'], onReject?: Props['onReject']) {
+function renderBlock(block: MessageContent, idx: number, msg: Message, onApprove?: Props['onApprove'], onReject?: Props['onReject'], apiUrl?: string, threadId?: string, backtestMode?: boolean) {
   switch (block.type) {
     case 'thinking':
       return <ThinkingSection key={`thinking-${block.block.agent}-${idx}`} block={block.block} />;
@@ -37,13 +40,16 @@ function renderBlock(block: MessageContent, idx: number, msg: Message, onApprove
       return <div className="error-block" key={`error-${idx}`}>⚠ {block.msg}</div>;
 
     case 'task_preview':
-      if (!onApprove || !onReject) return null;
+      if (!onApprove || !onReject || !apiUrl || !threadId || backtestMode === undefined) return null;
       return (
         <TaskPreview
           key={`preview-${idx}`}
           data={block.data}
           onApprove={() => onApprove(msg.id)}
           onReject={() => onReject(msg.id)}
+          apiUrl={apiUrl}
+          threadId={threadId}
+          backtestMode={backtestMode}
         />
       );
 
@@ -74,14 +80,14 @@ function renderBlock(block: MessageContent, idx: number, msg: Message, onApprove
   }
 }
 
-export default function AssistantBubble({ message, onApprove, onReject }: Props) {
+export default function AssistantBubble({ message, onApprove, onReject, apiUrl, threadId, backtestMode }: Props) {
   const isEmpty = message.content.length === 0;
   return (
     <>
       {isEmpty && message.isStreaming ? (
         <span className="spinner" />
       ) : (
-        message.content.map((block, i) => renderBlock(block, i, message, onApprove, onReject))
+        message.content.map((block, i) => renderBlock(block, i, message, onApprove, onReject, apiUrl, threadId, backtestMode))
       )}
     </>
   );

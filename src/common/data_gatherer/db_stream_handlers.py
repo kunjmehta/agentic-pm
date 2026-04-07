@@ -12,9 +12,14 @@ sys.path.insert(0, str(project_root))
 
 import pandas as pd
 import asyncio
+from datetime import datetime, timedelta
+from typing import Optional
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
 from src.common.dao import AlpacaDAO
 from src.common.data_gatherer.trade_cache import get_cache
-from src.common.utils import get_logger, config
+from src.common.utils import get_logger, config, secrets
 
 
 # Initialize logger
@@ -33,7 +38,7 @@ def get_ws_manager():
     global _ws_manager
     if _ws_manager is None:
         try:
-            from src.semi_auto.ws_manager import ws_manager
+            from src.server.ws_manager import ws_manager
             _ws_manager = ws_manager
             logger.debug("WebSocket manager loaded for broadcasting")
         except ImportError:
@@ -244,8 +249,51 @@ async def flush_cache_to_db():
         logger.error(f"Failed to flush cache to DB: {e}", exc_info=True)
 
 
+def _get_previous_close_from_alpaca(symbol: str) -> Optional[float]:
+    """Helper to fetch previous day close from Alpaca API (synchronous for thread pool).
+
+    Searches back up to 5 days to find the most recent trading day's closing price.
+    This is used for calculating % change in real-time bar updates.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        Previous close price as float, or None if not available
+    """
+    try:
+        api_key = secrets.get("alpaca.api_key")
+        api_secret = secrets.get("alpaca.secret_key")
+        client = StockHistoricalDataClient(api_key, api_secret)
+
+        # Search back up to 5 days for last trading day
+        for days_back in range(1, 6):
+            end_date = datetime.now() - timedelta(days=days_back)
+            start_date = end_date - timedelta(days=1)
+
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=TimeFrame.Day,
+                start=start_date,
+                end=end_date
+            )
+
+            bars = client.get_stock_bars(request)
+            if symbol in bars and len(bars[symbol]) > 0:
+                close_price = float(bars[symbol][-1].close)
+                logger.debug(f"Previous close for {symbol}: ${close_price:.2f} ({days_back} days back)")
+                return close_price
+
+        logger.warning(f"No previous close data found for {symbol} in last 5 days")
+        return None
+
+    except Exception as exc:
+        logger.warning(f"Failed to fetch previous close for {symbol} from Alpaca: {exc}")
+        return None
+
+
 async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
-    """Broadcast bar update to connected UI clients.
+    """Broadcast bar update to connected UI clients with % change from previous close.
 
     Args:
         bar: Alpaca bar object
@@ -256,6 +304,13 @@ async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
         return
 
     try:
+        # Calculate % change from previous close via Alpaca API
+        prev_close = await asyncio.to_thread(_get_previous_close_from_alpaca, bar.symbol)
+
+        pct_change = None
+        if prev_close:
+            pct_change = ((float(bar.close) - prev_close) / prev_close) * 100
+
         message = {
             "type": "bar_update",
             "symbol": bar.symbol,
@@ -267,6 +322,8 @@ async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
             "close": float(bar.close),
             "volume": int(bar.volume),
             "vwap": float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap else None,
+            "prev_close": prev_close,
+            "pct_change": round(pct_change, 2) if pct_change else None
         }
         await ws_mgr.broadcast(message)
     except Exception as exc:

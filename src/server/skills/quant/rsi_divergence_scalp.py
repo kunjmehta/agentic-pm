@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Union, Dict
 
 import numpy as np
 import pandas as pd
@@ -12,12 +12,14 @@ project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.server.skills.quant._utils import _fetch_bars
+from src.server.skills.quant.base_strategy import QuantStrategy
+from src.server.skills.backtester.core.bt_types import StrategySignal, StrategyError
 from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
 
-class RSIDivergenceScalpSkill:
+class RSIDivergenceScalpSkill(QuantStrategy):
     """RSI Divergence Scalp — bullish and bearish RSI divergences.
 
     Bullish divergence: price makes new low but RSI makes higher low (RSI < ``oversold``).
@@ -37,7 +39,7 @@ class RSIDivergenceScalpSkill:
         oversold: float = 35.0,
         overbought: float = 65.0,
         rsi_period: int = 14,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Compute RSI divergence scalp signal (bullish and bearish).
 
         Args:
@@ -48,11 +50,12 @@ class RSIDivergenceScalpSkill:
             rsi_period: RSI period. Default 14.
 
         Returns:
-            Dict with action, confidence, current_rsi, reason, entry/stop/target.
+            StrategySignal with action, confidence, RSI data, and prices.
+            StrategyError if data is insufficient.
         """
         min_len = rsi_period + lookback
         if len(df) < min_len:
-            return {"action": "hold", "confidence": 0.0, "reason": "Insufficient data"}
+            return StrategyError(error=f"Insufficient data (need {min_len} bars, got {len(df)})")
 
         delta = df["close"].diff()
         gain = delta.where(delta > 0, 0.0).ewm(alpha=1 / rsi_period, adjust=False).mean()
@@ -64,7 +67,7 @@ class RSIDivergenceScalpSkill:
         window_rsi = rsi.iloc[-lookback:]
 
         if window_price.empty or window_rsi.empty:
-            return {"action": "hold", "confidence": 0.0, "reason": "Insufficient window data"}
+            return StrategyError(error="Insufficient window data")
 
         current_price = float(df["close"].iloc[-1])
         current_rsi = float(rsi.iloc[-1])
@@ -85,35 +88,35 @@ class RSIDivergenceScalpSkill:
             risk = current_price - price_low
             target = current_price + 2 * risk if risk > 0 else current_price * 1.01
             confidence = round(min((oversold - current_rsi) / (oversold * 0.5), 1.0), 2)
-            return {
-                "action": "buy",
-                "confidence": confidence,
-                "current_price": round(current_price, 2),
-                "entry_price": round(current_price, 2),
-                "stop_loss": round(price_low * 0.998, 2),
-                "take_profit": round(target, 2),
-                "reason": (
+            return StrategySignal(
+                action="buy",
+                confidence=confidence,
+                current_price=round(current_price, 2),
+                entry_price=round(current_price, 2),
+                stop_loss=round(price_low * 0.998, 2),
+                take_profit=round(target, 2),
+                reason=(
                     f"Bullish RSI divergence: price near low {price_low:.2f}, "
                     f"RSI {current_rsi:.1f} > prior low RSI {rsi_at_price_min:.1f}"
                 ),
-                "indicators": {
+                indicators={
                     "current_rsi": round(current_rsi, 2),
                     "rsi_at_prior_extreme": round(rsi_at_price_min, 2),
                     "rsi_divergence": round(current_rsi - rsi_at_price_min, 2),
                     "price_extreme": round(price_low, 2),
                 },
-                "statistics": {
+                statistics={
                     "divergence_type": "bullish",
                     "rsi_improvement": round(current_rsi - rsi_at_price_min, 2),
                     "price_vs_extreme_pct": round(((current_price / price_low) - 1) * 100, 3),
                 },
-                "parameters": {
+                parameters={
                     "lookback": lookback,
                     "oversold": oversold,
                     "overbought": overbought,
                     "rsi_period": rsi_period,
                 },
-            }
+            )
 
         # Check for bearish divergence (price higher high + RSI lower high in overbought)
         price_max_idx = window_price.idxmax()
@@ -133,35 +136,35 @@ class RSIDivergenceScalpSkill:
             # Confidence scaling: saturates at distance above overbought
             # At RSI=65 (overbought): 0.0, at RSI=82.5: 1.0
             confidence = round(min((current_rsi - overbought) / ((100 - overbought) * 0.5), 1.0), 2)
-            return {
-                "action": "sell",
-                "confidence": confidence,
-                "current_price": round(current_price, 2),
-                "entry_price": round(current_price, 2),
-                "stop_loss": round(price_high * 1.002, 2),
-                "take_profit": round(target, 2),
-                "reason": (
+            return StrategySignal(
+                action="sell",
+                confidence=confidence,
+                current_price=round(current_price, 2),
+                entry_price=round(current_price, 2),
+                stop_loss=round(price_high * 1.002, 2),
+                take_profit=round(target, 2),
+                reason=(
                     f"Bearish RSI divergence: price near high {price_high:.2f}, "
                     f"RSI {current_rsi:.1f} < prior high RSI {rsi_at_price_max:.1f}"
                 ),
-                "indicators": {
+                indicators={
                     "current_rsi": round(current_rsi, 2),
                     "rsi_at_prior_extreme": round(rsi_at_price_max, 2),
                     "rsi_divergence": round(rsi_at_price_max - current_rsi, 2),
                     "price_extreme": round(price_high, 2),
                 },
-                "statistics": {
+                statistics={
                     "divergence_type": "bearish",
                     "rsi_deterioration": round(rsi_at_price_max - current_rsi, 2),
                     "price_vs_extreme_pct": round(((current_price / price_high) - 1) * 100, 3),
                 },
-                "parameters": {
+                parameters={
                     "lookback": lookback,
                     "oversold": oversold,
                     "overbought": overbought,
                     "rsi_period": rsi_period,
                 },
-            }
+            )
 
         # Calculate hold confidence based on RSI position
         # High confidence hold = RSI in neutral zone (40-60)
@@ -177,23 +180,22 @@ class RSIDivergenceScalpSkill:
             # At/below oversold or at/above overbought but no divergence
             hold_confidence = 0.3
 
-        return {
-            "action": "hold",
-            "confidence": hold_confidence,
-            "current_price": round(current_price, 2),
-            "reason": "No RSI divergence detected",
-            # Structured data fields
-            "indicators": {
+        return StrategySignal(
+            action="hold",
+            confidence=hold_confidence,
+            current_price=round(current_price, 2),
+            reason="No RSI divergence detected",
+            indicators={
                 "current_rsi": round(current_rsi, 2),
             },
-            "statistics": {},
-            "parameters": {
+            statistics={},
+            parameters={
                 "lookback": lookback,
                 "oversold": oversold,
                 "overbought": overbought,
                 "rsi_period": rsi_period,
             },
-        }
+        )
 
     def generate_signals(
         self,
@@ -204,7 +206,7 @@ class RSIDivergenceScalpSkill:
         oversold: float = 35.0,
         overbought: float = 65.0,
         rsi_period: int = 14,
-    ) -> Dict:
+    ) -> Union[StrategySignal, StrategyError]:
         """Fetch bars and compute RSI divergence scalp signal.
 
         Args:
@@ -217,13 +219,22 @@ class RSIDivergenceScalpSkill:
             rsi_period: RSI period. Default 14.
 
         Returns:
-            Signal dict or ``{"error": "..."}`` on failure.
+            StrategySignal with action and metadata, or StrategyError on failure.
         """
         df = _fetch_bars(symbol, timeframe=timeframe, lookback_days=lookback_days)
         if df is None:
-            return {"error": f"No data for {symbol}/{timeframe}"}
+            return StrategyError(error=f"No data for {symbol}/{timeframe}", symbol=symbol)
+
         result = self.analyze_bars(df, lookback=lookback, oversold=oversold, overbought=overbought, rsi_period=rsi_period)
-        result.update({"symbol": symbol, "timeframe": timeframe, "timestamp": datetime.now().isoformat()})
+
+        # Inject metadata for live trading
+        if isinstance(result, StrategySignal):
+            result.symbol = symbol
+            result.timeframe = timeframe
+            result.timestamp = datetime.now()
+        elif isinstance(result, StrategyError):
+            result.symbol = symbol
+
         return result
 
 
@@ -231,30 +242,7 @@ class RSIDivergenceScalpSkill:
 rsi_divergence_scalp_skill = RSIDivergenceScalpSkill()
 
 
-def make_rsi_divergence_signals(lookback: int = 20, oversold: float = 35.0, overbought: float = 65.0, rsi_period: int = 14) -> Callable:
-    """Factory: RSI divergence scalp signal function for backtester.
-
-    Args:
-        lookback: Bars to scan for divergence. Default 20.
-        oversold: RSI oversold threshold for bullish divergence. Default 35.
-        overbought: RSI overbought threshold for bearish divergence. Default 65.
-        rsi_period: RSI period. Default 14.
-
-    Returns:
-        Signal function ``(symbol, bars_df) -> "buy" | "sell" | "hold"``.
-    """
-    _skill = RSIDivergenceScalpSkill()
-
-    def signal_fn(symbol: str, bars_df: pd.DataFrame) -> str:
-        if bars_df is None or bars_df.empty:
-            return "hold"
-        return _skill.analyze_bars(bars_df, lookback=lookback, oversold=oversold, overbought=overbought, rsi_period=rsi_period).get("action", "hold")
-
-    return signal_fn
-
-
 __all__ = [
     "RSIDivergenceScalpSkill",
     "rsi_divergence_scalp_skill",
-    "make_rsi_divergence_signals",
 ]

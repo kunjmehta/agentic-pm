@@ -141,7 +141,7 @@ function reducer(state: ChatState, action: Action): ChatState {
 
 const STORED_THREAD = 'pm_threadId';
 const STORED_API = 'pm_apiUrl';
-const DEFAULT_API = 'http://localhost:8001/v1';
+const DEFAULT_API = 'http://localhost:8000/v1';
 
 export function useChat() {
   const [state, dispatch] = useReducer(reducer, {

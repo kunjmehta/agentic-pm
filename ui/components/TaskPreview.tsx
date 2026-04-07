@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import type { Task, TaskPreviewData } from '@/types';
+import { FeedbackForm } from './FeedbackForm';
 
 const META_KEYS = new Set([
   'task_id', 'priority', 'depends_on', 'workflow_type',
@@ -67,18 +68,59 @@ interface Props {
   data: TaskPreviewData;
   onApprove: () => void;
   onReject: () => void;
+  apiUrl: string;
+  threadId: string;
+  backtestMode: boolean;
 }
 
-export default function TaskPreview({ data, onApprove, onReject }: Props) {
+export default function TaskPreview({ data, onApprove, onReject, apiUrl, threadId, backtestMode }: Props) {
   const [busy, setBusy] = useState(false);
+  const [showFeedbackForm, setShowFeedbackForm] = useState(false);
+  const [isRevising, setIsRevising] = useState(false);
 
   async function handleApprove() {
     setBusy(true);
     await onApprove();
   }
+
   async function handleReject() {
     setBusy(true);
     await onReject();
+  }
+
+  async function handleRejectWithFeedback(feedbackText: string) {
+    setIsRevising(true);
+    try {
+      // Send feedback as a regular message to the SAME thread_id
+      // The existing query endpoint handles this naturally
+      const response = await fetch(`${apiUrl}/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: feedbackText,
+          thread_id: threadId,  // SAME thread_id - conversation continues!
+          backtest_mode: backtestMode,  // Inherit from original query!
+          is_feedback: true  // Skip classifier, go straight to PM agent!
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      // The agent processes the feedback and returns a revised plan
+      // UI can poll for the new task preview or receive it via WebSocket
+      setShowFeedbackForm(false);
+
+      // Optionally: show a message that the agent is processing feedback
+      // The revised plan will appear in the task preview area automatically
+
+    } catch (error) {
+      console.error('Failed to submit feedback:', error);
+      alert('Failed to submit feedback. Please try again.');
+    } finally {
+      setIsRevising(false);
+    }
   }
 
   const reasoningItems = [
@@ -113,14 +155,32 @@ export default function TaskPreview({ data, onApprove, onReject }: Props) {
         <TaskTable key={key} label={label} tasks={tasks as Task[]} />
       ))}
 
-      <div className="approve-row">
-        <button className="btn-approve" disabled={busy} onClick={handleApprove}>
-          {busy ? 'Executing...' : 'Approve & Execute'}
-        </button>
-        <button className="btn-reject" disabled={busy} onClick={handleReject}>
-          Reject
-        </button>
-      </div>
+      {!showFeedbackForm ? (
+        <div className="approve-row">
+          <button className="btn-approve" disabled={busy} onClick={handleApprove}>
+            {busy ? 'Executing...' : 'Approve & Execute'}
+          </button>
+          <button
+            className="btn-reject"
+            disabled={busy}
+            onClick={() => setShowFeedbackForm(true)}
+          >
+            Reject & Provide Feedback
+          </button>
+        </div>
+      ) : (
+        <FeedbackForm
+          onSubmit={handleRejectWithFeedback}
+          onCancel={() => setShowFeedbackForm(false)}
+        />
+      )}
+
+      {isRevising && (
+        <div className="text-center text-gray-400 mt-4 font-mono text-xs">
+          <div className="inline-block animate-spin w-4 h-4 border-2 border-gray-600 border-t-amber-400 rounded-full mr-2" />
+          PM agent is revising the plan based on your feedback...
+        </div>
+      )}
     </div>
   );
 }
