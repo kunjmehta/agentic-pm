@@ -532,6 +532,12 @@ async def lifespan(app: FastAPI):
         logger.info("[OK] Backtest scheduler stopped")
     except Exception as exc:
         logger.warning(f"[backtest-scheduler] Shutdown error: {exc}")
+    try:
+        from src.server.services import sandbox_service
+        await sandbox_service.cleanup_all()
+        logger.info("[OK] Sandbox sessions cleaned up")
+    except Exception as exc:
+        logger.warning(f"[sandbox] Shutdown cleanup error: {exc}")
     if getattr(_state, '_checkpointer_cm', None) is not None:
         try:
             await _state._checkpointer_cm.__aexit__(None, None, None)
