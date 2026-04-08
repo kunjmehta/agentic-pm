@@ -70,29 +70,53 @@ async def save_trade_to_db(trade):
     """Save trade data directly to database (no caching).
 
     Args:
-        trade: Alpaca trade object with attributes: symbol, timestamp, price,
-               size, exchange, conditions, id, tape
+        trade: Either Alpaca trade object OR dict with trade data.
+               Dict must have keys: symbol, timestamp, trade_id, price, size
+               Optional keys: exchange, conditions, tape
 
     Note: This bypasses the cache. Use save_trade_to_cache() for batched writes.
     """
     try:
         dao = get_dao()
 
-        # Convert trade object to DataFrame
-        trade_data = pd.DataFrame([{
-            'symbol': trade.symbol,
-            'timestamp': trade.timestamp,
-            'trade_id': trade.id,
-            'price': float(trade.price),
-            'size': int(trade.size),
-            'exchange': trade.exchange if hasattr(trade, 'exchange') else None,
-            'conditions': ','.join(trade.conditions) if hasattr(trade, 'conditions') and trade.conditions else '',
-            'tape': trade.tape if hasattr(trade, 'tape') else None
-        }])
+        # Duck typing for backward compatibility: accept both dict and Alpaca object
+        if isinstance(trade, dict):
+            # Redis Stream dict payload
+            symbol = trade['symbol']
+            timestamp = trade['timestamp']
+            trade_id = trade['trade_id']
+            price = float(trade['price'])
+            size = int(trade['size'])
+            exchange = trade.get('exchange')
+            conditions = trade.get('conditions', '')
+            tape = trade.get('tape')
+        else:
+            # Legacy Alpaca trade object
+            symbol = trade.symbol
+            timestamp = trade.timestamp
+            trade_id = trade.id
+            price = float(trade.price)
+            size = int(trade.size)
+            exchange = trade.exchange if hasattr(trade, 'exchange') else None
+            conditions = ','.join(trade.conditions) if hasattr(trade, 'conditions') and trade.conditions else ''
+            tape = trade.tape if hasattr(trade, 'tape') else None
+
+        # Convert to DataFrame
+        df_data = {
+            'symbol': symbol,
+            'timestamp': timestamp,
+            'trade_id': trade_id,
+            'price': price,
+            'size': size,
+            'exchange': exchange,
+            'conditions': conditions,
+            'tape': tape
+        }
+        trade_df = pd.DataFrame([df_data])
 
         # Save to database
-        dao.save_trades(trade_data)
-        logger.debug(f"Saved trade to DB: {trade.symbol} @ ${trade.price:.2f}")
+        dao.save_trades(trade_df)
+        logger.debug(f"Saved trade to DB: {symbol} @ ${price:.2f}")
 
     except Exception as e:
         logger.error(f"Failed to save trade to DB: {e}", exc_info=True)
@@ -105,28 +129,51 @@ async def save_trade_to_cache(trade):
     database write frequency by batching trades in memory.
 
     Args:
-        trade: Alpaca trade object with attributes: symbol, timestamp, price,
-               size, exchange, conditions, id, tape
+        trade: Either Alpaca trade object OR dict with trade data.
+               Dict must have keys: symbol, timestamp, trade_id, price, size
+               Optional keys: exchange, conditions, tape
     """
     try:
         cache = get_cache()
 
-        # Convert trade object to dict
-        trade_data = {
-            'symbol': trade.symbol,
-            'timestamp': trade.timestamp,
-            'trade_id': trade.id,
-            'price': float(trade.price),
-            'size': int(trade.size),
-            'exchange': trade.exchange if hasattr(trade, 'exchange') else None,
-            'conditions': ','.join(trade.conditions) if hasattr(trade, 'conditions') and trade.conditions else '',
-            'tape': trade.tape if hasattr(trade, 'tape') else None
+        # Duck typing for backward compatibility: accept both dict and Alpaca object
+        if isinstance(trade, dict):
+            # Redis Stream dict payload
+            symbol = trade['symbol']
+            timestamp = trade['timestamp']
+            trade_id = trade['trade_id']
+            price = float(trade['price'])
+            size = int(trade['size'])
+            exchange = trade.get('exchange')
+            conditions = trade.get('conditions', '')
+            tape = trade.get('tape')
+        else:
+            # Legacy Alpaca trade object
+            symbol = trade.symbol
+            timestamp = trade.timestamp
+            trade_id = trade.id
+            price = float(trade.price)
+            size = int(trade.size)
+            exchange = trade.exchange if hasattr(trade, 'exchange') else None
+            conditions = ','.join(trade.conditions) if hasattr(trade, 'conditions') and trade.conditions else ''
+            tape = trade.tape if hasattr(trade, 'tape') else None
+
+        # Normalize data for cache
+        normalized_data = {
+            'symbol': symbol,
+            'timestamp': timestamp,
+            'trade_id': trade_id,
+            'price': price,
+            'size': size,
+            'exchange': exchange,
+            'conditions': conditions,
+            'tape': tape
         }
 
         # Add to cache
-        should_flush = cache.add_trade(trade_data)
+        should_flush = cache.add_trade(normalized_data)
 
-        logger.debug(f"Added trade to cache: {trade.symbol} @ ${trade.price:.2f}")
+        logger.debug(f"Added trade to cache: {symbol} @ ${price:.2f}")
 
         # Flush if threshold met
         if should_flush:
@@ -296,7 +343,9 @@ async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
     """Broadcast bar update to connected UI clients with % change from previous close.
 
     Args:
-        bar: Alpaca bar object
+        bar: Either Alpaca bar object OR dict with bar data
+             Dict must have keys: symbol, timestamp, open, high, low, close, volume
+             Optional keys: vwap
         timeframe: Bar timeframe string (default: '1Min')
     """
     ws_mgr = get_ws_manager()
@@ -304,24 +353,50 @@ async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
         return
 
     try:
+        # Duck typing: extract data from either dict or Alpaca object
+        if isinstance(bar, dict):
+            symbol = bar['symbol']
+            timestamp = bar['timestamp']
+            open_price = float(bar['open'])
+            high_price = float(bar['high'])
+            low_price = float(bar['low'])
+            close_price = float(bar['close'])
+            volume = int(bar['volume'])
+            vwap = float(bar['vwap']) if bar.get('vwap') else None
+        else:
+            symbol = bar.symbol
+            timestamp = bar.timestamp
+            open_price = float(bar.open)
+            high_price = float(bar.high)
+            low_price = float(bar.low)
+            close_price = float(bar.close)
+            volume = int(bar.volume)
+            vwap = float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap else None
+
         # Calculate % change from previous close via Alpaca API
-        prev_close = await asyncio.to_thread(_get_previous_close_from_alpaca, bar.symbol)
+        prev_close = await asyncio.to_thread(_get_previous_close_from_alpaca, symbol)
 
         pct_change = None
         if prev_close:
-            pct_change = ((float(bar.close) - prev_close) / prev_close) * 100
+            pct_change = ((close_price - prev_close) / prev_close) * 100
+
+        # Handle timestamp - could be string or datetime
+        if isinstance(timestamp, str):
+            timestamp_str = timestamp
+        else:
+            timestamp_str = timestamp.isoformat()
 
         message = {
             "type": "bar_update",
-            "symbol": bar.symbol,
-            "timestamp": bar.timestamp.isoformat(),
+            "symbol": symbol,
+            "timestamp": timestamp_str,
             "timeframe": timeframe,
-            "open": float(bar.open),
-            "high": float(bar.high),
-            "low": float(bar.low),
-            "close": float(bar.close),
-            "volume": int(bar.volume),
-            "vwap": float(bar.vwap) if hasattr(bar, 'vwap') and bar.vwap else None,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price,
+            "volume": volume,
+            "vwap": vwap,
             "prev_close": prev_close,
             "pct_change": round(pct_change, 2) if pct_change else None
         }
@@ -340,40 +415,66 @@ async def save_bar_to_db(bar, timeframe: str = '1Min'):
     4. Save computed indicators
 
     Args:
-        bar: Alpaca bar object with attributes: symbol, timestamp, open, high,
-             low, close, volume, trade_count, vwap
+        bar: Either Alpaca bar object OR dict with bar data.
+             Dict must have keys: symbol, timestamp, open, high, low, close, volume
+             Optional keys: trade_count, vwap
         timeframe: Bar timeframe string (default: '1Min')
     """
     try:
         dao = get_dao()
 
-        # Convert bar object to DataFrame
-        bar_data = pd.DataFrame([{
-            'symbol': bar.symbol,
-            'timestamp': bar.timestamp,
-            'open': float(bar.open),
-            'high': float(bar.high),
-            'low': float(bar.low),
-            'close': float(bar.close),
-            'volume': int(bar.volume),
-            'trade_count': int(bar.trade_count) if hasattr(bar, 'trade_count') else None,
-            'vwap': float(bar.vwap) if hasattr(bar, 'vwap') else None
-        }])
+        # Duck typing for backward compatibility: accept both dict and Alpaca object
+        if isinstance(bar, dict):
+            # Redis Stream dict payload
+            symbol = bar['symbol']
+            timestamp = bar['timestamp']
+            open_price = float(bar['open'])
+            high_price = float(bar['high'])
+            low_price = float(bar['low'])
+            close_price = float(bar['close'])
+            volume = int(bar['volume'])
+            trade_count = int(bar.get('trade_count')) if bar.get('trade_count') else None
+            vwap = float(bar.get('vwap')) if bar.get('vwap') else None
+        else:
+            # Legacy Alpaca bar object
+            symbol = bar.symbol
+            timestamp = bar.timestamp
+            open_price = float(bar.open)
+            high_price = float(bar.high)
+            low_price = float(bar.low)
+            close_price = float(bar.close)
+            volume = int(bar.volume)
+            trade_count = int(bar.trade_count) if hasattr(bar, 'trade_count') else None
+            vwap = float(bar.vwap) if hasattr(bar, 'vwap') else None
+
+        # Convert to DataFrame
+        df_data = {
+            'symbol': symbol,
+            'timestamp': timestamp,
+            'open': open_price,
+            'high': high_price,
+            'low': low_price,
+            'close': close_price,
+            'volume': volume,
+            'trade_count': trade_count,
+            'vwap': vwap
+        }
+        bar_df = pd.DataFrame([df_data])
 
         # Save bar to database
-        dao.save_bars(bar_data, timeframe=timeframe)
-        logger.debug(f"Saved bar to DB: {bar.symbol} @ {bar.timestamp}")
+        dao.save_bars(bar_df, timeframe=timeframe)
+        logger.debug(f"Saved bar to DB: {symbol} @ {timestamp}")
 
-        # Broadcast to UI (NEW)
+        # Broadcast to UI
         await broadcast_bar_to_ui(bar, timeframe)
 
         # Auto-compute indicators if enabled
         etl_enabled = config.get("etl.enabled", default=True)
         if etl_enabled:
-            logger.debug(f"Auto-computing indicators for {bar.symbol} {timeframe}")
-            await _compute_and_save_indicators(bar.symbol, timeframe, dao)
+            logger.debug(f"Auto-computing indicators for {symbol} {timeframe}")
+            await _compute_and_save_indicators(symbol, timeframe, dao)
         else:
-            logger.warning(f"ETL disabled - skipping indicator computation for {bar.symbol}")
+            logger.warning(f"ETL disabled - skipping indicator computation for {symbol}")
 
     except Exception as e:
         logger.error(f"Failed to save bar to DB: {e}", exc_info=True)
@@ -597,15 +698,9 @@ async def _run_intraday_strategies(
 ) -> None:
     """Run all intraday strategies on the pre-fetched bar DataFrame.
 
-    Strategies and their minimum bar requirements:
-    - **mean-reversion**       — ``strategy.mean_reversion.lookback`` (default 120)
-    - **vwap-reversion**       — ``strategy.vwap_reversion.min_bars``  (default 26)
-    - **opening-range-breakout** — ``strategy.opening_range_breakout.range_bars`` (default 15) + 5
-    - **rsi-divergence**       — ``strategy.rsi_divergence.lookback`` (default 20)
-    - **momentum-burst**       — ``strategy.momentum_burst.min_bars``  (default 10)
-
-    Each strategy is silently skipped when bars < its minimum without failing
-    the others.
+    Uses the strategy registry to dynamically discover and execute all strategies
+    that support the given timeframe. Each strategy is skipped if bars < min_bars
+    without failing the others.
 
     Args:
         symbol: Stock ticker (upper-case).
@@ -614,91 +709,66 @@ async def _run_intraday_strategies(
         cfg: Config accessor.
         s_dao: Open StrategyDAO instance managed by the caller.
     """
-    from src.semi_auto.skills.quant.skills import (
-        MeanReversionSkill,
-        vwap_reversion_skill,
-        opening_range_breakout_skill,
-        rsi_divergence_scalp_skill,
-        momentum_burst_skill,
-    )
+    from src.server.registry.strategy_registry import get_registry
+    from src.server.registry.register_strategies import ensure_strategies_registered
+
+    # Ensure strategies are registered
+    ensure_strategies_registered()
+
+    # Get registry and filter for this timeframe
+    registry = get_registry()
+    strategy_names = registry.list_by_timeframe(timeframe)
 
     n = len(bars)
+    logger.debug(f"Running {len(strategy_names)} strategies for {symbol} {timeframe} ({n} bars)")
 
-    # ── mean-reversion ────────────────────────────────────────────────────────
-    mr_lookback: int = int(cfg.get("strategy.mean_reversion.lookback", default=120))
-    if n >= mr_lookback:
-        try:
-            skill = MeanReversionSkill()
-            result = skill.analyze_bars(
-                bars,
-                threshold=float(cfg.get("strategy.mean_reversion.threshold", default=2.5)),
-                ma_period=int(cfg.get("strategy.mean_reversion.ma_period", default=20)),
-                lookback=mr_lookback,
-                sr_lookback=int(cfg.get("strategy.mean_reversion.sr_lookback", default=60)),
-            )
-            if "error" not in result:
-                await _save_flat_signal(symbol, timeframe, "mean-reversion", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [mean-reversion] {symbol}: {exc}")
+    # Run each registered strategy
+    for strategy_name in strategy_names:
+        metadata = registry.get_metadata(strategy_name)
 
-    # ── vwap-reversion ────────────────────────────────────────────────────────
-    vwap_min: int = int(cfg.get("strategy.vwap_reversion.min_bars", default=26))
-    if n >= vwap_min:
-        try:
-            result = vwap_reversion_skill.analyze_bars(
-                bars,
-                dev_pct=float(cfg.get("strategy.vwap_reversion.dev_pct", default=0.005)),
-                vol_mult=float(cfg.get("strategy.vwap_reversion.vol_mult", default=2.0)),
-                stop_pct=float(cfg.get("strategy.vwap_reversion.stop_pct", default=0.003)),
+        # Skip if not enough bars
+        if n < metadata.min_bars:
+            logger.debug(
+                f"Skipping [{strategy_name}] {symbol}: need {metadata.min_bars} bars, have {n}"
             )
+            continue
+
+        try:
+            # Instantiate strategy
+            strategy = registry.instantiate(strategy_name)
+            if strategy is None:
+                logger.warning(f"Failed to instantiate [{strategy_name}]")
+                continue
+
+            # Build parameters from config using metadata
+            params = {}
+            config_prefix = metadata.config_prefix or f"strategy.{strategy_name.replace('-', '_')}"
+
+            for param_name, param_meta in metadata.parameters.items():
+                default_value = param_meta.get("default")
+                config_key = f"{config_prefix}.{param_name}"
+
+                # Get value from config, with type conversion
+                param_type = param_meta.get("type", "float")
+                if param_type == "int":
+                    params[param_name] = int(cfg.get(config_key, default=default_value))
+                elif param_type == "float":
+                    params[param_name] = float(cfg.get(config_key, default=default_value))
+                else:
+                    params[param_name] = cfg.get(config_key, default=default_value)
+
+            # Execute strategy
+            result = strategy.analyze_bars(bars, **params)
+
+            # Save signal if valid
             if "error" not in result:
                 result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "vwap-reversion", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [vwap-reversion] {symbol}: {exc}")
+                await _save_flat_signal(symbol, timeframe, strategy_name, result, s_dao)
+            else:
+                logger.debug(f"[{strategy_name}] {symbol}: {result.get('error')}")
 
-    # ── opening-range-breakout ────────────────────────────────────────────────
-    range_bars: int = int(cfg.get("strategy.opening_range_breakout.range_bars", default=15))
-    orb_min: int = range_bars + 5
-    if n >= orb_min:
-        try:
-            result = opening_range_breakout_skill.analyze_bars(bars, range_bars=range_bars)
-            if "error" not in result:
-                result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "opening-range-breakout", result, s_dao)
         except Exception as exc:
-            logger.warning(f"⚠ [opening-range-breakout] {symbol}: {exc}")
-
-    # ── rsi-divergence ────────────────────────────────────────────────────────
-    rsi_lookback: int = int(cfg.get("strategy.rsi_divergence.lookback", default=20))
-    if n >= rsi_lookback:
-        try:
-            result = rsi_divergence_scalp_skill.analyze_bars(
-                bars,
-                lookback=rsi_lookback,
-                oversold=float(cfg.get("strategy.rsi_divergence.oversold", default=35.0)),
-            )
-            if "error" not in result:
-                result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "rsi-divergence", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [rsi-divergence] {symbol}: {exc}")
-
-    # ── momentum-burst ────────────────────────────────────────────────────────
-    mb_min: int = int(cfg.get("strategy.momentum_burst.min_bars", default=10))
-    if n >= mb_min:
-        try:
-            result = momentum_burst_skill.analyze_bars(
-                bars,
-                vol_mult=float(cfg.get("strategy.momentum_burst.vol_mult", default=3.0)),
-                min_move=float(cfg.get("strategy.momentum_burst.min_move", default=0.005)),
-                trail_pct=float(cfg.get("strategy.momentum_burst.trail_pct", default=0.002)),
-            )
-            if "error" not in result:
-                result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "momentum-burst", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [momentum-burst] {symbol}: {exc}")
+            logger.warning(f"[{strategy_name}] {symbol}: {exc}", exc_info=True)
 
 
 async def _run_daily_strategies(
@@ -710,11 +780,9 @@ async def _run_daily_strategies(
 ) -> None:
     """Run all swing / daily strategies on the pre-fetched daily bar DataFrame.
 
-    Strategies and their minimum bar requirements:
-    - **mean-reversion-daily** — ``strategy.mean_reversion_daily.lookback`` (default 20)
-    - **golden-cross**          — ``strategy.golden_cross.slow`` (default 200)
-    - **breakout-52w**          — ``strategy.breakout_52w.lookback`` (default 252)
-    - **earnings-drift**        — ``strategy.earnings_drift.lookback`` (default 10)
+    Uses the strategy registry to dynamically discover and execute all strategies
+    that support the given timeframe (1Day). Each strategy is skipped if bars < min_bars
+    without failing the others.
 
     Args:
         symbol: Stock ticker (upper-case).
@@ -723,77 +791,66 @@ async def _run_daily_strategies(
         cfg: Config accessor.
         s_dao: Open StrategyDAO instance managed by the caller.
     """
-    from src.semi_auto.skills.quant.skills import (
-        mean_reversion_daily_skill,
-        golden_cross_skill,
-        breakout_52w_skill,
-        earnings_drift_skill,
-    )
+    from src.server.registry.strategy_registry import get_registry
+    from src.server.registry.register_strategies import ensure_strategies_registered
+
+    # Ensure strategies are registered
+    ensure_strategies_registered()
+
+    # Get registry and filter for this timeframe
+    registry = get_registry()
+    strategy_names = registry.list_by_timeframe(timeframe)
 
     n = len(bars)
+    logger.debug(f"Running {len(strategy_names)} daily strategies for {symbol} {timeframe} ({n} bars)")
 
-    # ── mean-reversion-daily ──────────────────────────────────────────────────
-    mrd_lookback: int = int(cfg.get("strategy.mean_reversion_daily.lookback", default=20))
-    if n >= mrd_lookback:
-        try:
-            result = mean_reversion_daily_skill.analyze_bars(
-                bars,
-                lookback=mrd_lookback,
-                threshold=float(cfg.get("strategy.mean_reversion_daily.threshold", default=2.5)),
-                ma_period=int(cfg.get("strategy.mean_reversion_daily.ma_period", default=20)),
-            )
-            if "error" not in result:
-                await _save_flat_signal(symbol, timeframe, "mean-reversion-daily", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [mean-reversion-daily] {symbol}: {exc}")
+    # Run each registered strategy
+    for strategy_name in strategy_names:
+        metadata = registry.get_metadata(strategy_name)
 
-    # ── golden-cross ──────────────────────────────────────────────────────────
-    gc_slow: int = int(cfg.get("strategy.golden_cross.slow", default=200))
-    if n >= gc_slow:
-        try:
-            result = golden_cross_skill.analyze_bars(
-                bars,
-                fast=int(cfg.get("strategy.golden_cross.fast", default=50)),
-                slow=gc_slow,
+        # Skip if not enough bars
+        if n < metadata.min_bars:
+            logger.debug(
+                f"Skipping [{strategy_name}] {symbol}: need {metadata.min_bars} bars, have {n}"
             )
-            if "error" not in result:
-                result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "golden-cross", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [golden-cross] {symbol}: {exc}")
+            continue
 
-    # ── breakout-52w ──────────────────────────────────────────────────────────
-    bk_lookback: int = int(cfg.get("strategy.breakout_52w.lookback", default=252))
-    if n >= bk_lookback:
         try:
-            result = breakout_52w_skill.analyze_bars(
-                bars,
-                lookback=bk_lookback,
-                vol_mult=float(cfg.get("strategy.breakout_52w.vol_mult", default=1.5)),
-                trail_pct=float(cfg.get("strategy.breakout_52w.trail_pct", default=0.10)),
-            )
-            if "error" not in result:
-                result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "breakout-52w", result, s_dao)
-        except Exception as exc:
-            logger.warning(f"⚠ [breakout-52w] {symbol}: {exc}")
+            # Instantiate strategy
+            strategy = registry.instantiate(strategy_name)
+            if strategy is None:
+                logger.warning(f"Failed to instantiate [{strategy_name}]")
+                continue
 
-    # ── earnings-drift ────────────────────────────────────────────────────────
-    ed_lookback: int = int(cfg.get("strategy.earnings_drift.lookback", default=10))
-    if n >= ed_lookback:
-        try:
-            result = earnings_drift_skill.analyze_bars(
-                bars,
-                lookback=ed_lookback,
-                min_move=float(cfg.get("strategy.earnings_drift.min_move", default=0.04)),
-                vol_mult=float(cfg.get("strategy.earnings_drift.vol_mult", default=2.0)),
-                hold_days=int(cfg.get("strategy.earnings_drift.hold_days", default=5)),
-            )
+            # Build parameters from config using metadata
+            params = {}
+            config_prefix = metadata.config_prefix or f"strategy.{strategy_name.replace('-', '_')}"
+
+            for param_name, param_meta in metadata.parameters.items():
+                default_value = param_meta.get("default")
+                config_key = f"{config_prefix}.{param_name}"
+
+                # Get value from config, with type conversion
+                param_type = param_meta.get("type", "float")
+                if param_type == "int":
+                    params[param_name] = int(cfg.get(config_key, default=default_value))
+                elif param_type == "float":
+                    params[param_name] = float(cfg.get(config_key, default=default_value))
+                else:
+                    params[param_name] = cfg.get(config_key, default=default_value)
+
+            # Execute strategy
+            result = strategy.analyze_bars(bars, **params)
+
+            # Save signal if valid
             if "error" not in result:
                 result.setdefault("symbol", symbol)
-                await _save_flat_signal(symbol, timeframe, "earnings-drift", result, s_dao)
+                await _save_flat_signal(symbol, timeframe, strategy_name, result, s_dao)
+            else:
+                logger.debug(f"[{strategy_name}] {symbol}: {result.get('error')}")
+
         except Exception as exc:
-            logger.warning(f"⚠ [earnings-drift] {symbol}: {exc}")
+            logger.warning(f"[{strategy_name}] {symbol}: {exc}", exc_info=True)
 
 
 async def _run_all_strategy_signals(
@@ -851,15 +908,29 @@ async def combined_trade_handler(trade):
     """Combined handler: print AND save to database (direct, no cache).
 
     Args:
-        trade: Alpaca trade object
+        trade: Either Alpaca trade object OR dict with trade data
 
     Note: This bypasses cache. Use combined_trade_cache_handler() for batched writes.
     """
-    # Log for visibility
-    logger.info(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
-          f"Exchange: {trade.exchange} | {trade.timestamp}")
+    # Duck typing: extract data for logging
+    if isinstance(trade, dict):
+        symbol = trade['symbol']
+        price = trade['price']
+        size = trade['size']
+        exchange = trade.get('exchange', 'N/A')
+        timestamp = trade['timestamp']
+    else:
+        symbol = trade.symbol
+        price = trade.price
+        size = trade.size
+        exchange = trade.exchange if hasattr(trade, 'exchange') else 'N/A'
+        timestamp = trade.timestamp
 
-    # Save to database
+    # Log for visibility
+    logger.info(f"[TRADE] {symbol} @ ${price:.2f} x {size} | "
+          f"Exchange: {exchange} | {timestamp}")
+
+    # Save to database (save_trade_to_db handles both formats)
     await save_trade_to_db(trade)
 
 
@@ -867,20 +938,40 @@ async def broadcast_trade_to_ui(trade):
     """Broadcast trade update to connected UI clients.
 
     Args:
-        trade: Alpaca trade object
+        trade: Either Alpaca trade object OR dict with trade data
     """
     ws_mgr = get_ws_manager()
     if ws_mgr is None:
         return
 
     try:
+        # Duck typing: extract data from either dict or Alpaca object
+        if isinstance(trade, dict):
+            symbol = trade['symbol']
+            price = float(trade['price'])
+            size = int(trade['size'])
+            timestamp = trade['timestamp']
+            exchange = trade.get('exchange')
+        else:
+            symbol = trade.symbol
+            price = float(trade.price)
+            size = int(trade.size)
+            timestamp = trade.timestamp
+            exchange = trade.exchange if hasattr(trade, 'exchange') else None
+
+        # Handle timestamp - could be string or datetime
+        if isinstance(timestamp, str):
+            timestamp_str = timestamp
+        else:
+            timestamp_str = timestamp.isoformat()
+
         message = {
             "type": "trade_update",
-            "symbol": trade.symbol,
-            "price": float(trade.price),
-            "size": int(trade.size),
-            "timestamp": trade.timestamp.isoformat(),
-            "exchange": trade.exchange if hasattr(trade, 'exchange') else None,
+            "symbol": symbol,
+            "price": price,
+            "size": size,
+            "timestamp": timestamp_str,
+            "exchange": exchange,
         }
         await ws_mgr.broadcast(message)
     except Exception as exc:
@@ -893,16 +984,30 @@ async def combined_trade_cache_handler(trade):
     This is the recommended handler for live WebSocket streams.
 
     Args:
-        trade: Alpaca trade object
+        trade: Either Alpaca trade object OR dict with trade data
     """
-    # Print for visibility
-    print(f"[TRADE] {trade.symbol} @ ${trade.price:.2f} x {trade.size} | "
-          f"Exchange: {trade.exchange} | {trade.timestamp}")
+    # Duck typing: extract data for logging
+    if isinstance(trade, dict):
+        symbol = trade['symbol']
+        price = trade['price']
+        size = trade['size']
+        exchange = trade.get('exchange', 'N/A')
+        timestamp = trade['timestamp']
+    else:
+        symbol = trade.symbol
+        price = trade.price
+        size = trade.size
+        exchange = trade.exchange if hasattr(trade, 'exchange') else 'N/A'
+        timestamp = trade.timestamp
 
-    # Save to cache
+    # Print for visibility
+    print(f"[TRADE] {symbol} @ ${price:.2f} x {size} | "
+          f"Exchange: {exchange} | {timestamp}")
+
+    # Save to cache (save_trade_to_cache handles both formats)
     await save_trade_to_cache(trade)
 
-    # Broadcast to UI (NEW)
+    # Broadcast to UI (broadcast_trade_to_ui handles both formats)
     await broadcast_trade_to_ui(trade)
 
 
@@ -910,15 +1015,33 @@ async def combined_bar_handler(bar, timeframe: str = '1Min'):
     """Combined handler: print AND save to database.
 
     Args:
-        bar: Alpaca bar object
+        bar: Either Alpaca bar object OR dict with bar data
         timeframe: Bar timeframe string (default: '1Min')
     """
-    # Print for visibility
-    print(f"[BAR] {bar.symbol} | O: ${bar.open:.2f} H: ${bar.high:.2f} "
-          f"L: ${bar.low:.2f} C: ${bar.close:.2f} | "
-          f"Vol: {bar.volume:,} | {bar.timestamp}")
+    # Duck typing: extract data for logging
+    if isinstance(bar, dict):
+        symbol = bar['symbol']
+        open_price = bar['open']
+        high_price = bar['high']
+        low_price = bar['low']
+        close_price = bar['close']
+        volume = bar['volume']
+        timestamp = bar['timestamp']
+    else:
+        symbol = bar.symbol
+        open_price = bar.open
+        high_price = bar.high
+        low_price = bar.low
+        close_price = bar.close
+        volume = bar.volume
+        timestamp = bar.timestamp
 
-    # Save to database
+    # Print for visibility
+    print(f"[BAR] {symbol} | O: ${open_price:.2f} H: ${high_price:.2f} "
+          f"L: ${low_price:.2f} C: ${close_price:.2f} | "
+          f"Vol: {volume:,} | {timestamp}")
+
+    # Save to database (save_bar_to_db handles both formats)
     await save_bar_to_db(bar, timeframe=timeframe)
 
 

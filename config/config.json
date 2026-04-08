@@ -216,5 +216,65 @@
       }
     ],
     "apply_to_symbols": ["AAPL", "MSFT", "GOOGL", "TSLA"]
+  },
+  "redis": {
+    "enabled": false,
+    "_comment": "Set enabled=true after configuring your Redis Cloud credentials below and in secret.json",
+    "cloud": {
+      "host": "your-redis-cloud-host.com",
+      "port": 6379,
+      "password_secret_key": "redis.password",
+      "ssl": true,
+      "ssl_cert_reqs": "required",
+      "max_connections": 50,
+      "socket_timeout": 5,
+      "socket_connect_timeout": 5,
+      "retry_on_timeout": true,
+      "health_check_interval": 30
+    },
+    "streams": {
+      "trades_prefix": "stream:trades:",
+      "bars_prefix": "stream:bars:",
+      "retention_minutes": 5,
+      "consumer_group_backend": "backend-consumers",
+      "batch_poll_interval_seconds": 10,
+      "batch_size": 100
+    },
+    "indicator_jobs": {
+      "stream_key": "stream:indicator_jobs",
+      "consumer_group": "indicator-workers",
+      "worker_count": 2
+    }
+  },
+  "ingestion": {
+    "script_path": "src/ingestion/alpaca_redis_ingestion.py",
+    "auto_restart": true,
+    "log_path": "logs/ingestion.log"
+  },
+  "notifications": {
+    "_description": "Multi-channel notification system for critical trading events",
+    "enabled": true,
+    "email": {
+      "enabled": false,
+      "_comment": "Set enabled=true after configuring SendGrid API key in secret.json",
+      "api_key": "${SENDGRID_API_KEY}",
+      "from_email": "trading@yourcompany.com",
+      "to_emails": ["alerts@yourcompany.com"],
+      "min_severity": "WARNING"
+    },
+    "slack": {
+      "enabled": false,
+      "_comment": "Set enabled=true after configuring Slack webhook URL in secret.json",
+      "webhook_url": "${SLACK_WEBHOOK_URL}",
+      "min_severity": "ERROR"
+    },
+    "webhook": {
+      "enabled": false,
+      "_comment": "Generic webhook for custom integrations",
+      "url": "${WEBHOOK_URL}",
+      "min_severity": "INFO",
+      "headers": {},
+      "timeout": 10
+    }
   }
 }

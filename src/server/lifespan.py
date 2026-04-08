@@ -177,8 +177,46 @@ async def _run_periodic_archival() -> None:
             dao.close()
 
 
+async def _run_live_streams_from_redis(symbols: List[str]) -> None:
+    """Start live market data consumption from Redis Streams.
+
+    Consumes trade and bar data from Redis Streams instead of direct Alpaca
+    WebSocket connection. The standalone ingestion script handles the Alpaca
+    streaming and publishes to Redis.
+
+    Args:
+        symbols: List of ticker symbols to consume
+    """
+    from src.common.cache.redis_stream_consumer import RedisStreamConsumer
+    from src.common.data_gatherer.db_stream_handlers import (
+        combined_trade_handler,
+        combined_bar_handler
+    )
+
+    logger.info(f"[streams] starting Redis Stream consumer for {symbols}")
+
+    consumer = RedisStreamConsumer()
+    consumer.subscribe_trades(symbols, combined_trade_handler)
+    consumer.subscribe_bars(symbols, combined_bar_handler)
+
+    flush_task = start_background_flush_task()
+    logger.info("[streams] background cache-flush task started")
+
+    try:
+        await consumer.run()  # Blocks until stopped
+    except asyncio.CancelledError:
+        logger.info("[streams] stream consumer cancelled")
+    finally:
+        consumer.stop()
+        await stop_background_flush_task()
+        logger.info("[streams] Redis Stream consumer and flush task stopped")
+
+
 async def _run_live_streams(coordinator: DataCoordinator) -> None:
     """Start live market data streams for all watchlist symbols.
+
+    DEPRECATED: This function uses direct Alpaca WebSocket streaming.
+    Use _run_live_streams_from_redis() for the new Redis Streams architecture.
 
     Runs streaming only (no historical backfill) so the API starts fast.
     Trades are batched via TradeCache and flushed to market_data.duckdb in
@@ -334,6 +372,17 @@ async def lifespan(app: FastAPI):
     init_all_agents()
     logger.info("[OK] All LLM singletons initialized")
 
+    # Initialize notification service
+    logger.info("Initializing notification service...")
+    from src.server.services.notifications import get_notification_service
+    notification_config = app_config.get("notifications", default={})
+    notification_service = await get_notification_service(notification_config)
+    if notification_service.enabled:
+        active_channels = [ch.name for ch in notification_service.channels if ch.enabled]
+        logger.info(f"[OK] Notification service enabled with channels: {', '.join(active_channels) if active_channels else 'none'}")
+    else:
+        logger.info("[OK] Notification service disabled in config")
+
     # ── Ensure historical data is loaded ───────────────────────────────────
     watchlist = app_config.get_watchlist_symbols()
     if watchlist:
@@ -387,12 +436,28 @@ async def lifespan(app: FastAPI):
     # ── Live market data streams ───────────────────────────────────────────
     try:
         watchlist = app_config.get("watchlist", default=["AAPL"])
-        _state._data_coordinator = DataCoordinator(symbols=watchlist)
-        _state._stream_task = asyncio.create_task(
-            _run_live_streams(_state._data_coordinator),
-            name="live-market-streams",
-        )
-        logger.info(f"[OK] Live streaming task started for watchlist: {watchlist}")
+
+        # Check if Redis Streams mode is enabled
+        redis_config = app_config.get("redis", {})
+        use_redis_streams = redis_config.get("enabled", False)
+
+        if use_redis_streams:
+            # New Redis Streams architecture
+            logger.info("[streams] Using Redis Streams consumer mode")
+            _state._stream_task = asyncio.create_task(
+                _run_live_streams_from_redis(watchlist),
+                name="redis-stream-consumer",
+            )
+            logger.info(f"[OK] Redis Stream consumer started for watchlist: {watchlist}")
+        else:
+            # Legacy direct Alpaca streaming
+            logger.info("[streams] Using legacy direct Alpaca streaming mode")
+            _state._data_coordinator = DataCoordinator(symbols=watchlist)
+            _state._stream_task = asyncio.create_task(
+                _run_live_streams(_state._data_coordinator),
+                name="live-market-streams",
+            )
+            logger.info(f"[OK] Live streaming task started for watchlist: {watchlist}")
     except Exception as exc:
         logger.warning(f"[streams] failed to start — continuing without live data: {exc}")
 

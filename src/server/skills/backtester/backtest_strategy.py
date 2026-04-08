@@ -13,6 +13,10 @@ sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
 from src.server.skills.backtester.core.controller import run_backtest
+from src.server.services.notifications.helpers import (
+    notify_backtest_completed,
+    notify_backtest_failed
+)
 
 logger = get_logger(__name__)
 
@@ -246,10 +250,46 @@ class BacktestStrategySkill:
                 f"[BacktestStrategySkill] Complete: "
                 f"{result.get('metrics', {}).get('total_return_pct', 0):.2f}% return"
             )
+
+            # Send notification on successful completion
+            import asyncio
+            if result.get("status") == "completed":
+                metrics = result.get("metrics", {})
+                try:
+                    asyncio.create_task(
+                        notify_backtest_completed(
+                            backtest_id=result.get("run_id", "unknown"),
+                            strategy=strategy,
+                            symbol=ticker,
+                            timeframe="historical",
+                            sharpe_ratio=metrics.get("sharpe_ratio"),
+                            total_return=metrics.get("total_return_pct"),
+                            max_drawdown=metrics.get("max_drawdown_pct")
+                        )
+                    )
+                except Exception as notify_exc:
+                    logger.warning(f"Failed to send backtest completion notification: {notify_exc}")
+
             return result
 
         except Exception as exc:
             logger.error(f"[BacktestStrategySkill] Error: {exc}", exc_info=True)
+
+            # Send notification on failure
+            import asyncio
+            try:
+                asyncio.create_task(
+                    notify_backtest_failed(
+                        backtest_id="unknown",
+                        strategy=strategy,
+                        symbol=ticker,
+                        timeframe="historical",
+                        error_message=str(exc)
+                    )
+                )
+            except Exception as notify_exc:
+                logger.warning(f"Failed to send backtest failure notification: {notify_exc}")
+
             return {"status": "failed", "error": f"Backtest failed: {exc}"}
 
     # ------------------------------------------------------------------

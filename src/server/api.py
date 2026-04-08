@@ -39,6 +39,7 @@ from src.server.routers.orders import router as orders_router
 from src.server.routers.reports import router as reports_router
 from src.server.routers.config import router as config_router
 from src.server.routers.telemetry import router as telemetry_router
+from src.server.routers.redis_ws_proxy import router as redis_ws_router
 from src.common.utils import config as app_config
 from src.server.models.endpoints import RootResponse
 
@@ -77,6 +78,7 @@ app.include_router(orders_router)
 app.include_router(reports_router)
 app.include_router(config_router)
 app.include_router(telemetry_router)
+app.include_router(redis_ws_router)
 
 
 # -- Root ----------------------------------------------------------------------
@@ -110,6 +112,8 @@ async def root():
             "DELETE /v1/config/watchlist/{symbol}": "Remove ticker from watchlist",
             "GET /v1/telemetry/stream/{thread_id}": "SSE stream of execution telemetry",
             "WS /v1/portfolio/ws": "WebSocket for real-time portfolio updates",
+            "WS /v1/redis/stream/{symbol}": "WebSocket for Redis Stream proxy (real-time market data)",
+            "GET /v1/redis/health": "Redis connection health check",
         },
     }
 

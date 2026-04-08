@@ -65,6 +65,22 @@ def _clean_run_data(run: Dict[str, Any]) -> Dict[str, Any]:
             except (TypeError, ValueError):
                 run[field] = None
 
+    # Convert win_rate from 0-1 to 0-100 scale
+    if run.get("win_rate") is not None:
+        run["win_rate"] = run["win_rate"] * 100.0
+
+    # Calculate total_return_dollars from total_return_pct and initial_capital
+    if run.get("total_return_pct") is not None and run.get("initial_capital") is not None:
+        run["total_return_dollars"] = (run["total_return_pct"] / 100.0) * run["initial_capital"]
+    else:
+        run["total_return_dollars"] = None
+
+    # Calculate max_drawdown_dollars from max_drawdown_pct and initial_capital
+    if run.get("max_drawdown_pct") is not None and run.get("initial_capital") is not None:
+        run["max_drawdown_dollars"] = (run["max_drawdown_pct"] / 100.0) * run["initial_capital"]
+    else:
+        run["max_drawdown_dollars"] = None
+
     return run
 
 

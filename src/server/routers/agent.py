@@ -360,7 +360,7 @@ async def approve_endpoint(thread_id: str, request: ApprovalRequest):
             t["status"] = response.status
             t["final_response"] = response.final_response
             t["tasks_executed"] = response.tasks_executed
-            t["execution_results"] = [r.model_dump() for r in response.execution_results]
+            t["execution_results"] = [r.model_dump(mode="json") for r in response.execution_results]
             t["timestamp_completed"] = datetime.now(timezone.utc).isoformat()
             matched = True
             break
@@ -372,7 +372,7 @@ async def approve_endpoint(thread_id: str, request: ApprovalRequest):
             "status": response.status,
             "final_response": response.final_response,
             "tasks_executed": response.tasks_executed,
-            "execution_results": [r.model_dump() for r in response.execution_results],
+            "execution_results": [r.model_dump(mode="json") for r in response.execution_results],
         })
     _save_conversation(thread_id, turns)
     # Persist reasoning audit trail (post-execution)
@@ -462,7 +462,7 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
                     t["status"] = response.status
                     t["final_response"] = response.final_response
                     t["tasks_executed"] = response.tasks_executed
-                    t["execution_results"] = [r.model_dump() for r in response.execution_results]
+                    t["execution_results"] = [r.model_dump(mode="json") for r in response.execution_results]
                     t["timestamp_completed"] = datetime.now(timezone.utc).isoformat()
                     matched = True
                     break
@@ -474,7 +474,7 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
                     "status": response.status,
                     "final_response": response.final_response,
                     "tasks_executed": response.tasks_executed,
-                    "execution_results": [r.model_dump() for r in response.execution_results],
+                    "execution_results": [r.model_dump(mode="json") for r in response.execution_results],
                 })
             _save_conversation(thread_id, turns)
 

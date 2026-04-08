@@ -144,6 +144,8 @@ class RunSignalsRequest(BaseModel):
     )
 
 
+# Legacy hardcoded dict - replaced by registry lookups
+# Kept for backward compatibility during transition
 _STRATEGY_TO_TIMEFRAME: Dict[str, str] = {
     "mean-reversion": "intraday",
     "vwap-reversion": "intraday",
@@ -155,6 +157,37 @@ _STRATEGY_TO_TIMEFRAME: Dict[str, str] = {
     "mean-reversion-daily": "1Day",
     "earnings-drift": "1Day",
 }
+
+
+def _get_strategy_category(strategy_name: str) -> Optional[str]:
+    """Get strategy category using registry (or fallback to hardcoded dict).
+
+    Args:
+        strategy_name: Strategy name
+
+    Returns:
+        Category string ("intraday" or "1Day"), or None if not found
+    """
+    try:
+        from src.server.registry.strategy_registry import get_registry
+        from src.server.registry.register_strategies import ensure_strategies_registered
+
+        ensure_strategies_registered()
+        registry = get_registry()
+        metadata = registry.get_metadata(strategy_name)
+
+        if metadata:
+            # Convert category to timeframe format for backward compatibility
+            if metadata.category == "daily":
+                return "1Day"
+            else:
+                return "intraday"
+
+    except Exception:
+        pass
+
+    # Fallback to hardcoded dict
+    return _STRATEGY_TO_TIMEFRAME.get(strategy_name)
 
 
 @router.post("/signals/run", response_model=Dict[str, Any])
@@ -209,11 +242,22 @@ async def run_signals_on_demand(body: RunSignalsRequest = Body(...)):
         s_dao = StrategyDAO()
 
         if body.strategy_name == "all":
-            strategies_to_query = [
-                s for s, tf in _STRATEGY_TO_TIMEFRAME.items()
-                if tf == "intraday" and timeframe != "1Day"
-                or tf == "1Day" and timeframe == "1Day"
-            ]
+            # Use registry to get all strategies for this timeframe
+            try:
+                from src.server.registry.strategy_registry import get_registry
+                from src.server.registry.register_strategies import ensure_strategies_registered
+
+                ensure_strategies_registered()
+                registry = get_registry()
+                strategies_to_query = registry.list_by_timeframe(timeframe)
+            except Exception as exc:
+                logger.warning(f"Registry lookup failed, using hardcoded list: {exc}")
+                # Fallback to hardcoded dict
+                strategies_to_query = [
+                    s for s, tf in _STRATEGY_TO_TIMEFRAME.items()
+                    if tf == "intraday" and timeframe != "1Day"
+                    or tf == "1Day" and timeframe == "1Day"
+                ]
         else:
             strategies_to_query = [body.strategy_name]
 
@@ -236,4 +280,111 @@ async def run_signals_on_demand(body: RunSignalsRequest = Body(...)):
         raise
     except Exception as exc:
         logger.error(f"[strategy/signals/run] {symbol} {timeframe}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Registry API Endpoints ───────────────────────────────────────────────────
+
+
+@router.get("/registry/list", response_model=Dict[str, Any])
+async def list_all_strategies(
+    category: Optional[str] = Query(None, description="Filter by category (intraday, daily)"),
+    timeframe: Optional[str] = Query(None, description="Filter by timeframe (1Min, 5Min, 1Day)"),
+    tag: Optional[str] = Query(None, description="Filter by tag (mean-reversion, volume, etc.)"),
+):
+    """List all registered strategies with optional filters.
+
+    Query parameters:
+        category: Filter by category (e.g., "intraday", "daily")
+        timeframe: Filter by supported timeframe (e.g., "1Min", "1Day")
+        tag: Filter by tag (e.g., "mean-reversion", "volume")
+
+    Returns:
+        Dict with:
+        - strategies: List of strategy metadata dicts
+        - count: Number of strategies returned
+        - filters: Dict of applied filters
+    """
+    try:
+        from src.server.registry.strategy_registry import get_registry
+        from src.server.registry.register_strategies import ensure_strategies_registered
+
+        # Ensure strategies are registered
+        ensure_strategies_registered()
+
+        registry = get_registry()
+
+        # Apply filters
+        if category:
+            strategy_names = registry.list_by_category(category)
+        elif timeframe:
+            strategy_names = registry.list_by_timeframe(timeframe)
+        elif tag:
+            strategy_names = registry.list_by_tag(tag)
+        else:
+            strategy_names = registry.get_all_names()
+
+        # Build response with full metadata
+        strategies = []
+        for name in strategy_names:
+            metadata = registry.get_metadata(name)
+            if metadata:
+                strategies.append(metadata.to_dict())
+
+        return {
+            "strategies": strategies,
+            "count": len(strategies),
+            "filters": {
+                "category": category,
+                "timeframe": timeframe,
+                "tag": tag,
+            },
+        }
+
+    except Exception as exc:
+        logger.error(f"[strategy/registry/list] {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/registry/{strategy_name}", response_model=Dict[str, Any])
+async def get_strategy_metadata(strategy_name: str):
+    """Get detailed metadata for a specific strategy.
+
+    Path parameters:
+        strategy_name: Strategy name (e.g., "vwap-reversion", "golden-cross")
+
+    Returns:
+        Strategy metadata dict with:
+        - name: Strategy identifier
+        - display_name: Human-readable name
+        - description: Strategy description
+        - category: Strategy category
+        - timeframes: Supported timeframes
+        - min_bars: Minimum bars required
+        - parameters: Parameter definitions
+        - tags: Strategy tags
+        - config_prefix: Config key prefix
+    """
+    try:
+        from src.server.registry.strategy_registry import get_registry
+        from src.server.registry.register_strategies import ensure_strategies_registered
+
+        # Ensure strategies are registered
+        ensure_strategies_registered()
+
+        registry = get_registry()
+        metadata = registry.get_metadata(strategy_name)
+
+        if metadata is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Strategy '{strategy_name}' not found. Available: {registry.get_all_names()}",
+            )
+
+        return metadata.to_dict()
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[strategy/registry/{strategy_name}] {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
