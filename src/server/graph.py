@@ -10,8 +10,8 @@ Graph topology:
       ↓ is_feedback=False
     classify_intent           ← keyword tier1 + LLM tier2 fallback
       ↓
-    data_availability_node    ← DB pre-check; sets data_availability dict AND top-level flags:
-      │                           _indicators_available, _bars_available, _trades_available
+    data_availability_node    ← DB pre-check; sets data_availability dict with flags:
+      │                           indicators_available, bars_available, trades_available
       │                         True  = data exists in DB → agents READ from DB (no fetch)
       │                         False = data absent/stale → agent must schedule fetch first
       ↓
@@ -49,9 +49,9 @@ Graph topology:
 All sub-agent task lists propagate through shared state so pm_review_node
 sees the full combined plan before presenting a single HITL approval to the user.
 
-Data availability flags (_indicators_available, _bars_available, _trades_available)
-are set by data_availability_node and consumed by portfolio_reasoning_node to
-prevent redundant API fetches when data is already in the DB.
+Data availability flags (indicators_available, bars_available, trades_available)
+are set by data_availability_node inside the data_availability dict and consumed
+by portfolio_reasoning_node to prevent redundant API fetches when data is in DB.
 """
 
 import sys
@@ -69,7 +69,7 @@ from src.server.nodes.classifier import classify_intent
 from src.server.nodes.context_node import context_node
 from src.server.nodes.data_availability_node import data_availability_node
 from src.server.nodes.feedback_handler_node import feedback_handler_node
-from src.server.nodes.guards import market_hours_guard
+from src.common.middleware.guards import market_hours_guard, portfolio_guard
 from src.server.nodes.portfolio_node import portfolio_reasoning_node
 from src.server.nodes.quant_node import quant_reasoning_node
 from src.server.nodes.backtester_node import backtester_reasoning_node
@@ -85,6 +85,17 @@ logger = get_logger(__name__)
 
 
 # ── Conditional edge functions ────────────────────────────────────────────────
+
+
+def _with_error_guard(fn):
+    """Wrap a routing function to short-circuit to synthesizer_node on error."""
+    def wrapper(state: GraphState) -> str:
+        if state.get("error"):
+            logger.info(f"[route] error → synthesizer_node (from {fn.__name__})")
+            return "synthesizer_node"
+        return fn(state)
+    wrapper.__name__ = fn.__name__
+    return wrapper
 
 
 def route_after_context(
@@ -109,8 +120,8 @@ def route_after_context(
 
 def route_after_market_guard(
     state: GraphState,
-) -> Literal["portfolio_reasoning_node", "synthesizer_node"]:
-    """Route to synthesizer if market hours guard blocked, else continue.
+) -> Literal["portfolio_guard", "synthesizer_node"]:
+    """Route to synthesizer if market hours guard blocked, else continue to portfolio_guard.
 
     Args:
         state: Current GraphState.
@@ -121,9 +132,27 @@ def route_after_market_guard(
     if state.get("routing_error"):
         logger.info("[route] market_hours_guard blocked → synthesizer_node")
         return "synthesizer_node"
+    return "portfolio_guard"
+
+
+def route_after_portfolio_guard(
+    state: GraphState,
+) -> Literal["portfolio_reasoning_node", "synthesizer_node"]:
+    """Route to synthesizer if portfolio guard blocked, else continue to PM reasoning.
+
+    Args:
+        state: Current GraphState.
+
+    Returns:
+        Next node name.
+    """
+    if state.get("routing_error"):
+        logger.info("[route] portfolio_guard blocked → synthesizer_node")
+        return "synthesizer_node"
     return "portfolio_reasoning_node"
 
 
+@_with_error_guard
 def route_after_pm_reasoning(state: GraphState) -> str:
     """Route after PM reasoning based on intent and delegation flags.
 
@@ -141,9 +170,6 @@ def route_after_pm_reasoning(state: GraphState) -> str:
     Returns:
         Next node name string.
     """
-    if state.get("error"):
-        logger.info("[route] error after PM → synthesizer_node")
-        return "synthesizer_node"
     intent = state.get("intent", "")
     # backtest intent: go directly to backtester — do not run quant
     if intent == "backtest":
@@ -172,6 +198,7 @@ def route_after_pm_reasoning(state: GraphState) -> str:
     return "pm_review_node"
 
 
+@_with_error_guard
 def route_after_quant(state: GraphState) -> str:
     """After quant: chain to backtester only for full_analysis, else go to review.
 
@@ -184,9 +211,6 @@ def route_after_quant(state: GraphState) -> str:
     Returns:
         Next node name string.
     """
-    if state.get("error"):
-        logger.info("[route] error after quant → synthesizer_node")
-        return "synthesizer_node"
     if state.get("intent") == "full_analysis" and state.get("_delegate_backtester"):
         logger.info("[route] quant done → backtester_reasoning_node (full_analysis)")
         return "backtester_reasoning_node"
@@ -194,6 +218,7 @@ def route_after_quant(state: GraphState) -> str:
     return "pm_review_node"
 
 
+@_with_error_guard
 def route_after_backtester(state: GraphState) -> str:
     """After backtester: route to order agent if needed, else PM review.
 
@@ -203,13 +228,11 @@ def route_after_backtester(state: GraphState) -> str:
     Returns:
         Next node name string.
     """
-    if state.get("error"):
-        logger.info("[route] error after backtester → synthesizer_node")
-        return "synthesizer_node"
     logger.info("[route] backtester done → pm_review_node")
     return "pm_review_node"
 
 
+@_with_error_guard
 def route_after_pm_review(state: GraphState) -> str:
     """PM review gate: approved → executor (HITL), rejected → revise or synthesizer.
 
@@ -222,9 +245,6 @@ def route_after_pm_review(state: GraphState) -> str:
     Returns:
         Next node name string.
     """
-    if state.get("error"):
-        logger.info("[route] error after pm_review → synthesizer_node")
-        return "synthesizer_node"
     if state.get("pm_review_approved") is False:
         iteration = state.get("review_iteration") or 0
         if iteration < 2:
@@ -265,6 +285,7 @@ def route_after_pm_decision(state: GraphState) -> str:
     return "synthesizer_node"
 
 
+@_with_error_guard
 def route_after_risk_guard(state: GraphState) -> str:
     """Route after risk guard validation.
 
@@ -277,9 +298,6 @@ def route_after_risk_guard(state: GraphState) -> str:
     Returns:
         Next node name string.
     """
-    if state.get("error"):
-        logger.info("[route] risk_guard blocked orders → synthesizer_node")
-        return "synthesizer_node"
     logger.info("[route] risk_guard approved → order_reasoning_node")
     return "order_reasoning_node"
 
@@ -311,6 +329,7 @@ def build_graph(checkpointer: Optional[AsyncSqliteSaver] = None) -> StateGraph:
     builder.add_node("classify_intent", classify_intent)
     builder.add_node("data_availability_node", data_availability_node)
     builder.add_node("market_hours_guard", market_hours_guard)
+    builder.add_node("portfolio_guard", portfolio_guard)
     builder.add_node("portfolio_reasoning_node", portfolio_reasoning_node)
     builder.add_node("quant_reasoning_node", quant_reasoning_node)
     builder.add_node("backtester_reasoning_node", backtester_reasoning_node)
@@ -345,6 +364,15 @@ def build_graph(checkpointer: Optional[AsyncSqliteSaver] = None) -> StateGraph:
     builder.add_conditional_edges(
         "market_hours_guard",
         route_after_market_guard,
+        {
+            "portfolio_guard": "portfolio_guard",
+            "synthesizer_node": "synthesizer_node",
+        },
+    )
+
+    builder.add_conditional_edges(
+        "portfolio_guard",
+        route_after_portfolio_guard,
         {
             "portfolio_reasoning_node": "portfolio_reasoning_node",
             "synthesizer_node": "synthesizer_node",

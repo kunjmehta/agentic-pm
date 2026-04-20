@@ -96,13 +96,7 @@ class MomentumSkill:
 # Singleton
 momentum_skill = MomentumSkill()
 
-
-def calc_momentum_package(df: pd.DataFrame) -> Dict:
-    """Legacy alias: delegate to MomentumSkill.analyze_bars."""
-    return momentum_skill.analyze_bars(df)
-
-
-__all__ = ["MomentumSkill", "momentum_skill", "calc_momentum_package"]
+__all__ = ["MomentumSkill", "momentum_skill"]
 
 
 if __name__ == "__main__":

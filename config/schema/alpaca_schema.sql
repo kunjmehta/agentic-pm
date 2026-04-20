@@ -121,6 +121,12 @@ CREATE TABLE IF NOT EXISTS computed_indicators (
     percentile DOUBLE,             -- Percentile ranking
     vwap DOUBLE,                   -- Volume-Weighted Average Price
 
+    -- Candlestick indicators
+    candle_patterns VARCHAR,        -- JSON array of detected patterns
+    last_candle_type VARCHAR(10),   -- 'bullish', 'bearish', 'neutral'
+    last_body_pct DOUBLE,           -- Body as % of total range
+    pattern_count INTEGER,          -- Number of unique patterns detected
+
     computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (symbol, timestamp, timeframe)
 );
@@ -131,32 +137,32 @@ CREATE INDEX IF NOT EXISTS idx_computed_indicators_time
 
 
 -- ============================================================================
-
--- 6. Live Orders
--- Tracks broker orders submitted through the HITL approval flow or direct API.
--- Reconciliation job updates filled_at and filled_price by polling Alpaca.
-CREATE TABLE IF NOT EXISTS live_orders (
-    id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-    signal_id INTEGER,                    -- FK to strategy_results.id (NULL for manual orders)
+-- 6. Pre-computed Strategy Signals
+-- Stores per-strategy action/confidence for fast agent lookups.
+-- Normalized rows — adding a new strategy requires no schema change.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS precomputed_strategy_signals (
     symbol VARCHAR NOT NULL,
-    side VARCHAR NOT NULL,                -- 'buy' | 'sell'
-    qty INTEGER NOT NULL,
-    order_type VARCHAR DEFAULT 'market',  -- 'market' | 'limit'
-    limit_price DECIMAL(10, 4),
-    broker_order_id VARCHAR,              -- Alpaca order UUID
-    status VARCHAR DEFAULT 'submitted',   -- 'submitted' | 'filled' | 'cancelled' | 'rejected'
-    submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    filled_at TIMESTAMP,
-    filled_price DECIMAL(10, 4),
-    realized_pnl DECIMAL(15, 4)
+    timestamp TIMESTAMP NOT NULL,
+    timeframe VARCHAR NOT NULL,
+    strategy_name VARCHAR NOT NULL,     -- 'vwap_reversion', 'golden_cross', etc.
+    action VARCHAR(10) NOT NULL,        -- 'buy', 'sell', 'hold'
+    confidence DOUBLE,
+    reason VARCHAR,
+    entry_price DOUBLE,
+    stop_loss DOUBLE,
+    take_profit DOUBLE,
+    computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, timestamp, timeframe, strategy_name)
 );
 
-CREATE INDEX IF NOT EXISTS idx_live_orders_status
-    ON live_orders(status, submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_signals_time
+    ON precomputed_strategy_signals(symbol, timeframe, strategy_name, timestamp DESC);
 
-CREATE INDEX IF NOT EXISTS idx_live_orders_signal
-    ON live_orders(signal_id);
 
+-- ============================================================================
+-- Note: live_orders table is defined in config/schema/orders_schema.sql
+--       and managed exclusively by OrdersDAO.
 -- ============================================================================
 -- Views for Common Queries
 -- ============================================================================

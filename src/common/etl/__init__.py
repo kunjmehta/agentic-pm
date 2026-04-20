@@ -1,14 +1,16 @@
-"""ETL (Extract, Transform, Load) package for technical indicators.
+"""ETL (Extract, Transform, Load) package for technical indicators and strategy signals.
 
-This package provides tools for pre-computing technical indicators and storing
-them in the database for fast retrieval.
+This package provides tools for pre-computing technical indicators and strategy
+signals, storing them in the database for fast retrieval by the quant agent.
+
+All formulas are sourced from the quant skill singletons in
+``src.server.skills.quant``, ensuring a single source of truth shared with
+the function registry and backtester.
 
 Modules:
-    indicators_engine: Pure calculation functions for technical indicators
-    pipeline: ETL orchestrator for batch processing
+    pipeline: ETL orchestrator for batch processing of indicators and strategy signals
 """
 
-from src.common.etl.indicators_engine import IndicatorsEngine
 from src.common.etl.pipeline import IndicatorsETL
 
-__all__ = ['IndicatorsEngine', 'IndicatorsETL']
+__all__ = ["IndicatorsETL"]

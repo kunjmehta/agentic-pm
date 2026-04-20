@@ -46,14 +46,6 @@ class GraphState(TypedDict):
     #         trades_available, indicator_rows, bar_count, trade_count,
     #         latest_indicator_ts, latest_bar_ts, checked_at}
 
-    # Top-level flags promoted from data_availability for fast state access.
-    # True  → data is already in DB, agents should READ from DB, not call API.
-    # False → data absent/stale, agents must schedule a fetch task first.
-    # None  → not yet checked (no symbol resolved, or node not yet run).
-    _indicators_available: Optional[bool]   # pre-computed indicators in DB
-    _bars_available: Optional[bool]         # sufficient OHLCV bars in DB
-    _trades_available: Optional[bool]       # recent trade records in DB
-
     # ── Intent classification ───────────────────────────────────────────────
     intent: Optional[str]       # "portfolio" | "quant" | "backtest" | "full_analysis"
     symbol: Optional[str]       # extracted ticker e.g. "AAPL"
@@ -166,28 +158,6 @@ def make_initial_state(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool_timings": None,
         "data_availability": None,
-        "_indicators_available": None,
-        "_bars_available": None,
-        "_trades_available": None,
         "signal_batch": None,
         "autonomous_mode": False,
     }
-
-
-if __name__ == "__main__":
-    """Smoke test: verify TypedDict can be instantiated."""
-    state = make_initial_state(
-        query="What is my portfolio status?",
-        thread_id="test-thread-001",
-        backtest_mode=True,
-    )
-
-    print("[OK] GraphState instantiated successfully")
-    print(f"     Fields: {list(state.keys())}")
-    assert state["query"] == "What is my portfolio status?"
-    assert state["backtest_mode"] is True
-    assert state["conversation_id"] is not None
-    assert state["prior_turns"] is None
-    print("[OK] Field access verified")
-    print(f"     conversation_id auto-generated: {state['conversation_id']}")
-    print("\n[ALL OK] state.py smoke test passed")

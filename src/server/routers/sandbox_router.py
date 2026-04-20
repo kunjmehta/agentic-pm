@@ -117,7 +117,7 @@ async def create_sandbox():
     daytona_key, openai_key = _get_keys()
 
     try:
-        sandbox_id = sandbox_service.start_creating(daytona_key, openai_key)
+        sandbox_id = await sandbox_service.start_creating(daytona_key, openai_key)
     except RuntimeError as exc:
         raise HTTPException(status_code=429, detail=str(exc))
 
@@ -200,12 +200,9 @@ async def stream_agent(sandbox_id: str, body: AgentQueryRequest):
 
             yield _fmt({"type": "done"})
 
-        except (KeyError, RuntimeError) as exc:
-            yield _fmt({"type": "error", "error": str(exc)})
-            yield _fmt({"type": "done"})
-
         except Exception as exc:
-            logger.error(f"[sandbox/{sandbox_id}] agent stream error: {exc}", exc_info=True)
+            if not isinstance(exc, (KeyError, RuntimeError)):
+                logger.error(f"[sandbox/{sandbox_id}] agent stream error: {exc}", exc_info=True)
             yield _fmt({"type": "error", "error": str(exc)})
             yield _fmt({"type": "done"})
 

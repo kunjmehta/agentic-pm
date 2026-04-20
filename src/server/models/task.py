@@ -1,4 +1,4 @@
-"""Pydantic models for agent task planning in the semi-auto multi-agent system.
+"""Pydantic models for agent task planning in the multi-agent system.
 
 PM agent:
   TaskItem  → full call spec (function_name, params, priority, depends_on, ...)
@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+# Granularity of description/reasoning fields:
+#   TaskItem.description          — per-call rationale (why this specific function was chosen)
+#   TaskList.reasoning_summary    — per-batch explanation (overall PM plan, shown to user)
+#   AgentPlan.reasoning_summary   — per-agent one-liner (quant/backtester plan sentence)
+#   AgentReasoning.reasoning_summary — audit-trail copy persisted to DB (survives serialisation)
+# These are NOT redundant — they address different consumers at different granularity levels.
 
 class TaskItem(BaseModel):
     """A single planned function call with its parameters.
@@ -184,100 +190,3 @@ class AgentReasoning(BaseModel):
     tasks_planned: List[Dict[str, Any]] = Field(default_factory=list)
     delegations: List[str] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-
-
-if __name__ == "__main__":
-    """Smoke test: instantiate all models and verify serialization."""
-    print("=" * 60)
-    print("models/task.py Smoke Tests")
-    print("=" * 60)
-
-    # FunctionCall
-    fc = FunctionCall(function_name="calc_momentum", params={"symbol": "AAPL", "timeframe": "1Day"})
-    assert fc.function_name == "calc_momentum"
-    print("[OK] FunctionCall")
-
-    # AgentPlan
-    plan = AgentPlan(
-        calls=[fc, FunctionCall(function_name="calc_volatility_bands", params={"symbol": "AAPL"})],
-        reasoning_summary="Compute momentum and volatility for AAPL.",
-    )
-    assert len(plan.calls) == 2
-    print("[OK] AgentPlan")
-
-    # FunctionCallEdit
-    edit = FunctionCallEdit(index=0, action="update_params", new_params={"symbol": "MSFT"})
-    assert edit.index == 0
-    print("[OK] FunctionCallEdit")
-
-    # PMFeedback approved
-    fb_ok = PMFeedback(approved=True)
-    assert fb_ok.quant_edits == []
-    print("[OK] PMFeedback (approved)")
-
-    # PMFeedback with edits
-    fb_edit = PMFeedback(
-        approved=True,
-        quant_edits=[edit],
-        reason=None,
-    )
-    assert len(fb_edit.quant_edits) == 1
-    print("[OK] PMFeedback (with edits)")
-
-    # TaskItem
-    item = TaskItem(
-        task_id="pm_001",
-        function_name="get_portfolio_status",
-        params={},
-        description="Fetch current portfolio equity and position counts",
-    )
-    assert item.task_id == "pm_001"
-    assert item.priority == 1
-    assert item.depends_on == []
-    print("[OK] TaskItem instantiated and defaults correct")
-
-    # Dependent task
-    dep_item = TaskItem(
-        task_id="pm_003",
-        function_name="check_portfolio_health",
-        params={},
-        description="Check portfolio health using prior status and positions",
-        priority=2,
-        depends_on=["pm_001", "pm_002"],
-    )
-    assert dep_item.depends_on == ["pm_001", "pm_002"]
-    print("[OK] TaskItem with depends_on correct")
-
-    # TaskList
-    tl = TaskList(
-        tasks=[item, dep_item],
-        reasoning_summary="Fetch portfolio status and health check.",
-    )
-    assert len(tl.tasks) == 2
-    serialized = tl.model_dump()
-    assert "tasks" in serialized
-    print("[OK] TaskList serialized correctly")
-
-    # AgentOutput
-    ao = AgentOutput(
-        task_list=tl,
-        delegate_to_quant=True,
-        quant_query="Analyze AAPL momentum indicators",
-    )
-    assert ao.delegate_to_quant is True
-    assert ao.delegate_to_backtester is False
-    print("[OK] AgentOutput delegation flags correct")
-
-    # AgentReasoning
-    ar = AgentReasoning(
-        agent="portfolio",
-        turn_number=1,
-        reasoning_summary="PM planned 2 tasks and delegated to quant.",
-        tasks_planned=[item.model_dump()],
-        delegations=["quant"],
-    )
-    assert ar.agent == "portfolio"
-    assert "quant" in ar.delegations
-    print("[OK] AgentReasoning serialized correctly")
-
-    print("\n[ALL OK] models/task.py smoke tests passed")

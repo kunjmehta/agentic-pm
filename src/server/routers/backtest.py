@@ -1,11 +1,11 @@
 """Backtest router — read-only BacktestDAO endpoints at /v1/backtest/..."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from fastapi.encoders import jsonable_encoder
 
-from src.server.routers._helpers import _df_to_records
+from src.common.dao.backtest_dao import BacktestDAO
 from src.common.utils import get_logger
 from src.server.models.endpoints import (
     BacktestPerformanceResponse,
@@ -13,22 +13,18 @@ from src.server.models.endpoints import (
     BacktestRunsResponse,
     BacktestTradesResponse,
 )
+from src.server.routers._helpers import _df_to_records, dao_context, handle_http_errors, run_in_thread
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/backtest", tags=["backtest"])
 
 
-def _dao():
-    from src.common.dao.backtest_dao import BacktestDAO
-    return BacktestDAO()
-
-
 def _clean_run_data(run: Dict[str, Any]) -> Dict[str, Any]:
     """Convert DuckDB types to JSON-serializable types.
 
-    DuckDB returns Decimal objects for DECIMAL columns which don't serialize to JSON.
-    This function explicitly converts all numeric and date fields to proper types.
+    DuckDB returns Decimal objects for DECIMAL columns which don't serialize to
+    JSON.  All numeric and date fields are coerced to standard Python types.
 
     Args:
         run: Raw run data dict from DAO.
@@ -36,59 +32,48 @@ def _clean_run_data(run: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Cleaned dict with JSON-serializable types.
     """
-    # Convert date fields to ISO strings
-    for date_field in ["start_date", "end_date", "created_at", "completed_at"]:
-        if run.get(date_field) is not None:
-            run[date_field] = str(run[date_field])
+    for field in ("start_date", "end_date", "created_at", "completed_at"):
+        if run.get(field) is not None:
+            run[field] = str(run[field])
 
-    # Convert Decimal/numeric fields to float
-    numeric_fields = [
+    for field in (
         "initial_capital", "final_capital", "total_return_pct",
         "sharpe_ratio", "max_drawdown_pct", "sortino_ratio",
         "calmar_ratio", "win_rate", "profit_factor",
         "avg_win", "avg_loss", "largest_win", "largest_loss",
-        "avg_trade_duration_days"
-    ]
-    for field in numeric_fields:
+        "avg_trade_duration_days",
+    ):
         if run.get(field) is not None:
             try:
-                # Convert to float and ensure it's a native Python float
                 run[field] = float(run[field])
             except (TypeError, ValueError):
                 run[field] = None
 
-    # Convert integer fields to int
-    for field in ["total_trades", "winning_trades", "losing_trades"]:
+    for field in ("total_trades", "winning_trades", "losing_trades"):
         if run.get(field) is not None:
             try:
                 run[field] = int(run[field])
             except (TypeError, ValueError):
                 run[field] = None
 
-    # Convert win_rate from 0-1 to 0-100 scale
     if run.get("win_rate") is not None:
         run["win_rate"] = run["win_rate"] * 100.0
 
-    # Calculate total_return_dollars from total_return_pct and initial_capital
-    if run.get("total_return_pct") is not None and run.get("initial_capital") is not None:
-        run["total_return_dollars"] = (run["total_return_pct"] / 100.0) * run["initial_capital"]
-    else:
-        run["total_return_dollars"] = None
-
-    # Calculate max_drawdown_dollars from max_drawdown_pct and initial_capital
-    if run.get("max_drawdown_pct") is not None and run.get("initial_capital") is not None:
-        run["max_drawdown_dollars"] = (run["max_drawdown_pct"] / 100.0) * run["initial_capital"]
-    else:
-        run["max_drawdown_dollars"] = None
+    initial = run.get("initial_capital")
+    ret_pct = run.get("total_return_pct")
+    dd_pct = run.get("max_drawdown_pct")
+    run["total_return_dollars"] = (ret_pct / 100.0) * initial if (ret_pct is not None and initial) else None
+    run["max_drawdown_dollars"] = (dd_pct / 100.0) * initial if (dd_pct is not None and initial) else None
 
     return run
 
 
 @router.get("/runs", response_model=BacktestRunsResponse)
+@handle_http_errors
 async def get_recent_runs(
     strategy_name: Optional[str] = Query(None, description="Filter by strategy name"),
     limit: int = Query(default=10, ge=1, le=200),
-):
+) -> Any:
     """Return the most recent backtest runs.
 
     Args:
@@ -98,100 +83,77 @@ async def get_recent_runs(
     Returns:
         Dict with ``runs`` list and ``count``.
     """
-    try:
-        dao = _dao()
-        runs_raw = dao.get_recent_runs(strategy_name=strategy_name, limit=limit)
-        dao.close()
+    def _fetch() -> List[Dict[str, Any]]:
+        with dao_context(BacktestDAO) as dao:
+            return dao.get_recent_runs(strategy_name=strategy_name, limit=limit)
 
-        # Clean and convert all runs
-        runs = [_clean_run_data(run) for run in runs_raw]
-
-        # Use FastAPI's jsonable_encoder to ensure proper serialization
-        return jsonable_encoder({"runs": runs, "count": len(runs)})
-    except Exception as exc:
-        logger.warning(f"[backtest/runs] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    runs_raw = await run_in_thread(_fetch)
+    runs = [_clean_run_data(r) for r in runs_raw]
+    return jsonable_encoder({"runs": runs, "count": len(runs)})
 
 
 @router.get("/runs/{run_id}", response_model=BacktestRunResponse)
-async def get_run(run_id: str):
+@handle_http_errors
+async def get_run(run_id: str) -> Any:
     """Return details for a single backtest run.
 
     Returns:
         Dict with ``run_id`` and ``run`` (dict or null).
     """
-    try:
-        dao = _dao()
-        run = dao.get_run(run_id)
-        dao.close()
+    def _fetch():
+        with dao_context(BacktestDAO) as dao:
+            return dao.get_run(run_id)
 
-        if run:
-            run = _clean_run_data(run)
-
-        return jsonable_encoder({"run_id": run_id, "run": run})
-    except Exception as exc:
-        logger.warning(f"[backtest/runs/{run_id}] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    run = await run_in_thread(_fetch)
+    if run:
+        run = _clean_run_data(run)
+    return jsonable_encoder({"run_id": run_id, "run": run})
 
 
 @router.get("/runs/{run_id}/trades", response_model=BacktestTradesResponse)
-async def get_trades_for_run(run_id: str):
+@handle_http_errors
+async def get_trades_for_run(run_id: str) -> Any:
     """Return all trades executed in a backtest run.
 
     Returns:
         Dict with ``run_id``, ``trades`` list, and ``count``.
     """
-    try:
-        dao = _dao()
-        df = dao.get_trades_for_run(run_id)
-        dao.close()
-        records = _df_to_records(df)
+    def _fetch():
+        with dao_context(BacktestDAO) as dao:
+            return dao.get_trades_for_run(run_id)
 
-        # Clean trade records (convert dates, ensure numeric types)
-        for trade in records:
-            for date_field in ["entry_date", "exit_date"]:
-                if trade.get(date_field) is not None:
-                    trade[date_field] = str(trade[date_field])
-            for time_field in ["entry_time", "exit_time"]:
-                if trade.get(time_field) is not None:
-                    trade[time_field] = str(trade[time_field])
-            # Convert numeric fields
-            for num_field in ["entry_price", "exit_price", "pnl", "pnl_pct", "fees"]:
-                if trade.get(num_field) is not None:
-                    trade[num_field] = float(trade[num_field])
-            if trade.get("quantity") is not None:
-                trade["quantity"] = int(trade["quantity"])
-
-        return jsonable_encoder({"run_id": run_id, "trades": records, "count": len(records)})
-    except Exception as exc:
-        logger.warning(f"[backtest/runs/{run_id}/trades] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    records = _df_to_records(await run_in_thread(_fetch))
+    for trade in records:
+        for field in ("entry_date", "exit_date", "entry_time", "exit_time"):
+            if trade.get(field) is not None:
+                trade[field] = str(trade[field])
+        for field in ("entry_price", "exit_price", "pnl", "pnl_pct", "fees"):
+            if trade.get(field) is not None:
+                trade[field] = float(trade[field])
+        if trade.get("quantity") is not None:
+            trade["quantity"] = int(trade["quantity"])
+    return jsonable_encoder({"run_id": run_id, "trades": records, "count": len(records)})
 
 
 @router.get("/runs/{run_id}/performance", response_model=BacktestPerformanceResponse)
-async def get_performance_history(run_id: str):
+@handle_http_errors
+async def get_performance_history(run_id: str) -> Any:
     """Return daily performance history for a backtest run.
 
     Returns:
         Dict with ``run_id``, ``performance`` list, and ``count``.
     """
-    try:
-        dao = _dao()
-        df = dao.get_performance_history(run_id)
-        dao.close()
-        records = _df_to_records(df)
+    def _fetch():
+        with dao_context(BacktestDAO) as dao:
+            return dao.get_performance_history(run_id)
 
-        # Clean performance records
-        for perf in records:
-            if perf.get("date") is not None:
-                perf["date"] = str(perf["date"])
-            for num_field in ["equity", "daily_return", "cumulative_return", "drawdown_pct"]:
-                if perf.get(num_field) is not None:
-                    perf[num_field] = float(perf[num_field])
-            if perf.get("positions") is not None:
-                perf["positions"] = int(perf["positions"])
-
-        return jsonable_encoder({"run_id": run_id, "performance": records, "count": len(records)})
-    except Exception as exc:
-        logger.warning(f"[backtest/runs/{run_id}/performance] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    records = _df_to_records(await run_in_thread(_fetch))
+    for perf in records:
+        if perf.get("date") is not None:
+            perf["date"] = str(perf["date"])
+        for field in ("equity", "daily_return", "cumulative_return", "drawdown_pct"):
+            if perf.get(field) is not None:
+                perf[field] = float(perf[field])
+        if perf.get("positions") is not None:
+            perf["positions"] = int(perf["positions"])
+    return jsonable_encoder({"run_id": run_id, "performance": records, "count": len(records)})

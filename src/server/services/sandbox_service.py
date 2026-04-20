@@ -198,6 +198,7 @@ class SandboxRecord:
 
 
 _sandboxes: dict[str, SandboxRecord] = {}
+_sandboxes_lock = asyncio.Lock()  # guards limit check + insertion in start_creating
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -408,7 +409,7 @@ def _create_sandbox_sync(record: SandboxRecord, api_key: str, openai_key: str) -
 # ── Public API ────────────────────────────────────────────────────────────────
 
 
-def start_creating(api_key: str, openai_key: str) -> str:
+async def start_creating(api_key: str, openai_key: str) -> str:
     """Register a new sandbox and kick off async creation.
 
     Returns the sandbox_id immediately. Creation continues in background.
@@ -424,24 +425,25 @@ def start_creating(api_key: str, openai_key: str) -> str:
     Raises:
         RuntimeError: If _MAX_SANDBOXES concurrent sessions are already active.
     """
-    active = [r for r in _sandboxes.values() if r.status in ("creating", "ready")]
-    if len(active) >= _MAX_SANDBOXES:
-        raise RuntimeError(
-            f"Max concurrent sandboxes ({_MAX_SANDBOXES}) reached. "
-            "Publish or destroy an existing sandbox first."
-        )
+    async with _sandboxes_lock:
+        active = [r for r in _sandboxes.values() if r.status in ("creating", "ready")]
+        if len(active) >= _MAX_SANDBOXES:
+            raise RuntimeError(
+                f"Max concurrent sandboxes ({_MAX_SANDBOXES}) reached. "
+                "Publish or destroy an existing sandbox first."
+            )
 
-    sandbox_id = str(uuid.uuid4())
-    name = _generate_name()
-    work_dir = f"/home/daytona/{name}"
-    record = SandboxRecord(
-        sandbox_id=sandbox_id,
-        name=name,
-        status="creating",
-        created_at=datetime.now(timezone.utc),
-        work_dir=work_dir,
-    )
-    _sandboxes[sandbox_id] = record
+        sandbox_id = str(uuid.uuid4())
+        name = _generate_name()
+        work_dir = f"/home/daytona/{name}"
+        record = SandboxRecord(
+            sandbox_id=sandbox_id,
+            name=name,
+            status="creating",
+            created_at=datetime.now(timezone.utc),
+            work_dir=work_dir,
+        )
+        _sandboxes[sandbox_id] = record
 
     asyncio.create_task(
         asyncio.to_thread(_create_sandbox_sync, record, api_key, openai_key),
@@ -514,22 +516,16 @@ async def publish_sandbox(sandbox_id: str, mode: str = "all") -> list[str]:
 
         if mode == "new":
             # Only untracked new files
-            result = sandbox.process.exec(
+            raw = sandbox.process.exec(
                 f"cd {wdir} && git ls-files --others --exclude-standard",
                 timeout=30,
-            )
-            raw = result.result or ""
+            ).result or ""
         else:
-            # Modified tracked files + untracked new files
-            modified = sandbox.process.exec(
-                f"cd {wdir} && git diff --name-only HEAD",
+            # Modified tracked files + untracked new files (single round-trip)
+            raw = sandbox.process.exec(
+                f"cd {wdir} && git diff --name-only HEAD; git ls-files --others --exclude-standard",
                 timeout=30,
             ).result or ""
-            new_files = sandbox.process.exec(
-                f"cd {wdir} && git ls-files --others --exclude-standard",
-                timeout=30,
-            ).result or ""
-            raw = modified + "\n" + new_files
 
         changed = list(dict.fromkeys(          # preserve order, deduplicate
             line.strip() for line in raw.splitlines() if line.strip()
@@ -593,11 +589,13 @@ async def delete_sandbox(sandbox_id: str) -> None:
 async def cleanup_all() -> None:
     """Stop all active sandboxes — called during server shutdown."""
     ids = list(_sandboxes.keys())
-    for sandbox_id in ids:
-        try:
-            await delete_sandbox(sandbox_id)
-        except Exception as exc:
-            logger.warning(f"[sandbox] cleanup failed for {sandbox_id}: {exc}")
+    results = await asyncio.gather(
+        *[delete_sandbox(sid) for sid in ids],
+        return_exceptions=True,
+    )
+    for sid, result in zip(ids, results):
+        if isinstance(result, Exception):
+            logger.warning(f"[sandbox] cleanup failed for {sid}: {result}")
     logger.info(f"[sandbox] cleanup complete ({len(ids)} sandbox(es) stopped)")
 
 

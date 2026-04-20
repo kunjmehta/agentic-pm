@@ -26,6 +26,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from src.common.utils import get_logger
+from src.common.utils.config_loader import (
+    VALID_STRATEGIES,
+    VALID_TIMEFRAMES,
+    LOCK_TIMEOUT_SECONDS,
+    LOCK_RETRY_DELAY_MS,
+)
 from src.server.models.endpoints import (
     ConfigReloadResponse,
     ConfigResponse,
@@ -40,26 +46,6 @@ router = APIRouter(prefix="/v1/config", tags=["config"])
 # ── Constants ──────────────────────────────────────────────────────────────
 
 CONFIG_PATH = Path("config/config.json")
-
-# Valid strategy names from config.json
-VALID_STRATEGIES = {
-    "mean_reversion",
-    "vwap_reversion",
-    "opening_range_breakout",
-    "rsi_divergence",
-    "momentum_burst",
-    "golden_cross",
-    "breakout_52w",
-    "mean_reversion_daily",
-    "earnings_drift",
-}
-
-# Valid timeframes from ETL config
-VALID_TIMEFRAMES = {"1Min", "1Hour", "1Day"}
-
-# Lock timeout and retry settings
-LOCK_TIMEOUT_SECONDS = 5.0
-LOCK_RETRY_DELAY_MS = 50
 
 
 # ── File Locking ───────────────────────────────────────────────────────────

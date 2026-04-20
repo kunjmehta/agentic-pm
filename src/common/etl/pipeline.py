@@ -1,36 +1,93 @@
-"""ETL pipeline for pre-computing technical indicators.
+"""ETL pipeline for pre-computing technical indicators and strategy signals.
 
-This module orchestrates the computation of technical indicators for all watchlist
-symbols across multiple timeframes. Pre-computed indicators are stored in the
-database for fast retrieval by the quant agent.
+This module orchestrates the computation of technical indicators and strategy
+signals for all watchlist symbols across multiple timeframes. Pre-computed
+results are stored in the database for fast retrieval by the quant agent.
+
+All formulas are sourced from the quant skill singletons in
+``src.server.skills.quant``, ensuring consistency with the function registry
+and backtester (which also use those same singletons).
 """
 
+import json
 import sys
 from pathlib import Path
+
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional
 import pandas as pd
 
 from src.common.dao import AlpacaDAO
-from src.common.etl.indicators_engine import IndicatorsEngine
 from src.common.utils import config, get_logger
+from src.server.skills.quant import (
+    momentum_skill,
+    volatility_skill,
+    volume_skill,
+    candlestick_skill,
+    mean_reversion_skill,
+    vwap_reversion_skill,
+    opening_range_breakout_skill,
+    rsi_divergence_scalp_skill,
+    momentum_burst_skill,
+    golden_cross_skill,
+    breakout_52w_skill,
+    earnings_drift_skill,
+)
 
-
-# Initialize logger
 logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Strategy routing — which strategies run on which timeframes.
+# Singletons are used (not per-call instantiation) because:
+#   - All skills are stateless DataFrame transformers with no mutable state.
+#   - The expanding window loop calls each skill N times per symbol; re-using
+#     shared instances avoids N × 12 unnecessary allocations.
+#   - Matches the pattern already used in _fn_quant.py (function registry).
+# ---------------------------------------------------------------------------
+
+_INTRADAY_STRATEGIES: Dict[str, object] = {
+    "vwap_reversion":         vwap_reversion_skill,
+    "opening_range_breakout": opening_range_breakout_skill,
+    "rsi_divergence_scalp":   rsi_divergence_scalp_skill,
+    "momentum_burst":         momentum_burst_skill,
+}
+
+_DAILY_STRATEGIES: Dict[str, object] = {
+    "golden_cross":   golden_cross_skill,
+    "breakout_52w":   breakout_52w_skill,
+    "earnings_drift": earnings_drift_skill,
+}
+
+
+def _strategies_for_timeframe(timeframe: str) -> Dict[str, object]:
+    """Return the strategy map applicable to the given timeframe.
+
+    Args:
+        timeframe: Bar timeframe string (e.g. '1Min', '1Hour', '1Day').
+
+    Returns:
+        Dict mapping strategy name → skill singleton.
+    """
+    if timeframe in ("1Min", "1Hour"):
+        return _INTRADAY_STRATEGIES
+    if timeframe == "1Day":
+        return _DAILY_STRATEGIES
+    return {}
 
 
 class IndicatorsETL:
-    """ETL pipeline for computing and storing technical indicators.
+    """ETL pipeline for computing and storing technical indicators and strategy signals.
 
     This pipeline:
-    1. Fetches market bars from database
-    2. Calculates all technical indicators using IndicatorsEngine
-    3. Flattens results into rows (one per timestamp)
-    4. Saves to computed_indicators table
+    1. Fetches market bars from the database
+    2. Calculates all technical indicators via quant skill singletons
+    3. Flattens indicator results into rows (one per timestamp)
+    4. Saves indicator rows to ``computed_indicators`` table
+    5. Runs applicable strategy skills per timeframe
+    6. Saves strategy signal rows to ``precomputed_strategy_signals`` table
 
     Can be run on-demand or scheduled (hourly) for all watchlist symbols.
     """
@@ -38,109 +95,158 @@ class IndicatorsETL:
     def __init__(
         self,
         timeframes: Optional[List[str]] = None,
-        lookback_days: int = 60
+        lookback_days: int = 60,
     ):
         """Initialize ETL pipeline.
 
         Args:
-            timeframes: List of timeframes to process (default from config)
-            lookback_days: Days of historical data to process (default: 60)
+            timeframes: List of timeframes to process. Defaults to config value
+                or ``["1Min", "1Hour", "1Day"]``.
+            lookback_days: Days of historical data to process. Defaults to 60.
         """
         self.timeframes = timeframes or config.get(
             "etl.timeframes",
-            default=["1Min", "1Hour", "1Day"]
+            default=["1Min", "1Hour", "1Day"],
         )
         self.lookback_days = lookback_days
         self.dao = AlpacaDAO()
-        self.engine = IndicatorsEngine()
 
         logger.info(
             f"IndicatorsETL initialized: timeframes={self.timeframes}, "
             f"lookback_days={lookback_days}"
         )
 
+    # -----------------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------------
+
     def run_for_symbol(
         self,
         symbol: str,
-        force_recalculate: bool = False
+        force_recalculate: bool = False,
     ) -> dict:
-        """Run ETL for a single symbol across all timeframes.
+        """Run ETL for a single symbol across all configured timeframes.
 
         Args:
-            symbol: Stock ticker symbol
-            force_recalculate: If True, recalculates all data; if False, only calculates new data
+            symbol: Stock ticker symbol.
+            force_recalculate: Reserved for future incremental logic; currently
+                all data is (re)computed from the lookback window.
 
         Returns:
-            Dict with results per timeframe (rows_computed, errors)
+            Dict with per-timeframe row counts and any errors.
         """
         logger.info(f"Starting ETL for {symbol}")
 
-        results = {
-            'symbol': symbol,
-            'timeframes': {},
-            'total_rows': 0,
-            'errors': []
+        results: dict = {
+            "symbol": symbol,
+            "timeframes": {},
+            "total_rows": 0,
+            "errors": [],
         }
 
         for timeframe in self.timeframes:
             try:
                 rows = self._process_timeframe(symbol, timeframe, force_recalculate)
-                results['timeframes'][timeframe] = rows
-                results['total_rows'] += rows
+                results["timeframes"][timeframe] = rows
+                results["total_rows"] += rows
                 logger.info(f"  {timeframe}: {rows} rows computed")
-
             except Exception as e:
-                error_msg = f"Failed to process {timeframe}: {str(e)}"
+                error_msg = f"Failed to process {timeframe}: {e}"
                 logger.error(error_msg)
-                results['errors'].append(error_msg)
-                results['timeframes'][timeframe] = 0
+                results["errors"].append(error_msg)
+                results["timeframes"][timeframe] = 0
 
         logger.info(
             f"Completed ETL for {symbol}: {results['total_rows']} total rows, "
             f"{len(results['errors'])} errors"
         )
-
         return results
+
+    def run_for_watchlist(self) -> dict:
+        """Run ETL for all symbols in the watchlist.
+
+        Returns:
+            Dict with per-symbol results and overall stats.
+        """
+        watchlist = self.dao.get_watchlist()
+        if not watchlist:
+            logger.warning("Watchlist is empty, nothing to process")
+            return {"symbols": {}, "total_rows": 0, "errors": []}
+
+        logger.info(f"Running ETL for {len(watchlist)} watchlist symbols")
+
+        results: dict = {"symbols": {}, "total_rows": 0, "total_errors": 0}
+
+        for symbol in watchlist:
+            try:
+                sym_result = self.run_for_symbol(symbol)
+                results["symbols"][symbol] = sym_result
+                results["total_rows"] += sym_result["total_rows"]
+                results["total_errors"] += len(sym_result["errors"])
+            except Exception as e:
+                error_msg = f"Failed to process {symbol}: {e}"
+                logger.error(error_msg)
+                results["symbols"][symbol] = {
+                    "symbol": symbol,
+                    "timeframes": {},
+                    "total_rows": 0,
+                    "errors": [error_msg],
+                }
+                results["total_errors"] += 1
+
+        logger.info(
+            f"ETL complete: {results['total_rows']} total rows, "
+            f"{results['total_errors']} errors across {len(watchlist)} symbols"
+        )
+        return results
+
+    def close(self) -> None:
+        """Close the database connection."""
+        if self.dao:
+            self.dao.close()
+
+    # -----------------------------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------------------------
 
     def _process_timeframe(
         self,
         symbol: str,
         timeframe: str,
-        force_recalculate: bool
+        force_recalculate: bool,  # noqa: ARG002 — reserved
     ) -> int:
         """Process a single symbol-timeframe combination.
 
         Args:
-            symbol: Stock ticker
-            timeframe: Timeframe string ('1Min', '1Hour', '1Day')
-            force_recalculate: Whether to recalculate all data
+            symbol: Stock ticker.
+            timeframe: Timeframe string ('1Min', '1Hour', '1Day').
+            force_recalculate: Reserved; currently unused.
 
         Returns:
-            Number of indicator rows computed
+            Total number of indicator + strategy signal rows written.
         """
-        # Determine date range
         end = datetime.now()
         start = end - timedelta(days=self.lookback_days)
 
-        # Fetch bars
         df = self.dao.get_bars(symbol, start, end, timeframe)
-
         if df.empty:
             logger.warning(f"No bars data for {symbol} {timeframe}")
             return 0
 
         logger.debug(f"Processing {len(df)} bars for {symbol} {timeframe}")
 
-        # Calculate indicators for each bar (rolling window)
+        # --- Indicator rows ---------------------------------------------------
         indicator_rows = self._calculate_indicators_rolling(df, symbol, timeframe)
+        rows_saved = 0
+        if indicator_rows:
+            indicators_df = pd.DataFrame(indicator_rows)
+            rows_saved += self.dao.save_computed_indicators(indicators_df)
 
-        if not indicator_rows:
-            logger.warning(f"No indicators computed for {symbol} {timeframe}")
-            return 0
-
-        # Convert to DataFrame and save
-        indicators_df = pd.DataFrame(indicator_rows)
-        rows_saved = self.dao.save_computed_indicators(indicators_df)
+        # --- Strategy signal rows --------------------------------------------
+        strategy_rows = self._calculate_strategy_signals_rolling(df, symbol, timeframe)
+        if strategy_rows:
+            signals_df = pd.DataFrame(strategy_rows)
+            rows_saved += self.dao.save_strategy_signals(signals_df)
 
         return rows_saved
 
@@ -148,51 +254,39 @@ class IndicatorsETL:
         self,
         df: pd.DataFrame,
         symbol: str,
-        timeframe: str
+        timeframe: str,
     ) -> List[dict]:
-        """Calculate indicators for each timestamp using rolling windows.
+        """Calculate basic technical indicators for each timestamp (expanding window).
 
-        This calculates indicators at each timestamp using all prior data,
-        not just the last value.
+        Each iteration uses all bars up to index ``i``, matching what any
+        skill would compute if run live at that timestamp.
 
         Args:
-            df: DataFrame with OHLCV data
-            symbol: Stock ticker
-            timeframe: Timeframe string
+            df: Full OHLCV DataFrame for the symbol-timeframe.
+            symbol: Stock ticker.
+            timeframe: Timeframe string.
 
         Returns:
-            List of indicator dictionaries (one per timestamp)
+            List of flat indicator dicts (one per timestamp from bar 60 onward).
         """
-        indicator_rows = []
+        indicator_rows: List[dict] = []
+        min_required = 60  # MeanReversionSkill needs at least 60 bars
 
-        # Minimum data required for calculations
-        min_required = 60  # Need at least 60 bars for mean reversion
-
-        # Process each timestamp (using expanding window)
         for i in range(min_required, len(df) + 1):
-            # Get data up to this point
             window_df = df.iloc[:i].copy()
-
-            # Calculate all indicators
             try:
-                indicators = self.engine.calc_all(window_df)
-
-                # Extract last timestamp
-                timestamp = window_df['timestamp'].iloc[-1]
-
-                # Flatten indicators into a single row
-                row = self._flatten_indicators(
-                    symbol,
-                    timestamp,
-                    timeframe,
-                    indicators
-                )
-
+                indicators = {
+                    "momentum":       momentum_skill.analyze_bars(window_df),
+                    "volatility":     volatility_skill.analyze_bars(window_df),
+                    "volume":         volume_skill.analyze_bars(window_df),
+                    "candlestick":    candlestick_skill.analyze_bars(window_df),
+                    "mean_reversion": mean_reversion_skill.analyze_bars(window_df),
+                }
+                timestamp = window_df["timestamp"].iloc[-1]
+                row = self._flatten_indicators(symbol, timestamp, timeframe, indicators)
                 indicator_rows.append(row)
-
             except Exception as e:
                 logger.debug(f"Error calculating indicators at index {i}: {e}")
-                continue
 
         return indicator_rows
 
@@ -201,184 +295,158 @@ class IndicatorsETL:
         symbol: str,
         timestamp: pd.Timestamp,
         timeframe: str,
-        indicators: dict
+        indicators: dict,
     ) -> dict:
-        """Flatten nested indicators dict into a single row for database.
+        """Flatten nested skill output dicts into a single ``computed_indicators`` row.
 
         Args:
-            symbol: Stock ticker
-            timestamp: Bar timestamp
-            timeframe: Timeframe string
-            indicators: Nested dict from IndicatorsEngine.calc_all()
+            symbol: Stock ticker.
+            timestamp: Bar timestamp.
+            timeframe: Timeframe string.
+            indicators: Dict keyed by skill category, each value the skill's output dict.
 
         Returns:
-            Flat dict matching computed_indicators table schema
+            Flat dict matching the ``computed_indicators`` table schema.
         """
-        # Extract momentum
-        momentum = indicators.get('momentum', {})
-        macd = momentum.get('macd', {})
+        momentum = indicators.get("momentum", {})
+        macd = momentum.get("macd") or {}
+        volatility = indicators.get("volatility", {})
+        volume = indicators.get("volume", {})
+        candle = indicators.get("candlestick", {})
 
-        # Extract volatility
-        volatility = indicators.get('volatility', {})
+        # MeanReversionSkill.analyze_bars() returns a nested structure:
+        # z_score / percentile / vwap live under result["statistics"], not top-level.
+        mean_rev = indicators.get("mean_reversion", {})
+        stats = mean_rev.get("statistics") or {}
 
-        # Extract volume
-        volume = indicators.get('volume', {})
-
-        # Extract mean reversion
-        mean_rev = indicators.get('mean_reversion', {})
-
-        # Build flat row
-        row = {
-            'symbol': symbol,
-            'timestamp': timestamp,
-            'timeframe': timeframe,
-
-            # Momentum indicators
-            'macd_value': macd.get('value') if macd else None,
-            'macd_signal': macd.get('signal') if macd else None,
-            'macd_histogram': macd.get('histogram') if macd else None,
-            'rsi': momentum.get('rsi'),
-
-            # Volatility indicators
-            'bb_upper': volatility.get('upper'),
-            'bb_middle': volatility.get('middle'),
-            'bb_lower': volatility.get('lower'),
-            'bb_bandwidth': volatility.get('bandwidth'),
-
-            # Volume indicators
-            'obv': volume.get('obv'),
-            'volume_trend': volume.get('volume_trend'),
-            'avg_volume_10d': volume.get('avg_volume_10d'),
-            'current_vs_avg': volume.get('current_vs_avg'),
-
-            # Mean reversion indicators
-            'z_score': mean_rev.get('z_score'),
-            'percentile': mean_rev.get('percentile'),
-            'vwap': mean_rev.get('vwap')
+        return {
+            "symbol":    symbol,
+            "timestamp": timestamp,
+            "timeframe": timeframe,
+            # Momentum
+            "macd_value":      macd.get("value"),
+            "macd_signal":     macd.get("signal"),
+            "macd_histogram":  macd.get("histogram"),
+            "rsi":             momentum.get("rsi"),
+            # Volatility
+            "bb_upper":     volatility.get("upper"),
+            "bb_middle":    volatility.get("middle"),
+            "bb_lower":     volatility.get("lower"),
+            "bb_bandwidth": volatility.get("bandwidth"),
+            # Volume
+            "obv":             volume.get("obv"),
+            "volume_trend":    volume.get("volume_trend"),
+            "avg_volume_10d":  volume.get("avg_volume_10d"),
+            "current_vs_avg":  volume.get("current_vs_avg"),
+            # Mean reversion — nested under "statistics"
+            "z_score":    stats.get("z_score"),
+            "percentile": stats.get("percentile"),
+            "vwap":       stats.get("vwap"),
+            # Candlestick — new columns
+            "candle_patterns":  json.dumps(candle.get("patterns", [])),
+            "last_candle_type": candle.get("last_candle_type"),
+            "last_body_pct":    candle.get("last_body_pct"),
+            "pattern_count":    candle.get("pattern_count"),
         }
 
-        return row
+    def _calculate_strategy_signals_rolling(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        timeframe: str,
+    ) -> List[dict]:
+        """Calculate strategy signals for each timestamp (expanding window).
 
-    def run_for_watchlist(self) -> dict:
-        """Run ETL for all symbols in the watchlist.
+        Only runs strategies applicable to the given timeframe (see
+        ``_strategies_for_timeframe``). If a strategy returns an error
+        (e.g. insufficient bars), action="hold" / confidence=0 is stored.
+
+        Args:
+            df: Full OHLCV DataFrame.
+            symbol: Stock ticker.
+            timeframe: Timeframe string.
 
         Returns:
-            Dict with results per symbol and overall stats
+            List of strategy signal dicts for ``precomputed_strategy_signals``.
         """
-        # Get watchlist
-        watchlist = self.dao.get_watchlist()
+        strategies = _strategies_for_timeframe(timeframe)
+        if not strategies:
+            return []
 
-        if not watchlist:
-            logger.warning("Watchlist is empty, nothing to process")
-            return {'symbols': {}, 'total_rows': 0, 'errors': []}
+        signal_rows: List[dict] = []
+        min_required = 60  # consistent with indicator min
 
-        logger.info(f"Running ETL for {len(watchlist)} watchlist symbols")
+        for i in range(min_required, len(df) + 1):
+            window_df = df.iloc[:i].copy()
+            timestamp = window_df["timestamp"].iloc[-1]
 
-        results = {
-            'symbols': {},
-            'total_rows': 0,
-            'total_errors': 0
-        }
+            for name, skill in strategies.items():
+                try:
+                    result = skill.analyze_bars(window_df)
+                except Exception as e:
+                    logger.debug(f"Strategy {name} error at index {i}: {e}")
+                    result = {}
 
-        for symbol in watchlist:
-            try:
-                symbol_result = self.run_for_symbol(symbol)
-                results['symbols'][symbol] = symbol_result
-                results['total_rows'] += symbol_result['total_rows']
-                results['total_errors'] += len(symbol_result['errors'])
+                # Strategy skills return action/confidence at top level;
+                # MeanReversionSkill nests them under trade_recommendation.
+                rec = result.get("trade_recommendation", {})
+                signal_rows.append({
+                    "symbol":       symbol,
+                    "timestamp":    timestamp,
+                    "timeframe":    timeframe,
+                    "strategy_name": name,
+                    "action":       result.get("action") or rec.get("action", "hold"),
+                    "confidence":   result.get("confidence") if result.get("confidence") is not None
+                                    else rec.get("confidence", 0.0),
+                    "reason":       result.get("reason") or rec.get("reason"),
+                    "entry_price":  result.get("entry_price") or rec.get("entry_price"),
+                    "stop_loss":    result.get("stop_loss") or rec.get("stop_loss"),
+                    "take_profit":  result.get("take_profit") or rec.get("take_profit"),
+                })
 
-            except Exception as e:
-                error_msg = f"Failed to process {symbol}: {str(e)}"
-                logger.error(error_msg)
-                results['symbols'][symbol] = {
-                    'symbol': symbol,
-                    'timeframes': {},
-                    'total_rows': 0,
-                    'errors': [error_msg]
-                }
-                results['total_errors'] += 1
-
-        logger.info(
-            f"ETL complete: {results['total_rows']} total rows, "
-            f"{results['total_errors']} errors across {len(watchlist)} symbols"
-        )
-
-        return results
-
-    def close(self):
-        """Close database connection."""
-        if self.dao:
-            self.dao.close()
+        return signal_rows
 
 
 if __name__ == "__main__":
     """Run ETL pipeline for testing."""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Run technical indicators ETL pipeline')
+    parser = argparse.ArgumentParser(description="Run technical indicators ETL pipeline")
+    parser.add_argument("--symbol", type=str, help="Single symbol to process (default: all watchlist)")
     parser.add_argument(
-        '--symbol',
-        type=str,
-        help='Single symbol to process (default: all watchlist)'
+        "--timeframes", nargs="+", default=["1Min", "1Hour", "1Day"],
+        help="Timeframes to process (default: 1Min 1Hour 1Day)",
     )
-    parser.add_argument(
-        '--timeframes',
-        nargs='+',
-        default=['1Min', '1Hour', '1Day'],
-        help='Timeframes to process (default: 1Min 1Hour 1Day)'
-    )
-    parser.add_argument(
-        '--lookback-days',
-        type=int,
-        default=60,
-        help='Days of historical data to process (default: 60)'
-    )
-    parser.add_argument(
-        '--force',
-        action='store_true',
-        help='Force recalculation of all data'
-    )
+    parser.add_argument("--lookback-days", type=int, default=60, help="Days of historical data (default: 60)")
+    parser.add_argument("--force", action="store_true", help="Force recalculation of all data")
     args = parser.parse_args()
 
     print("=" * 60)
     print("Technical Indicators ETL Pipeline")
     print("=" * 60)
 
-    # Initialize pipeline
-    etl = IndicatorsETL(
-        timeframes=args.timeframes,
-        lookback_days=args.lookback_days
-    )
+    etl = IndicatorsETL(timeframes=args.timeframes, lookback_days=args.lookback_days)
 
     try:
         if args.symbol:
-            # Process single symbol
             print(f"\nProcessing {args.symbol}...")
             results = etl.run_for_symbol(args.symbol, force_recalculate=args.force)
-
-            print(f"\n✓ Completed: {results['total_rows']} indicator rows computed")
-
-            if results['errors']:
-                print(f"\n⚠ Errors: {len(results['errors'])}")
-                for error in results['errors']:
+            print(f"\nCompleted: {results['total_rows']} indicator rows computed")
+            if results["errors"]:
+                print(f"\nErrors: {len(results['errors'])}")
+                for error in results["errors"]:
                     print(f"  - {error}")
-
         else:
-            # Process entire watchlist
             print("\nProcessing watchlist...")
             results = etl.run_for_watchlist()
-
-            print(f"\n✓ Completed: {results['total_rows']} total indicator rows")
+            print(f"\nCompleted: {results['total_rows']} total indicator rows")
             print(f"  Symbols processed: {len(results['symbols'])}")
-
-            if results['total_errors'] > 0:
-                print(f"\n⚠ Total errors: {results['total_errors']}")
-
+            if results["total_errors"] > 0:
+                print(f"\nTotal errors: {results['total_errors']}")
     except Exception as e:
-        print(f"\n✗ ETL failed: {e}")
+        print(f"\nETL failed: {e}")
         import traceback
         traceback.print_exc()
-
     finally:
         etl.close()
 

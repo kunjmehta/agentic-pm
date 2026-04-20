@@ -28,9 +28,38 @@ logger = get_logger(__name__)
 # Lazy-loaded ws_manager (to avoid circular import issues)
 _ws_manager = None
 
+# IoC callbacks — injected by lifespan.py / etl_process.py after startup.
+# When set, these take priority over the lazy-loaded fallbacks below.
+_ws_broadcaster = None    # Callable[[dict], Awaitable[None]] | None
+_strategy_registry = None  # strategy_registry module | None
+
+
+def set_ws_broadcaster(fn) -> None:
+    """Register the WebSocket broadcast callback (called from lifespan / ETL process).
+
+    Args:
+        fn: Async callable accepting a dict message, e.g. ``ws_manager.broadcast``.
+    """
+    global _ws_broadcaster
+    _ws_broadcaster = fn
+    logger.debug("[db_stream_handlers] WebSocket broadcaster registered")
+
+
+def set_strategy_registry(registry_module) -> None:
+    """Register the strategy registry module (called from lifespan / ETL process).
+
+    Args:
+        registry_module: The ``src.server.registry.strategy_registry`` module
+            (or any object exposing ``list_by_timeframe``, ``get_metadata``,
+            ``instantiate``).
+    """
+    global _strategy_registry
+    _strategy_registry = registry_module
+    logger.debug("[db_stream_handlers] Strategy registry registered")
+
 
 def get_ws_manager():
-    """Get or create WebSocket manager instance.
+    """Get or create WebSocket manager instance (fallback when IoC not used).
 
     Returns:
         PortfolioWSManager instance (singleton)
@@ -348,8 +377,9 @@ async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
              Optional keys: vwap
         timeframe: Bar timeframe string (default: '1Min')
     """
-    ws_mgr = get_ws_manager()
-    if ws_mgr is None:
+    # Prefer injected broadcaster; fall back to lazy-loaded ws_manager.
+    _broadcast = _ws_broadcaster or (getattr(get_ws_manager(), 'broadcast', None))
+    if _broadcast is None:
         return
 
     try:
@@ -400,7 +430,7 @@ async def broadcast_bar_to_ui(bar, timeframe: str = '1Min'):
             "prev_close": prev_close,
             "pct_change": round(pct_change, 2) if pct_change else None
         }
-        await ws_mgr.broadcast(message)
+        await _broadcast(message)
     except Exception as exc:
         logger.debug(f"Failed to broadcast bar to UI: {exc}")
 
@@ -709,14 +739,15 @@ async def _run_intraday_strategies(
         cfg: Config accessor.
         s_dao: Open StrategyDAO instance managed by the caller.
     """
-    from src.server.registry.strategy_registry import get_registry
-    from src.server.registry.register_strategies import ensure_strategies_registered
-
-    # Ensure strategies are registered
-    ensure_strategies_registered()
+    if _strategy_registry is not None:
+        registry = _strategy_registry.get_registry()
+    else:
+        from src.common.registry.strategy_registry import get_registry
+        from src.server.registry.register_strategies import ensure_strategies_registered
+        ensure_strategies_registered()
+        registry = get_registry()
 
     # Get registry and filter for this timeframe
-    registry = get_registry()
     strategy_names = registry.list_by_timeframe(timeframe)
 
     n = len(bars)
@@ -791,14 +822,15 @@ async def _run_daily_strategies(
         cfg: Config accessor.
         s_dao: Open StrategyDAO instance managed by the caller.
     """
-    from src.server.registry.strategy_registry import get_registry
-    from src.server.registry.register_strategies import ensure_strategies_registered
-
-    # Ensure strategies are registered
-    ensure_strategies_registered()
+    if _strategy_registry is not None:
+        registry = _strategy_registry.get_registry()
+    else:
+        from src.common.registry.strategy_registry import get_registry
+        from src.server.registry.register_strategies import ensure_strategies_registered
+        ensure_strategies_registered()
+        registry = get_registry()
 
     # Get registry and filter for this timeframe
-    registry = get_registry()
     strategy_names = registry.list_by_timeframe(timeframe)
 
     n = len(bars)
@@ -940,8 +972,8 @@ async def broadcast_trade_to_ui(trade):
     Args:
         trade: Either Alpaca trade object OR dict with trade data
     """
-    ws_mgr = get_ws_manager()
-    if ws_mgr is None:
+    _broadcast = _ws_broadcaster or getattr(get_ws_manager(), "broadcast", None)
+    if _broadcast is None:
         return
 
     try:
@@ -973,7 +1005,7 @@ async def broadcast_trade_to_ui(trade):
             "timestamp": timestamp_str,
             "exchange": exchange,
         }
-        await ws_mgr.broadcast(message)
+        await _broadcast(message)
     except Exception as exc:
         logger.debug(f"Failed to broadcast trade to UI: {exc}")
 

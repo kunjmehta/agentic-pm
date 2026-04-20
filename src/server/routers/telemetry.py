@@ -26,6 +26,7 @@ from fastapi.responses import StreamingResponse
 
 from src.common.utils import get_logger
 import src.server.app_state as app_state
+from src.server.services.execution_bus import execution_bus
 
 logger = get_logger(__name__)
 
@@ -68,15 +69,12 @@ async def stream_telemetry(thread_id: str):
     logger.info(f"[telemetry/stream] starting SSE stream for thread={thread_id}")
 
     # Check if queue exists for this thread
-    if thread_id not in app_state._execution_queues:
+    if thread_id not in execution_bus:
         logger.warning(
             f"[telemetry/stream] no execution queue for thread={thread_id}, "
             "this may be a pre-existing thread or the execution hasn't started yet"
         )
-        # Create an empty queue - it may be populated later
-        app_state._execution_queues[thread_id] = asyncio.Queue()
-
-    queue = app_state._execution_queues[thread_id]
+    queue = execution_bus.get_or_create(thread_id)
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """Generate SSE events from the execution queue.
@@ -136,7 +134,7 @@ async def stream_telemetry(thread_id: str):
 
         finally:
             # Cleanup queue when stream ends
-            app_state._execution_queues.pop(thread_id, None)
+            execution_bus.release(thread_id)
             logger.info(f"[telemetry/stream] thread={thread_id} cleanup complete")
 
     return StreamingResponse(
@@ -259,21 +257,20 @@ def _emit_event(thread_id: str, event: dict) -> None:
         thread_id: Thread identifier.
         event: Event dictionary to emit.
     """
-    if thread_id not in app_state._execution_queues:
+    if thread_id not in execution_bus:
         # No active stream for this thread - skip event
         return
 
-    queue = app_state._execution_queues[thread_id]
-
-    # Use call_soon_threadsafe if we're in a different thread
     if app_state._event_loop:
-        app_state._event_loop.call_soon_threadsafe(queue.put_nowait, event)
+        execution_bus.publish_threadsafe(thread_id, event, app_state._event_loop)
     else:
-        # Fallback to direct put if event loop not available
-        try:
-            queue.put_nowait(event)
-        except Exception as exc:
-            logger.warning(f"[telemetry] failed to emit event: {exc}")
+        # Fallback: direct put when called from async context
+        queue = execution_bus.get(thread_id)
+        if queue is not None:
+            try:
+                queue.put_nowait(event)
+            except Exception as exc:
+                logger.warning(f"[telemetry] failed to emit event: {exc}")
 
 
 # ── Main block ─────────────────────────────────────────────────────────────

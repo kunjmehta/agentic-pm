@@ -49,31 +49,20 @@ def feedback_handler_node(state: GraphState) -> Dict[str, Any]:
     thread_id = state.get("thread_id", "")
     feedback_query = state.get("query", "")
 
-    # Find the last pending approval turn to get the original task queues
-    last_tasks = {
-        "portfolio_task_queue": state.get("portfolio_task_queue") or [],
-        "quant_task_queue": state.get("quant_task_queue") or [],
-        "backtester_task_queue": state.get("backtester_task_queue") or [],
-        "order_task_queue": state.get("order_task_queue") or [],
-    }
+    _queue_keys = ("portfolio_task_queue", "quant_task_queue", "backtester_task_queue", "order_task_queue")
 
-    # Check if prior turns have pending approval with task queues
+    # Seed from current state; override from last pending-approval turn if found.
+    last_tasks = {k: state.get(k) or [] for k in _queue_keys}
+
     for turn in reversed(prior_turns):
         if turn.get("status") == "pending_approval":
-            # Use task queues from the last pending approval
-            if "portfolio_task_queue" in turn:
-                last_tasks["portfolio_task_queue"] = turn.get("portfolio_task_queue", [])
-            if "quant_task_queue" in turn:
-                last_tasks["quant_task_queue"] = turn.get("quant_task_queue", [])
-            if "backtester_task_queue" in turn:
-                last_tasks["backtester_task_queue"] = turn.get("backtester_task_queue", [])
-            if "order_task_queue" in turn:
-                last_tasks["order_task_queue"] = turn.get("order_task_queue", [])
+            for key in _queue_keys:
+                if key in turn:
+                    last_tasks[key] = turn.get(key) or []
             logger.info(f"[feedback_handler] Loaded task queues from turn {turn.get('turn_number')}")
             break
 
-    # Increment review iteration
-    review_iteration = state.get("review_iteration") or 0
+    review_iteration = (state.get("review_iteration") or 0) + 1
 
     logger.info(
         f"[feedback_handler] Feedback received: \"{feedback_query[:80]}...\" "
@@ -150,9 +139,6 @@ if __name__ == "__main__":
         "timestamp": "2025-01-01T00:00:00Z",
         "tool_timings": None,
         "data_availability": None,
-        "_indicators_available": None,
-        "_bars_available": None,
-        "_trades_available": None,
         "signal_batch": None,
         "autonomous_mode": False,
     }
@@ -163,6 +149,7 @@ if __name__ == "__main__":
     # Verify output
     assert result["pm_review_approved"] is False
     assert "User provided feedback:" in result["pm_review_notes"]
+    assert result["review_iteration"] == 1  # starts at 0, incremented to 1
     assert len(result["portfolio_task_queue"]) == 1
     assert len(result["backtester_task_queue"]) == 1
     assert result["backtester_task_queue"][0]["task_id"] == "bt_001"

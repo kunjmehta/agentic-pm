@@ -12,88 +12,23 @@ Sets state fields:
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from pydantic import BaseModel, Field
-
 from src.common.utils import get_logger
 from src.server.agents import get_llm
+from src.server.constants import MAX_RETRIES
+from src.server.models.agent_decisions import OrderSignal, PMDecision
+from src.common.utils import load_prompt
 
 logger = get_logger(__name__)
-
-MAX_RETRIES = 3
-
-# ── Pydantic output models ─────────────────────────────────────────────────────
-
-
-class OrderSignal(BaseModel):
-    """A single actionable order signal derived from analysis results."""
-
-    symbol: str = Field(description="Ticker symbol, e.g. 'AAPL'")
-    action: Literal["buy", "sell", "hold"] = Field(
-        description="Recommended action based on analysis"
-    )
-    confidence: float = Field(
-        ge=0.0, le=1.0, description="Signal confidence between 0 and 1"
-    )
-    suggested_qty: Optional[int] = Field(
-        default=None,
-        description="Optional number of shares to trade; None if sizing is deferred",
-    )
-
-
-class PMDecision(BaseModel):
-    """PM's structured order decision after reviewing analysis results."""
-
-    should_execute_orders: bool = Field(
-        description=(
-            "True only when analysis results contain a clear, high-confidence signal "
-            "AND portfolio risk is acceptable. False for hold, insufficient data, or "
-            "pure informational queries."
-        )
-    )
-    order_rationale: str = Field(
-        description="1-2 sentence explanation of the order decision for the user"
-    )
-    order_signals: List[OrderSignal] = Field(
-        default_factory=list,
-        description="Concrete signals to pass to order_reasoning_node. "
-        "Only populated when should_execute_orders=True.",
-    )
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
-_DECISION_SYSTEM_PROMPT = """You are the Portfolio Manager reviewing completed technical analysis and backtest results.
-
-Your ONLY job is to decide whether the analysis results justify placing live orders.
-
-DECISION CRITERIA:
-- should_execute_orders=True ONLY if:
-  1. At least one strategy produced a clear buy or sell signal (not "hold")
-  2. Signal confidence ≥ 0.65
-  3. The query intent was action-oriented (user asked to trade, act on signals, etc.)
-  4. Risk parameters (if available) allow the trade
-
-- should_execute_orders=False for:
-  - Pure informational/analysis queries with no action intent
-  - Hold signals only (no buy/sell)
-  - Low-confidence signals (< 0.65)
-  - Backtest-only queries (historical simulation ≠ live order)
-  - Insufficient or error-heavy analysis results
-
-SIGNAL EXTRACTION:
-- When should_execute_orders=True, populate order_signals with one OrderSignal per symbol
-- Set action to "buy", "sell", or "hold" based on strategy output
-- Set confidence from the strategy result (0-1 float)
-- Set suggested_qty to None unless portfolio_status gives explicit position sizing guidance
-
-IMPORTANT: Err on the side of caution. False negatives (missing a trade) are better than
-false positives (placing an unwanted order). When uncertain, set should_execute_orders=False.
-"""
+_DECISION_SYSTEM_PROMPT = load_prompt("pm_decision")
 
 
 # ── Node function ─────────────────────────────────────────────────────────────

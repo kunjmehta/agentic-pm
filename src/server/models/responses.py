@@ -1,4 +1,4 @@
-"""Pydantic response models for the semi-auto API and graph output.
+"""Pydantic response models for the API and graph output.
 
 SemiAutoResponse is the final structured output returned after full graph execution.
 TaskPreviewResponse is returned when the graph is interrupted before execution (HITL).
@@ -32,7 +32,18 @@ class ExecutionResult(BaseModel):
     duration_ms: Optional[int] = None
 
 
-class TaskPreviewResponse(BaseModel):
+class SemiAutoResponseBase(BaseModel):
+    """Shared fields for both TaskPreviewResponse and SemiAutoResponse."""
+
+    thread_id: str
+    conversation_id: str
+    portfolio_reasoning: Optional[str] = None
+    quant_reasoning: Optional[str] = None
+    backtester_reasoning: Optional[str] = None
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class TaskPreviewResponse(SemiAutoResponseBase):
     """Response returned when the graph pauses for human-in-the-loop approval.
 
     Returned by POST /v1/query when interrupt_before=["executor_node"] fires.
@@ -42,9 +53,6 @@ class TaskPreviewResponse(BaseModel):
         status: Always "pending_approval".
         thread_id: LangGraph MemorySaver checkpoint key — required for resume.
         conversation_id: App-level session UUID.
-        portfolio_reasoning: PM reasoning summary.
-        quant_reasoning: Quant reasoning summary (if delegated).
-        backtester_reasoning: Backtester reasoning summary (if delegated).
         portfolio_tasks: Serialized PM task queue.
         quant_tasks: Serialized quant task queue.
         backtester_tasks: Serialized backtester task queue.
@@ -52,11 +60,6 @@ class TaskPreviewResponse(BaseModel):
     """
 
     status: str = "pending_approval"
-    thread_id: str
-    conversation_id: str
-    portfolio_reasoning: Optional[str] = None
-    quant_reasoning: Optional[str] = None
-    backtester_reasoning: Optional[str] = None
     order_reasoning: Optional[str] = None
     pm_review_notes: Optional[str] = None   # PM supervisor verdict on sub-agent plans
     portfolio_tasks: List[Dict[str, Any]] = Field(default_factory=list)
@@ -64,7 +67,6 @@ class TaskPreviewResponse(BaseModel):
     backtester_tasks: List[Dict[str, Any]] = Field(default_factory=list)
     order_tasks: List[Dict[str, Any]] = Field(default_factory=list)
     message: str = "Review the planned tasks and call POST /v1/approve/{thread_id} to proceed"
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class ApprovalRequest(BaseModel):
@@ -86,7 +88,7 @@ class ApprovalRequest(BaseModel):
     modified_order_tasks: Optional[List[Dict[str, Any]]] = None
 
 
-class SemiAutoResponse(BaseModel):
+class SemiAutoResponse(SemiAutoResponseBase):
     """Final structured response returned after complete graph execution.
 
     Attributes:
@@ -109,18 +111,12 @@ class SemiAutoResponse(BaseModel):
     """
 
     query: str
-    thread_id: str
-    conversation_id: str
     turn_number: int
     intent: Optional[str] = None
     symbol: Optional[str] = None
-    portfolio_reasoning: Optional[str] = None
-    quant_reasoning: Optional[str] = None
-    backtester_reasoning: Optional[str] = None
     final_response: str
     tasks_executed: int = 0
     execution_results: List[ExecutionResult] = Field(default_factory=list)
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     execution_time_ms: Optional[int] = None
     status: str = "success"
     error: Optional[str] = None
@@ -246,110 +242,3 @@ class SynthesisResult(BaseModel):
         default=None,
         description="Brief note about failed tasks or unavailable data",
     )
-
-
-if __name__ == "__main__":
-    """Smoke test: instantiate all response models."""
-    print("=" * 60)
-    print("models/responses.py Smoke Tests")
-    print("=" * 60)
-
-    # ExecutionResult
-    er = ExecutionResult(
-        task_id="pm_001",
-        function_name="get_portfolio_status",
-        status="success",
-        result={"equity": 100000.0},
-        duration_ms=340,
-    )
-    assert er.status == "success"
-    print("[OK] ExecutionResult")
-
-    # TaskPreviewResponse
-    preview = TaskPreviewResponse(
-        thread_id="test-thread-001",
-        conversation_id="conv-001",
-        portfolio_reasoning="PM planned portfolio status check.",
-        portfolio_tasks=[{"task_id": "pm_001", "function_name": "get_portfolio_status"}],
-    )
-    assert preview.status == "pending_approval"
-    print("[OK] TaskPreviewResponse")
-
-    # ApprovalRequest
-    approval = ApprovalRequest(modified_portfolio_tasks=None)
-    assert approval.modified_portfolio_tasks is None
-    print("[OK] ApprovalRequest (no modifications)")
-
-    # SemiAutoResponse
-    response = SemiAutoResponse(
-        query="What is my portfolio status?",
-        thread_id="test-thread-001",
-        conversation_id="conv-001",
-        turn_number=1,
-        final_response="Portfolio is healthy at $100,000 equity.",
-        execution_results=[er],
-        tasks_executed=1,
-    )
-    assert response.status == "success"
-    assert len(response.execution_results) == 1
-    print("[OK] SemiAutoResponse")
-
-    # SemiAutoQueryRequest
-    req = SemiAutoQueryRequest(query="Analyze AAPL", backtest_mode=True)
-    assert req.backtest_mode is True
-    assert req.thread_id is None
-    print("[OK] SemiAutoQueryRequest")
-
-    # SynthesisResult — backtest shape
-    sr = SynthesisResult(
-        headline="AAPL — Mean-Reversion Backtest",
-        intent="backtest",
-        verdict="RECOMMENDED",
-        summary_quote="Strategy generated 12.5% return with controlled drawdown.",
-        sections=[
-            ContentSection(
-                title="Returns",
-                table=[
-                    MetricRow(metric="Total Return", value="+12.50%"),
-                    MetricRow(metric="Sharpe Ratio", value="1.340"),
-                ],
-                bullets=["Outperformed buy-and-hold by 4%"],
-            ),
-            ContentSection(
-                title="Risk",
-                table=[MetricRow(metric="Max Drawdown", value="-8.20%")],
-                note="Sortino unavailable due to no negative-return days in dataset",
-            ),
-        ],
-        takeaway="The mean-reversion strategy on AAPL delivered solid risk-adjusted returns for the period.",
-        agents_used=["PM", "Backtester"],
-    )
-    assert sr.verdict == "RECOMMENDED"
-    assert len(sr.sections) == 2
-    assert sr.sections[0].table[0].metric == "Total Return"
-    print("[OK] SynthesisResult (backtest shape)")
-
-    # SynthesisResult — quant shape
-    sq = SynthesisResult(
-        headline="AAPL Technical Analysis",
-        intent="quant",
-        overall_signal="BUY",
-        signal_confidence="Medium",
-        sections=[
-            ContentSection(
-                title="Momentum",
-                table=[
-                    MetricRow(metric="RSI (14)", value="58.3"),
-                    MetricRow(metric="MACD Histogram", value="+0.42"),
-                ],
-                bullets=["MACD crossed signal line bullishly 3 days ago"],
-            ),
-        ],
-        takeaway="Momentum and volume point to a short-term BUY entry with medium conviction.",
-        agents_used=["PM", "Quant"],
-    )
-    assert sq.overall_signal == "BUY"
-    assert sq.verdict is None
-    print("[OK] SynthesisResult (quant shape)")
-
-    print("\n[ALL OK] models/responses.py smoke tests passed")

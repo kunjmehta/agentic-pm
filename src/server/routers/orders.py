@@ -21,8 +21,14 @@ DELETE) go through the same audit trail as the agent — LOG entries are written
 but no LangGraph checkpoint is created.
 """
 
+import sys
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+_project_root = Path(__file__).parent.parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -33,6 +39,7 @@ from src.common.external.alpaca_portfolio import (
     fetch_orders,
 )
 from src.common.utils import get_logger
+from src.server.helpers import get_function_registry
 from src.server.models.endpoints import (
     OpenOrdersResponse,
     OrderCancelResponse,
@@ -40,8 +47,7 @@ from src.server.models.endpoints import (
     ScalePositionResponse,
     StrategySignalExecutionResponse,
 )
-
-from src.server.registry.functions import AVAILABLE_FUNCTIONS
+from src.server.routers._helpers import handle_http_errors, run_in_thread
 from src.server.ws_manager import ws_manager
 
 logger = get_logger(__name__)
@@ -146,22 +152,34 @@ class StrategySignalRequest(BaseModel):
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
 
-def _registry_fn(name: str):
-    """Resolve a function from the registry, raising 503 if unavailable.
+async def _call_registry(name: str, **kwargs: Any) -> Dict[str, Any]:
+    """Resolve, call (in thread), and error-check a registry function.
+
+    Consolidates the repeated pattern across all order endpoints:
+    look up the function, run it without blocking the event loop, and
+    raise HTTP 500 if the result carries ``status="error"``.
 
     Args:
         name: Registry function name.
+        **kwargs: Keyword arguments forwarded to the function.
 
     Returns:
-        Callable registered under ``name``.
+        Result dict from the registry function.
 
     Raises:
-        HTTPException: 503 if the function is not registered.
+        HTTPException: 503 if the function is not registered;
+            500 if the function returns ``status="error"``.
     """
-    fn = AVAILABLE_FUNCTIONS.get(name)
+    fn = get_function_registry().get(name)
     if fn is None:
         raise HTTPException(status_code=503, detail=f"Function '{name}' not available")
-    return fn
+    result: Dict[str, Any] = await run_in_thread(fn, **kwargs)
+    if result.get("status") == "error":
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("error", f"'{name}' returned an error"),
+        )
+    return result
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -234,27 +252,25 @@ async def orders_websocket(websocket: WebSocket):
 
 
 @router.get("", response_model=OpenOrdersResponse)
-async def list_open_orders():
+@handle_http_errors
+async def list_open_orders() -> Dict[str, Any]:
     """List all currently open orders from Alpaca.
 
     Returns:
         OpenOrdersResponse with orders list and count.
     """
-    try:
-        orders = fetch_orders(status="open")
-        return {
-            "status": "success",
-            "orders": orders,
-            "count": len(orders),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception as exc:
-        logger.error(f"[orders/list] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    orders = await run_in_thread(fetch_orders, status="open")
+    return {
+        "status": "success",
+        "orders": orders,
+        "count": len(orders),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.post("/execute", response_model=OrderResponse)
-async def execute_order(request: ExecuteOrderRequest):
+@handle_http_errors
+async def execute_order(request: ExecuteOrderRequest) -> Dict[str, Any]:
     """Place a market or limit order.
 
     Args:
@@ -268,44 +284,34 @@ async def execute_order(request: ExecuteOrderRequest):
         f"[orders/execute] {request.side.upper()} {request.qty} {request.symbol} "
         f"type={request.order_type}"
     )
-    try:
-        fn = _registry_fn("execute_order")
-        result = fn(
-            symbol=request.symbol,
-            qty=request.qty,
-            side=request.side,
-            order_type=request.order_type,
-            limit_price=request.limit_price,
-        )
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("error", "Order failed"))
-
-        # Broadcast order update to WebSocket clients
-        await ws_manager.broadcast({
-            "type": "order_update",
-            "order_id": result.get("id"),
-            "broker_order_id": result.get("id"),
-            "symbol": request.symbol,
-            "side": request.side,
-            "qty": request.qty,
-            "status": "submitted",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
-
-        return {
-            "status": "success",
-            "order": result,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[orders/execute] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await _call_registry(
+        "execute_order",
+        symbol=request.symbol,
+        qty=request.qty,
+        side=request.side,
+        order_type=request.order_type,
+        limit_price=request.limit_price,
+    )
+    await ws_manager.broadcast({
+        "type": "order_update",
+        "order_id": result.get("id"),
+        "broker_order_id": result.get("id"),
+        "symbol": request.symbol,
+        "side": request.side,
+        "qty": request.qty,
+        "status": "submitted",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    return {
+        "status": "success",
+        "order": result,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.post("/stop", response_model=OrderResponse)
-async def place_stop_order(request: StopOrderRequest):
+@handle_http_errors
+async def place_stop_order(request: StopOrderRequest) -> Dict[str, Any]:
     """Place a stop (stop-market) order via Alpaca.
 
     A stop order becomes a market order when the market price reaches
@@ -323,31 +329,20 @@ async def place_stop_order(request: StopOrderRequest):
         f"[orders/stop] {request.side.upper()} {request.qty} {request.symbol} "
         f"stop@{request.stop_price}"
     )
-    try:
-        fn = _registry_fn("place_stop_order")
-        result = fn(
-            symbol=request.symbol,
-            qty=request.qty,
-            side=request.side,
-            stop_price=request.stop_price,
-            time_in_force=request.time_in_force,
-        )
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("error", "Stop order failed"))
-        return {
-            "status": "success",
-            "order": result,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[orders/stop] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await _call_registry(
+        "place_stop_order",
+        symbol=request.symbol,
+        qty=request.qty,
+        side=request.side,
+        stop_price=request.stop_price,
+        time_in_force=request.time_in_force,
+    )
+    return {"status": "success", "order": result, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @router.post("/stop-limit", response_model=OrderResponse)
-async def place_stop_limit_order(request: StopLimitOrderRequest):
+@handle_http_errors
+async def place_stop_limit_order(request: StopLimitOrderRequest) -> Dict[str, Any]:
     """Place a stop-limit order via Alpaca.
 
     When the market price reaches ``stop_price`` a limit order at
@@ -365,32 +360,21 @@ async def place_stop_limit_order(request: StopLimitOrderRequest):
         f"[orders/stop-limit] {request.side.upper()} {request.qty} {request.symbol} "
         f"stop@{request.stop_price} limit@{request.limit_price}"
     )
-    try:
-        fn = _registry_fn("place_stop_limit_order")
-        result = fn(
-            symbol=request.symbol,
-            qty=request.qty,
-            side=request.side,
-            stop_price=request.stop_price,
-            limit_price=request.limit_price,
-            time_in_force=request.time_in_force,
-        )
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("error", "Stop-limit order failed"))
-        return {
-            "status": "success",
-            "order": result,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[orders/stop-limit] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await _call_registry(
+        "place_stop_limit_order",
+        symbol=request.symbol,
+        qty=request.qty,
+        side=request.side,
+        stop_price=request.stop_price,
+        limit_price=request.limit_price,
+        time_in_force=request.time_in_force,
+    )
+    return {"status": "success", "order": result, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @router.post("/close/{symbol}", response_model=OrderResponse)
-async def close_position(symbol: str):
+@handle_http_errors
+async def close_position(symbol: str) -> Dict[str, Any]:
     """Liquidate the full open position for a symbol at market price.
 
     Args:
@@ -400,25 +384,13 @@ async def close_position(symbol: str):
         OrderResponse with the closing order details.
     """
     logger.info(f"[orders/close] closing position for {symbol.upper()}")
-    try:
-        fn = _registry_fn("close_position")
-        result = fn(symbol=symbol)
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("error", "Close failed"))
-        return {
-            "status": "success",
-            "order": result,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[orders/close/{symbol}] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await _call_registry("close_position", symbol=symbol)
+    return {"status": "success", "order": result, "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 @router.post("/scale", response_model=ScalePositionResponse)
-async def scale_position(request: ScalePositionRequest):
+@handle_http_errors
+async def scale_position(request: ScalePositionRequest) -> Dict[str, Any]:
     """Resize a position to a target percentage of total equity.
 
     Computes the buy/sell delta required and places the appropriate order.
@@ -434,30 +406,23 @@ async def scale_position(request: ScalePositionRequest):
         f"[orders/scale] {request.symbol} → {request.target_pct:.1%} "
         f"type={request.order_type}"
     )
-    try:
-        fn = _registry_fn("scale_position")
-        result = fn(
-            symbol=request.symbol,
-            target_pct=request.target_pct,
-            order_type=request.order_type,
-            limit_price=request.limit_price,
-        )
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("error", "Scale failed"))
-        return {
-            "status": "success",
-            **{k: v for k, v in result.items() if k not in ("timestamp",)},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[orders/scale] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await _call_registry(
+        "scale_position",
+        symbol=request.symbol,
+        target_pct=request.target_pct,
+        order_type=request.order_type,
+        limit_price=request.limit_price,
+    )
+    return {
+        "status": "success",
+        **{k: v for k, v in result.items() if k != "timestamp"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.post("/signal", response_model=StrategySignalExecutionResponse)
-async def execute_strategy_signal(request: StrategySignalRequest):
+@handle_http_errors
+async def execute_strategy_signal(request: StrategySignalRequest) -> Dict[str, Any]:
     """Translate a strategy signal into a live Alpaca order.
 
     Confidence scales the position size: a buy with confidence=0.5 and
@@ -473,31 +438,24 @@ async def execute_strategy_signal(request: StrategySignalRequest):
         f"[orders/signal] {request.symbol} signal={request.signal} "
         f"confidence={request.confidence:.2f}"
     )
-    try:
-        fn = _registry_fn("execute_strategy_signal")
-        result = fn(
-            symbol=request.symbol,
-            signal=request.signal,
-            confidence=request.confidence,
-            base_position_pct=request.base_position_pct,
-            order_type=request.order_type,
-        )
-        if result.get("status") == "error":
-            raise HTTPException(status_code=500, detail=result.get("error", "Signal execution failed"))
-        return {
-            "status": "success",
-            **{k: v for k, v in result.items() if k not in ("timestamp",)},
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[orders/signal] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await _call_registry(
+        "execute_strategy_signal",
+        symbol=request.symbol,
+        signal=request.signal,
+        confidence=request.confidence,
+        base_position_pct=request.base_position_pct,
+        order_type=request.order_type,
+    )
+    return {
+        "status": "success",
+        **{k: v for k, v in result.items() if k != "timestamp"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.delete("/{order_id}", response_model=OrderCancelResponse)
-async def cancel_order(order_id: str):
+@handle_http_errors
+async def cancel_order(order_id: str) -> Dict[str, Any]:
     """Cancel an open order by its Alpaca UUID.
 
     Args:
@@ -507,42 +465,36 @@ async def cancel_order(order_id: str):
         OrderCancelResponse confirming cancellation.
     """
     logger.info(f"[orders/cancel] order_id={order_id}")
-    try:
-        result = _alpaca_cancel_order(order_id=order_id)
-        return {
-            "status": "success",
-            "order_id": order_id,
-            "message": f"Order {order_id} cancelled",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception as exc:
-        logger.error(f"[orders/cancel/{order_id}] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    await run_in_thread(_alpaca_cancel_order, order_id=order_id)
+    return {
+        "status": "success",
+        "order_id": order_id,
+        "message": f"Order {order_id} cancelled",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.delete("", response_model=OrderCancelResponse)
-async def cancel_all_orders():
+@handle_http_errors
+async def cancel_all_orders() -> Dict[str, Any]:
     """Cancel all open orders.
 
     Returns:
         OrderCancelResponse with count of cancelled orders.
     """
     logger.info("[orders/cancel_all] cancelling all open orders")
-    try:
-        result = _cancel_all_orders()
-        count = result.get("cancelled_count", 0)
-        return {
-            "status": "success",
-            "message": f"Cancelled {count} open orders",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception as exc:
-        logger.error(f"[orders/cancel_all] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await run_in_thread(_cancel_all_orders)
+    count = result.get("cancelled_count", 0) if isinstance(result, dict) else 0
+    return {
+        "status": "success",
+        "message": f"Cancelled {count} open orders",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.post("/reconcile")
-async def reconcile_orders():
+@handle_http_errors
+async def reconcile_orders() -> Dict[str, Any]:
     """Reconcile submitted orders against Alpaca fill data.
 
     Fetches all ``live_orders`` with ``status='submitted'``, queries Alpaca
@@ -553,89 +505,19 @@ async def reconcile_orders():
     orders linked to a signal via ``signal_id``.
 
     Returns:
-        Dict with reconciled_count, skipped_count, timestamp.
+        Dict with reconciled_count, skipped_count, signals_updated, timestamp.
     """
-    from src.common.dao import OrdersDAO
-    from src.common.dao.strategy_dao import StrategyDAO
-    from src.common.external.alpaca_portfolio import fetch_orders
+    from src.server.services.order_service import reconcile_submitted_orders
 
     logger.info("[orders/reconcile] starting fill reconciliation")
-    try:
-        orders_dao = OrdersDAO()
-        submitted = orders_dao.get_submitted_orders()
-
-        if not submitted:
-            orders_dao.close()
-            return {
-                "status": "success",
-                "reconciled_count": 0,
-                "skipped_count": 0,
-                "message": "No submitted orders to reconcile",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-
-        # Fetch recent closed orders from Alpaca (covers fills + cancellations).
-        broker_orders = fetch_orders(status="closed", limit=200)
-        broker_map = {o["id"]: o for o in broker_orders}
-
-        reconciled = 0
-        skipped = 0
-        signal_ids_filled: list = []
-
-        for row in submitted:
-            bid = row.get("broker_order_id")
-            if not bid or bid not in broker_map:
-                skipped += 1
-                continue
-
-            alpaca_order = broker_map[bid]
-            alpaca_status = alpaca_order.get("status", "")
-
-            if alpaca_status == "filled":
-                filled_at_raw = alpaca_order.get("filled_at")
-                filled_at = (
-                    datetime.fromisoformat(filled_at_raw.replace("Z", "+00:00"))
-                    if filled_at_raw
-                    else datetime.now(timezone.utc)
-                )
-                filled_price = alpaca_order.get("filled_avg_price") or 0.0
-                orders_dao.update_fill(
-                    broker_order_id=bid,
-                    filled_at=filled_at,
-                    filled_price=float(filled_price),
-                )
-                if row.get("signal_id"):
-                    signal_ids_filled.append(row["signal_id"])
-                reconciled += 1
-            elif alpaca_status in ("canceled", "expired", "rejected"):
-                orders_dao.update_status(broker_order_id=bid, status=alpaca_status)
-                reconciled += 1
-
-        # Propagate fill status to strategy_results for linked signals.
-        if signal_ids_filled:
-            s_dao = StrategyDAO()
-            for sid in signal_ids_filled:
-                s_dao.execute(
-                    "UPDATE strategy_results SET status = 'filled' WHERE id = ?",
-                    (sid,),
-                )
-            s_dao.close()
-
-        orders_dao.close()
-        logger.info(
-            f"[orders/reconcile] reconciled={reconciled} skipped={skipped} "
-            f"signals_updated={len(signal_ids_filled)}"
-        )
-        return {
-            "status": "success",
-            "reconciled_count": reconciled,
-            "skipped_count": skipped,
-            "signals_updated": len(signal_ids_filled),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception as exc:
-        logger.error(f"[orders/reconcile] {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await reconcile_submitted_orders()
+    return {
+        "status": "success",
+        "reconciled_count": result.reconciled_count,
+        "skipped_count": result.skipped_count,
+        "signals_updated": result.signals_updated,
+        "timestamp": result.timestamp,
+    }
 
 
 if __name__ == "__main__":

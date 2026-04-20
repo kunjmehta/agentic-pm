@@ -15,8 +15,9 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.server.registry.strategy_registry import get_registry
-from src.server.registry.strategy_metadata import StrategyMetadata
+from src.common.registry import strategy_registry as _registry
+from src.common.registry.strategy_registry import get_registry  # backward-compat shim kept for callers
+from src.common.registry.strategy_metadata import StrategyMetadata
 from src.common.utils import get_logger
 
 logger = get_logger(__name__)
@@ -35,8 +36,6 @@ def register_all_strategies():
         logger.debug("Strategies already registered, skipping")
         return
 
-    registry = get_registry()
-
     # Import all strategy classes (lazy import to avoid circular dependencies)
     from src.server.skills.quant.mean_reversion import MeanReversionSkill
     from src.server.skills.quant.vwap_reversion import VWAPReversionSkill
@@ -48,7 +47,7 @@ def register_all_strategies():
     from src.server.skills.quant.earnings_drift import EarningsDriftSkill
 
     # Register mean-reversion (intraday)
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="mean-reversion",
             display_name="Mean Reversion (Intraday)",
@@ -93,7 +92,7 @@ def register_all_strategies():
     )
 
     # Register VWAP reversion
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="vwap-reversion",
             display_name="VWAP Reversion",
@@ -131,7 +130,7 @@ def register_all_strategies():
     )
 
     # Register opening range breakout
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="opening-range-breakout",
             display_name="Opening Range Breakout",
@@ -155,7 +154,7 @@ def register_all_strategies():
     )
 
     # Register RSI divergence scalp
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="rsi-divergence",
             display_name="RSI Divergence Scalp",
@@ -186,7 +185,7 @@ def register_all_strategies():
     )
 
     # Register momentum burst
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="momentum-burst",
             display_name="Momentum Burst",
@@ -224,7 +223,7 @@ def register_all_strategies():
     )
 
     # Register golden cross (swing/position)
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="golden-cross",
             display_name="Golden Cross",
@@ -255,7 +254,7 @@ def register_all_strategies():
     )
 
     # Register 52-week breakout
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="breakout-52w",
             display_name="52-Week Breakout",
@@ -293,7 +292,7 @@ def register_all_strategies():
     )
 
     # Register earnings drift
-    registry.register(
+    _registry.register(
         StrategyMetadata(
             name="earnings-drift",
             display_name="Earnings Drift",
@@ -338,7 +337,7 @@ def register_all_strategies():
     )
 
     _strategies_registered = True
-    logger.info(f"Registered {registry.count()} strategies: {', '.join(registry.get_all_names())}")
+    logger.info(f"Registered {_registry.count()} strategies: {', '.join(_registry.get_all_names())}")
 
 
 def ensure_strategies_registered():
@@ -357,41 +356,3 @@ def reset_registration_flag():
     """
     global _strategies_registered
     _strategies_registered = False
-
-
-if __name__ == "__main__":
-    """Test strategy registration."""
-    print("Testing strategy registration...")
-
-    # Register all strategies
-    register_all_strategies()
-
-    # Get registry
-    registry = get_registry()
-
-    # Display registration summary
-    print(f"\n[OK] Registered {registry.count()} strategies")
-    print(f"\nAll strategies: {registry.get_all_names()}")
-
-    # Test each strategy
-    for name in registry.get_all_names():
-        metadata = registry.get_metadata(name)
-        strategy_class = registry.get_strategy(name)
-        instance = registry.instantiate(name)
-
-        print(f"\n{metadata.display_name} ({name}):")
-        print(f"  Category: {metadata.category}")
-        print(f"  Timeframes: {', '.join(metadata.timeframes)}")
-        print(f"  Min bars: {metadata.min_bars}")
-        print(f"  Parameters: {len(metadata.parameters)}")
-        print(f"  Tags: {', '.join(metadata.tags)}")
-        print(f"  Class: {strategy_class.__name__}")
-        print(f"  Instance: {instance is not None}")
-
-    # Test filtering
-    print(f"\n[OK] Intraday strategies: {registry.list_by_category('intraday')}")
-    print(f"[OK] Daily strategies: {registry.list_by_category('daily')}")
-    print(f"[OK] 1Min strategies: {registry.list_by_timeframe('1Min')}")
-    print(f"[OK] Mean-reversion tagged: {registry.list_by_tag('mean-reversion')}")
-
-    print("\n[PASS] All strategy registration tests passed!")

@@ -92,13 +92,7 @@ class VolatilitySkill:
 # Singleton
 volatility_skill = VolatilitySkill()
 
-
-def calc_volatility_bands(df: pd.DataFrame, period: int = 20, num_std: float = 2.0) -> Dict:
-    """Legacy alias: delegate to VolatilitySkill.analyze_bars."""
-    return volatility_skill.analyze_bars(df, period=period, num_std=num_std)
-
-
-__all__ = ["VolatilitySkill", "volatility_skill", "calc_volatility_bands"]
+__all__ = ["VolatilitySkill", "volatility_skill"]
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Dict, List
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -43,9 +43,11 @@ from src.server.routers._helpers import (
     _state_to_response,
     _load_conversation,
     _save_conversation,
-    _persist_reasoning_trace,
+    handle_http_errors,
+    run_in_thread,
 )
 from src.common.utils import get_logger
+from src.server.services.execution_bus import execution_bus
 
 logger = get_logger(__name__)
 
@@ -70,6 +72,95 @@ _NODE_LABELS = {
     "order_executor_node": "Executing orders",
     "synthesizer_node": "Synthesizing response",
 }
+
+
+# ── Turn-building helpers ──────────────────────────────────────────────────────
+
+
+def _pending_turn(query: str, state: Dict[str, Any], turns: List[dict]) -> dict:
+    """Build a ``pending_approval`` conversation turn from graph state.
+
+    Args:
+        query: The user query string.
+        state: Current LangGraph state snapshot values.
+        turns: Existing turns list (used to derive fallback turn number).
+
+    Returns:
+        Dict ready to append to the conversation turns list.
+    """
+    return {
+        "turn_number": state.get("turn_number", len(turns) + 1),
+        "query": query,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "pending_approval",
+        "intent": state.get("intent"),
+        "symbol": state.get("symbol"),
+        "portfolio_reasoning": state.get("portfolio_reasoning"),
+        "quant_reasoning": state.get("quant_reasoning"),
+        "backtester_reasoning": state.get("backtester_reasoning"),
+        "pm_review_notes": state.get("pm_review_notes"),
+        "portfolio_tasks": state.get("portfolio_task_queue") or [],
+        "quant_tasks": state.get("quant_task_queue") or [],
+        "backtester_tasks": state.get("backtester_task_queue") or [],
+        "order_tasks": state.get("order_task_queue") or [],
+        "order_reasoning": state.get("order_reasoning"),
+    }
+
+
+def _complete_turn(query: str, state: Dict[str, Any], turns: List[dict]) -> dict:
+    """Build a ``complete`` (guard short-circuit) conversation turn.
+
+    Args:
+        query: The user query string.
+        state: Current LangGraph state snapshot values.
+        turns: Existing turns list (used to derive fallback turn number).
+
+    Returns:
+        Dict ready to append to the conversation turns list.
+    """
+    return {
+        "turn_number": state.get("turn_number", len(turns) + 1),
+        "query": query,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "complete",
+        "intent": state.get("intent"),
+        "symbol": state.get("symbol"),
+        "final_response": state.get("final_response"),
+    }
+
+
+def _update_or_append_approved_turn(
+    turns: List[dict],
+    turn_number: int,
+    response: SemiAutoResponse,
+    original_query: str,
+) -> None:
+    """Update a pending turn to completed, or append a new completed turn.
+
+    Args:
+        turns: Mutable conversation turns list (modified in-place).
+        turn_number: The turn number from final graph state.
+        response: The final SemiAutoResponse from graph execution.
+        original_query: Original user query for the turn.
+    """
+    execution_results = [r.model_dump(mode="json") for r in response.execution_results]
+    for t in reversed(turns):
+        if t.get("turn_number") == turn_number and t.get("status") == "pending_approval":
+            t["status"] = response.status
+            t["final_response"] = response.final_response
+            t["tasks_executed"] = response.tasks_executed
+            t["execution_results"] = execution_results
+            t["timestamp_completed"] = datetime.now(timezone.utc).isoformat()
+            return
+    turns.append({
+        "turn_number": turn_number,
+        "query": original_query,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": response.status,
+        "final_response": response.final_response,
+        "tasks_executed": response.tasks_executed,
+        "execution_results": execution_results,
+    })
 
 
 # ── Phase 1: reasoning → HITL interrupt ───────────────────────────────────────
@@ -115,45 +206,17 @@ async def query_endpoint(request: SemiAutoQueryRequest):
 
     logger.info(f"[api/query] thread={thread_id} next_nodes={next_nodes}")
 
+    turns = await run_in_thread(_load_conversation, thread_id)
+    turn_number = current_state.get("turn_number", len(turns) + 1)
+
     if "executor_node" in next_nodes:
-        preview = _state_to_preview(current_state, thread_id)
-        turns = _load_conversation(thread_id)
-        turns.append({
-            "turn_number": current_state.get("turn_number", len(turns) + 1),
-            "query": request.query,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "pending_approval",
-            "intent": current_state.get("intent"),
-            "symbol": current_state.get("symbol"),
-            "portfolio_reasoning": current_state.get("portfolio_reasoning"),
-            "quant_reasoning": current_state.get("quant_reasoning"),
-            "backtester_reasoning": current_state.get("backtester_reasoning"),
-            "pm_review_notes": current_state.get("pm_review_notes"),
-            "portfolio_tasks": current_state.get("portfolio_task_queue") or [],
-            "quant_tasks": current_state.get("quant_task_queue") or [],
-            "backtester_tasks": current_state.get("backtester_task_queue") or [],
-            "order_tasks": current_state.get("order_task_queue") or [],
-            "order_reasoning": current_state.get("order_reasoning"),
-        })
-        _save_conversation(thread_id, turns)
-        # Persist reasoning audit trail
-        _persist_reasoning_trace(thread_id, current_state.get("turn_number", len(turns)), current_state)
-        return preview
+        turns.append(_pending_turn(request.query, current_state, turns))
+        await run_in_thread(_save_conversation, thread_id, turns)
+        return _state_to_preview(current_state, thread_id)
 
     # Guard short-circuit
-    turns = _load_conversation(thread_id)
-    turns.append({
-        "turn_number": current_state.get("turn_number", len(turns) + 1),
-        "query": request.query,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "status": "complete",
-        "intent": current_state.get("intent"),
-        "symbol": current_state.get("symbol"),
-        "final_response": current_state.get("final_response"),
-    })
-    _save_conversation(thread_id, turns)
-    # Persist reasoning audit trail
-    _persist_reasoning_trace(thread_id, current_state.get("turn_number", len(turns)), current_state)
+    turns.append(_complete_turn(request.query, current_state, turns))
+    await run_in_thread(_save_conversation, thread_id, turns)
     return _state_to_response(current_state, thread_id, request.query, 0)
 
 
@@ -236,41 +299,18 @@ async def query_stream(request: SemiAutoQueryRequest):
                 if reasoning or tasks:
                     yield _fmt({"type": "reasoning", "agent": agent_key, "content": reasoning or "", "tasks": tasks})
 
+            turns = await run_in_thread(_load_conversation, thread_id)
+            turn_number = snapshot.get("turn_number", len(turns) + 1)
+
             if "executor_node" not in next_nodes:
-                turns = _load_conversation(thread_id)
-                turns.append({
-                    "turn_number": snapshot.get("turn_number", len(turns) + 1),
-                    "query": request.query,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "status": "complete",
-                    "intent": snapshot.get("intent"),
-                    "symbol": snapshot.get("symbol"),
-                    "final_response": snapshot.get("final_response"),
-                })
-                _save_conversation(thread_id, turns)
+                turns.append(_complete_turn(request.query, snapshot, turns))
+                await run_in_thread(_save_conversation, thread_id, turns)
                 yield _fmt({"type": "text", "content": snapshot.get("final_response", "(no response)")})
                 yield _fmt({"type": "done"})
                 return
 
-            turns = _load_conversation(thread_id)
-            turns.append({
-                "turn_number": snapshot.get("turn_number", len(turns) + 1),
-                "query": request.query,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "status": "pending_approval",
-                "intent": snapshot.get("intent"),
-                "symbol": snapshot.get("symbol"),
-                "portfolio_reasoning": snapshot.get("portfolio_reasoning"),
-                "quant_reasoning": snapshot.get("quant_reasoning"),
-                "backtester_reasoning": snapshot.get("backtester_reasoning"),
-                "pm_review_notes": snapshot.get("pm_review_notes"),
-                "portfolio_tasks": snapshot.get("portfolio_task_queue") or [],
-                "quant_tasks": snapshot.get("quant_task_queue") or [],
-                "backtester_tasks": snapshot.get("backtester_task_queue") or [],
-                "order_tasks": snapshot.get("order_task_queue") or [],
-                "order_reasoning": snapshot.get("order_reasoning"),
-            })
-            _save_conversation(thread_id, turns)
+            turns.append(_pending_turn(request.query, snapshot, turns))
+            await run_in_thread(_save_conversation, thread_id, turns)
             yield _fmt({
                 "type": "interrupt",
                 "message": "Reasoning complete. Call POST /v1/approve/{thread_id} to execute.",
@@ -299,6 +339,29 @@ async def query_stream(request: SemiAutoQueryRequest):
 # ── Phase 2: resume after approval ────────────────────────────────────────────
 
 
+def _build_override_updates(request: ApprovalRequest) -> dict:
+    """Build LangGraph state update dict from optional task queue overrides.
+
+    Args:
+        request: ApprovalRequest with optional modified task queues.
+
+    Returns:
+        Dict of queue key → task list for non-None overrides only.
+    """
+    mapping = {
+        "portfolio_task_queue": request.modified_portfolio_tasks,
+        "quant_task_queue": request.modified_quant_tasks,
+        "backtester_task_queue": request.modified_backtester_tasks,
+        "order_task_queue": request.modified_order_tasks,
+    }
+    overrides = {k: v for k, v in mapping.items() if v is not None}
+    if overrides:
+        logger.info(
+            f"[api/approve] overriding task queues: { {k: len(v) for k, v in overrides.items()} }"
+        )
+    return overrides
+
+
 @router.post("/v1/approve/{thread_id}")
 async def approve_endpoint(thread_id: str, request: ApprovalRequest):
     """Phase 2: Resume graph after HITL approval.
@@ -325,19 +388,9 @@ async def approve_endpoint(thread_id: str, request: ApprovalRequest):
         raise HTTPException(status_code=404, detail=f"Thread not found: {exc}")
 
     state_values = current_state.values if current_state else {}
+    original_query = state_values.get("query", "")
 
-    override_updates = {}
-    if request.modified_portfolio_tasks is not None:
-        override_updates["portfolio_task_queue"] = request.modified_portfolio_tasks
-        logger.info(f"[api/approve] overriding portfolio_task_queue with {len(request.modified_portfolio_tasks)} tasks")
-    if request.modified_quant_tasks is not None:
-        override_updates["quant_task_queue"] = request.modified_quant_tasks
-    if request.modified_backtester_tasks is not None:
-        override_updates["backtester_task_queue"] = request.modified_backtester_tasks
-    if request.modified_order_tasks is not None:
-        override_updates["order_task_queue"] = request.modified_order_tasks
-        logger.info(f"[api/approve] overriding order_task_queue with {len(request.modified_order_tasks)} tasks")
-
+    override_updates = _build_override_updates(request)
     if override_updates:
         await graph.aupdate_state(config, override_updates)
 
@@ -349,34 +402,12 @@ async def approve_endpoint(thread_id: str, request: ApprovalRequest):
         logger.error(f"[api/approve] graph resume failed: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
 
-    original_query = state_values.get("query", "")
     response = _state_to_response(final_state, thread_id, original_query, 0)
-
-    turns = _load_conversation(thread_id)
     turn_number = final_state.get("turn_number") or 1
-    matched = False
-    for t in reversed(turns):
-        if t.get("turn_number") == turn_number and t.get("status") == "pending_approval":
-            t["status"] = response.status
-            t["final_response"] = response.final_response
-            t["tasks_executed"] = response.tasks_executed
-            t["execution_results"] = [r.model_dump(mode="json") for r in response.execution_results]
-            t["timestamp_completed"] = datetime.now(timezone.utc).isoformat()
-            matched = True
-            break
-    if not matched:
-        turns.append({
-            "turn_number": turn_number,
-            "query": original_query,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": response.status,
-            "final_response": response.final_response,
-            "tasks_executed": response.tasks_executed,
-            "execution_results": [r.model_dump(mode="json") for r in response.execution_results],
-        })
-    _save_conversation(thread_id, turns)
-    # Persist reasoning audit trail (post-execution)
-    _persist_reasoning_trace(thread_id, turn_number, final_state)
+
+    turns = await run_in_thread(_load_conversation, thread_id)
+    _update_or_append_approved_turn(turns, turn_number, response, original_query)
+    await run_in_thread(_save_conversation, thread_id, turns)
     return response
 
 
@@ -397,8 +428,6 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
         thread_id: Thread to resume.
         request: ApprovalRequest with optional modified task queues.
     """
-    import src.server.app_state as _state
-
     graph = _get_graph()
     config = _make_config(thread_id)
 
@@ -408,23 +437,14 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
         raise HTTPException(status_code=404, detail=f"Thread not found: {exc}")
 
     state_values = current_state.values if current_state else {}
+    original_query = state_values.get("query", "")
 
-    override_updates = {}
-    if request.modified_portfolio_tasks is not None:
-        override_updates["portfolio_task_queue"] = request.modified_portfolio_tasks
-    if request.modified_quant_tasks is not None:
-        override_updates["quant_task_queue"] = request.modified_quant_tasks
-    if request.modified_backtester_tasks is not None:
-        override_updates["backtester_task_queue"] = request.modified_backtester_tasks
-    if request.modified_order_tasks is not None:
-        override_updates["order_task_queue"] = request.modified_order_tasks
-
+    override_updates = _build_override_updates(request)
     if override_updates:
         await graph.aupdate_state(config, override_updates)
 
     # Create per-thread execution event queue for telemetry bridging
-    q: asyncio.Queue = asyncio.Queue()
-    _state._execution_queues[thread_id] = q
+    q = execution_bus.create(thread_id)
 
     logger.info(f"[api/approve/stream] resuming thread={thread_id}")
 
@@ -434,10 +454,8 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
 
         async def _run_graph():
             try:
-                final = await graph.ainvoke(None, config=config)
-                return final
+                return await graph.ainvoke(None, config=config)
             finally:
-                # Signal SSE generator that execution is complete
                 await q.put("__done__")
 
         graph_task = asyncio.create_task(_run_graph())
@@ -450,33 +468,12 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
                 yield _fmt(item)
 
             final_state = await graph_task
-            original_query = state_values.get("query", "")
             response = _state_to_response(final_state, thread_id, original_query, 0)
-
-            # Persist conversation
-            turns = _load_conversation(thread_id)
             turn_number = final_state.get("turn_number") or 1
-            matched = False
-            for t in reversed(turns):
-                if t.get("turn_number") == turn_number and t.get("status") == "pending_approval":
-                    t["status"] = response.status
-                    t["final_response"] = response.final_response
-                    t["tasks_executed"] = response.tasks_executed
-                    t["execution_results"] = [r.model_dump(mode="json") for r in response.execution_results]
-                    t["timestamp_completed"] = datetime.now(timezone.utc).isoformat()
-                    matched = True
-                    break
-            if not matched:
-                turns.append({
-                    "turn_number": turn_number,
-                    "query": original_query,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "status": response.status,
-                    "final_response": response.final_response,
-                    "tasks_executed": response.tasks_executed,
-                    "execution_results": [r.model_dump(mode="json") for r in response.execution_results],
-                })
-            _save_conversation(thread_id, turns)
+
+            turns = await run_in_thread(_load_conversation, thread_id)
+            _update_or_append_approved_turn(turns, turn_number, response, original_query)
+            await run_in_thread(_save_conversation, thread_id, turns)
 
             yield _fmt({
                 "type": "telemetry",
@@ -497,7 +494,7 @@ async def approve_stream_endpoint(thread_id: str, request: ApprovalRequest):
             if not graph_task.done():
                 graph_task.cancel()
         finally:
-            _state._execution_queues.pop(thread_id, None)
+            execution_bus.release(thread_id)
 
     return StreamingResponse(
         event_generator(),
@@ -535,7 +532,8 @@ async def reject_endpoint(thread_id: str):
 
 
 @router.get("/v1/conversations/{thread_id}", response_model=ConversationResponse)
-async def get_conversation(thread_id: str, limit: int = Query(default=10, ge=1, le=50)):
+@handle_http_errors
+async def get_conversation(thread_id: str, limit: int = Query(default=10, ge=1, le=50)) -> Dict[str, Any]:
     """Load interaction history for a thread from JSON file.
 
     Args:
@@ -545,22 +543,18 @@ async def get_conversation(thread_id: str, limit: int = Query(default=10, ge=1, 
     Returns:
         Dict with thread_id, turns list, and count.
     """
-    try:
-        turns = _load_conversation(thread_id)
-        # Return most recent 'limit' turns
-        if limit and len(turns) > limit:
-            turns = turns[-limit:]
-        return {"thread_id": thread_id, "turns": turns, "count": len(turns)}
-    except Exception as exc:
-        logger.error(f"[conversations/{thread_id}] error loading conversation: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to load conversation: {str(exc)}")
+    turns = await run_in_thread(_load_conversation, thread_id)
+    if limit and len(turns) > limit:
+        turns = turns[-limit:]
+    return {"thread_id": thread_id, "turns": turns, "count": len(turns)}
 
 
 # ── Agent state ────────────────────────────────────────────────────────────────
 
 
 @router.get("/v1/agent/state/{thread_id}", response_model=AgentStateResponse)
-async def get_agent_state(thread_id: str):
+@handle_http_errors
+async def get_agent_state(thread_id: str) -> Dict[str, Any]:
     """Return graph checkpoint state for a thread.
 
     Args:
@@ -571,25 +565,20 @@ async def get_agent_state(thread_id: str):
     """
     graph = _get_graph()
     config = _make_config(thread_id)
-    try:
-        state = await graph.aget_state(config)
-        if state is None:
-            raise HTTPException(status_code=404, detail="Thread not found")
-        values = dict(state.values) if state.values else {}
-        for key in ("prior_turns",):
-            values.pop(key, None)
-        return {"thread_id": thread_id, "state": values}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    state = await graph.aget_state(config)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    values = dict(state.values) if state.values else {}
+    values.pop("prior_turns", None)
+    return {"thread_id": thread_id, "state": values}
 
 
 # ── Registry ───────────────────────────────────────────────────────────────────
 
 
 @router.get("/v1/registry", response_model=RegistryResponse)
-async def get_registry():
+@handle_http_errors
+async def get_registry_endpoint() -> Dict[str, Any]:
     """List all registered functions with their parameter schemas.
 
     Returns:

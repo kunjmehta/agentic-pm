@@ -5,7 +5,6 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Query
 
-import src.server.app_state as _state
 from src.common.utils import get_logger, config as app_config
 from src.server.models.endpoints import (
     FlushCacheResponse,
@@ -31,13 +30,13 @@ async def ingestion_status():
         Dict with data_stream, cache, and etl sub-sections.
     """
     # ── Data stream ───────────────────────────────────────────────────────
-    stream_running = _state._stream_task is not None and not _state._stream_task.done()
-    symbols = _state._data_coordinator.symbols if _state._data_coordinator is not None else []
+    # Streaming is managed by the ETL process (src/processes/etl_process.py),
+    # not by the API server. Report configuration only.
     data_stream_info: Dict[str, Any] = {
         "enabled": app_config.get("data_stream.enabled", default=False),
-        "running": stream_running,
-        "symbols": symbols,
-        "task_name": _state._stream_task.get_name() if _state._stream_task is not None else None,
+        "running": None,  # managed by ETL process — status not available here
+        "symbols": app_config.get_watchlist_symbols() or [],
+        "note": "Streaming is managed by the ETL process",
     }
 
     # ── Trade cache ───────────────────────────────────────────────────────
