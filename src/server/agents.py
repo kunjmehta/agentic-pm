@@ -29,6 +29,7 @@ _ALL_ROLES = (
     "order",        # order_node.py
     "synthesizer",  # synthesizer.py
     "classifier",   # classifier.py
+    "analyst",      # analyst_service.py (ETL 10-min summaries)
 )
 
 

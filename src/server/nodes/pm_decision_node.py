@@ -172,6 +172,7 @@ def _process_autonomous_signals(state: dict, signal_batch: Dict[str, Any]) -> di
         Partial state update with order_task_queue.
     """
     from src.common.dao.orders_dao import OrdersDAO
+    from src.common.dao.analysis_dao import AnalysisDAO
     from src.server.models.autonomous_signals import AggregatedSignal
 
     signals_data = signal_batch.get("signals", [])
@@ -196,36 +197,43 @@ def _process_autonomous_signals(state: dict, signal_batch: Dict[str, Any]) -> di
 
     # Check each signal against recent orders
     orders_dao = OrdersDAO()
+    analysis_dao = AnalysisDAO()
     approved_signals = []
 
-    for signal in signals:
-        try:
-            # Check for recent orders (duplicate prevention)
-            recent_orders = orders_dao.get_recent_orders_for_symbol(
-                symbol=signal.symbol,
-                side=signal.action,
-                lookback_hours=24
-            )
-
-            if recent_orders:
-                logger.info(
-                    f"[pm_decision] {signal.symbol}: skipping (found {len(recent_orders)} "
-                    f"recent {signal.action} order(s))"
+    try:
+        for signal in signals:
+            try:
+                # Check for recent orders (duplicate prevention)
+                recent_orders = orders_dao.get_recent_orders_for_symbol(
+                    symbol=signal.symbol,
+                    side=signal.action,
+                    lookback_hours=24
                 )
+
+                if recent_orders:
+                    logger.info(
+                        f"[pm_decision] {signal.symbol}: skipping (found {len(recent_orders)} "
+                        f"recent {signal.action} order(s))"
+                    )
+                    continue
+
+                # Signal passed checks — persist decision before appending
+                try:
+                    _save_decision_result(analysis_dao, signal, state)
+                except Exception as exc:
+                    logger.warning(f"[pm_decision] failed to save strategy result for {signal.symbol}: {exc}")
+
+                approved_signals.append(signal)
+                logger.info(
+                    f"[pm_decision] {signal.symbol}: approved {signal.action} @ {signal.confidence:.2f}"
+                )
+
+            except Exception as exc:
+                logger.error(f"[pm_decision] Error processing {signal.symbol}: {exc}", exc_info=True)
                 continue
-
-            # Signal passed checks
-            approved_signals.append(signal)
-            logger.info(
-                f"[pm_decision] {signal.symbol}: approved {signal.action} @ {signal.confidence:.2f}"
-            )
-
-        except Exception as exc:
-            logger.error(f"[pm_decision] Error processing {signal.symbol}: {exc}", exc_info=True)
-            continue
-
-    # Close DAO
-    orders_dao.close()
+    finally:
+        orders_dao.close()
+        analysis_dao.close()
 
     if not approved_signals:
         logger.info("[pm_decision] No signals approved after validation")
@@ -253,6 +261,45 @@ def _process_autonomous_signals(state: dict, signal_batch: Dict[str, Any]) -> di
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _save_decision_result(dao: Any, signal: Any, state: dict) -> None:
+    """Persist an approved autonomous signal decision to the analysis DB.
+
+    Args:
+        dao: Open ``AnalysisDAO`` instance (caller manages lifecycle).
+        signal: Approved ``AggregatedSignal`` with action, confidence, and source signals.
+        state: Current graph state (used to extract PM reasoning as thought_trace).
+    """
+    from src.common.utils import config as app_config
+
+    indicators: Dict[str, Any] = {}
+    statistics: Dict[str, Any] = {}
+    for src in (signal.source_signals or []):
+        indicators.update(src.indicators or {})
+        statistics.update(src.statistics or {})
+
+    dao.save_strategy_result(
+        symbol=signal.symbol,
+        strategy_name=", ".join(signal.strategies) if signal.strategies else "autonomous",
+        current_price=float(signal.entry_price or 0.0),
+        statistics=statistics,
+        indicators=indicators,
+        signals={
+            "consensus_reached": signal.consensus_reached,
+            "strategy_count": signal.strategy_count,
+        },
+        action=signal.action,
+        confidence=float(signal.confidence),
+        reason=signal.reason or "",
+        entry_price=float(signal.entry_price) if signal.entry_price else None,
+        stop_loss=float(signal.stop_loss) if signal.stop_loss else None,
+        take_profit=float(signal.take_profit) if signal.take_profit else None,
+        thought_trace=state.get("pm_decision_reasoning"),
+        model_used=app_config.get("graph_api.reasoning_model", "gpt-4o-mini"),
+        parameters={"strategies": signal.strategies},
+        timeframe="1Min",
+    )
 
 
 def _summarise_results(execution_results: Dict[str, Any]) -> str:

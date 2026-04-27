@@ -65,6 +65,7 @@ async def _post_broadcast(message: dict) -> None:
 # Archival constants (self-contained since app_state is API-only)
 _ARCHIVAL_INTERVAL_MINUTES: int = 15
 _ARCHIVAL_CUTOFF_MINUTES: int = 120
+_ANALYST_SUMMARY_INTERVAL_MINUTES: int = 10
 
 
 async def _run_periodic_archival() -> None:
@@ -98,6 +99,60 @@ async def _run_periodic_archival() -> None:
             logger.info(f"[archival] shutdown: archived {archived} trade(s)")
         except Exception as exc:
             logger.error(f"[archival] shutdown archival failed: {exc}", exc_info=True)
+
+
+async def _run_periodic_analyst_summaries(watchlist: list) -> None:
+    """Background task: generate 10-minute LLM analyst summaries per ticker.
+
+    Runs every ``_ANALYST_SUMMARY_INTERVAL_MINUTES`` minutes. Each cycle fetches
+    the last 10 minutes of bars, indicators, and signals for every watchlist
+    symbol, calls the LLM, and upserts the result to ``analyst_summaries``.
+    """
+    from src.server.services.analyst_service import analyst_summary_service
+    from src.common.dao.analysis_dao import AnalysisDAO
+    from src.common.utils import config as app_config
+
+    logger.info(
+        f"[analyst-summaries] periodic task started — interval={_ANALYST_SUMMARY_INTERVAL_MINUTES}m"
+    )
+    await asyncio.sleep(60)  # startup grace: let streams settle
+
+    try:
+        while True:
+            window_end = datetime.now()
+            window_start = window_end - timedelta(minutes=_ANALYST_SUMMARY_INTERVAL_MINUTES)
+            analysis_dao = AnalysisDAO()
+            try:
+                for symbol in watchlist:
+                    result = await analyst_summary_service.generate_summary(
+                        symbol, window_start, window_end
+                    )
+                    if result is None:
+                        continue
+                    analysis_dao.save_eod_summary(
+                        symbol=symbol,
+                        timestamp=window_end,
+                        indicators={},
+                        summary_text=result.summary,
+                        signals={
+                            "trend": result.trend,
+                            "trend_reasoning": result.trend_reasoning,
+                            "key_signals": result.key_signals,
+                            "confidence": result.confidence,
+                        },
+                        model_used=app_config.get("graph_api.reasoning_model", "gpt-4o-mini"),
+                    )
+                    logger.info(
+                        f"[analyst-summaries] {symbol} saved — trend={result.trend}"
+                    )
+            except Exception as exc:
+                logger.error(f"[analyst-summaries] cycle error: {exc}", exc_info=True)
+            finally:
+                analysis_dao.close()
+
+            await asyncio.sleep(_ANALYST_SUMMARY_INTERVAL_MINUTES * 60)
+    except asyncio.CancelledError:
+        logger.info("[analyst-summaries] task cancelled")
 
 
 async def _run_streams(watchlist: list) -> None:
@@ -230,6 +285,9 @@ async def main() -> None:
         logger.warning(f"[startup] Historical seeding failed: {exc}", exc_info=True)
 
     archival_task = asyncio.create_task(_run_periodic_archival(), name="live-trades-archival")
+    analyst_task = asyncio.create_task(
+        _run_periodic_analyst_summaries(watchlist), name="analyst-summaries"
+    )
     stream_task = asyncio.create_task(_run_streams(watchlist), name="market-streams")
 
     logger.info("=" * 70)
@@ -237,10 +295,10 @@ async def main() -> None:
     logger.info("=" * 70)
 
     try:
-        await asyncio.gather(archival_task, stream_task)
+        await asyncio.gather(archival_task, analyst_task, stream_task)
     except asyncio.CancelledError:
         logger.info("ETL process shutting down...")
-        for task in (stream_task, archival_task):
+        for task in (stream_task, analyst_task, archival_task):
             if not task.done():
                 task.cancel()
                 try:

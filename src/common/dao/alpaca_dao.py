@@ -691,3 +691,33 @@ class AlpacaDAO(BaseDAO):
         """
 
         return self.fetch_df(query, (symbol, timeframe, start, end))
+
+    def get_strategy_signals_range(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: str = "1Min",
+    ) -> pd.DataFrame:
+        """Retrieve precomputed strategy signals for a symbol over a time window.
+
+        Args:
+            symbol: Stock ticker symbol.
+            start: Inclusive start timestamp.
+            end: Inclusive end timestamp.
+            timeframe: Timeframe string (e.g. ``'1Min'``).
+
+        Returns:
+            DataFrame of signal rows ordered by timestamp ascending.
+        """
+        return self.fetch_df(
+            """
+            SELECT * FROM precomputed_strategy_signals
+            WHERE symbol = ?
+              AND timeframe = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (symbol, timeframe, start, end),
+        )
