@@ -16,6 +16,7 @@ import time
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockTradesRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 from src.common.utils import secrets, get_logger
 from src.common.dao import AlpacaDAO
 
@@ -195,7 +196,8 @@ def _fetch_bars_chunk(
             symbol_or_symbols=symbol,
             timeframe=timeframe_obj,
             start=start_dt,
-            end=end_dt
+            end=end_dt,
+            feed=DataFeed.IEX,
         )
 
         bars = historical_client.get_stock_bars(request_params)
@@ -286,7 +288,8 @@ def fetch_historical_trades(
                 symbol_or_symbols=symbol,
                 start=start_dt,
                 end=end_dt,
-                limit=limit
+                limit=limit,
+                feed=DataFeed.IEX,
             )
 
             # Add page_token if this is not the first page

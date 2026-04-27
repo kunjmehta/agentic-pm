@@ -586,3 +586,38 @@ async def get_registry_endpoint() -> Dict[str, Any]:
     """
     schema = get_registry_schema()
     return {"registry": schema, "count": len(schema)}
+
+
+# ── Signal batch (for agent process) ──────────────────────────────────────────
+
+
+@router.get("/v1/agent/signal-batch")
+@handle_http_errors
+async def get_signal_batch(
+    min_confidence: float = Query(default=0.65, ge=0.0, le=1.0),
+    lookback_minutes: int = Query(default=30, ge=1, le=1440),
+) -> Dict[str, Any]:
+    """Run SignalAggregator server-side and return the resulting batch.
+
+    Intended for the agent process, which must not open analysis or portfolio
+    DBs directly (Windows DuckDB single-writer constraint). All DB access
+    happens here in the API process, which owns those write connections.
+
+    Args:
+        min_confidence: Minimum signal confidence threshold (0–1).
+        lookback_minutes: How many minutes back to look for signals (1–1440).
+
+    Returns:
+        Serialised SignalBatch, or ``{"batch": null}`` when no signals pass.
+    """
+    from src.server.services.signal_aggregator import SignalAggregator
+
+    aggregator = SignalAggregator()
+    batch = await aggregator.generate_signal_batch(
+        min_confidence=min_confidence,
+        lookback_minutes=lookback_minutes,
+    )
+    return {
+        "batch": batch.model_dump() if batch else None,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }

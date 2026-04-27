@@ -11,6 +11,8 @@
 
     Strict Iteration: Follow the cycle: Plan → Code → Test → Review → Iterate until all tests pass before going back to the user to approve a commit.
 
+    Follow SOLID principles, especially dependency injection and single responsibility principle for every function, module, component
+
 🎯 PROJECT CONTEXT
 
     Project Type: Single-developer AI-driven Python application. This is a prototype autonomous multi-agent zero person portfolio manager

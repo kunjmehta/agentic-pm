@@ -13,10 +13,11 @@ processes simultaneously, even while another process holds the write lock.
 
 Write ownership (single source of truth):
 - ``market``    → ETL process
-- ``analysis``  → ETL process
+- ``analysis``  → API process (schema init at startup; agent writes signals via API)
 - ``portfolio`` → API process
 - ``backtest``  → API process
-- Agent process opens all databases read-only.
+- ETL opens market read-write; all others read-only (ETL does not use analysis).
+- Agent process opens all databases read-only; persists data via API HTTP calls.
 
 Usage::
 

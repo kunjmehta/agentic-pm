@@ -20,21 +20,47 @@ import signal
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
-# ETL owns all writes to market and analysis databases.
-# Other processes (API, Agent) open these files read-only.
+# ETL owns writes to market only. API process owns analysis, portfolio, backtest.
+# Agent process opens all databases read-only and writes via the API process.
 
 _project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_project_root))
 
+import httpx
+
 from src.common.utils import get_logger, config as app_config
 from src.common.ingestion import (
+    set_ws_broadcaster,
     start_background_flush_task,
     stop_background_flush_task,
 )
 from src.server.registry.register_strategies import ensure_strategies_registered
 
 logger = get_logger(__name__)
+
+# Persistent HTTP client for forwarding WS broadcasts to the API process.
+_http_client: Optional[httpx.AsyncClient] = None
+_API_BROADCAST_URL = "http://127.0.0.1:8000/v1/market/internal/broadcast"
+
+
+async def _api_broadcaster(message: dict) -> None:
+    """Forward a bar/trade broadcast message to the API process via HTTP.
+
+    Fire-and-forget: creates a background task so the stream handler is never
+    delayed waiting for the HTTP round-trip.
+    """
+    if _http_client is None:
+        return
+    asyncio.create_task(_post_broadcast(message))
+
+
+async def _post_broadcast(message: dict) -> None:
+    try:
+        await _http_client.post(_API_BROADCAST_URL, json=message, timeout=2.0)
+    except Exception as exc:
+        logger.debug(f"[broadcast] HTTP forward failed: {exc}")
 
 # Archival constants (self-contained since app_state is API-only)
 _ARCHIVAL_INTERVAL_MINUTES: int = 15
@@ -171,9 +197,16 @@ async def _ensure_historical_data_loaded(symbols: list[str], years: int = 3) -> 
 
 async def main() -> None:
     """ETL process main coroutine — runs until cancelled."""
+    global _http_client
+
     logger.info("=" * 70)
     logger.info("ETL Process starting...")
     logger.info("=" * 70)
+
+    # Register HTTP broadcaster so bar/trade updates reach the API's ws_manager.
+    _http_client = httpx.AsyncClient(timeout=2.0)
+    set_ws_broadcaster(_api_broadcaster)
+    logger.info("[OK] WS broadcaster wired → API process via HTTP")
 
     ensure_strategies_registered()
     logger.info("[OK] Strategies registered")
@@ -215,6 +248,13 @@ async def main() -> None:
                 except (asyncio.CancelledError, asyncio.TimeoutError):
                     pass
         logger.info("ETL process stopped")
+
+    if _http_client is not None:
+        try:
+            await _http_client.aclose()
+            logger.info("[OK] HTTP broadcast client closed")
+        except Exception:
+            pass
 
     try:
         from src.common.db_connections import close_all as _close_db

@@ -21,6 +21,7 @@ from typing import Optional
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 from src.common.utils.container import get_alpaca_dao
 from src.common.ingestion.trade_cache import get_cache
 from src.common.utils import get_logger, config, secrets
@@ -308,7 +309,8 @@ def _get_previous_close_from_alpaca(symbol: str) -> Optional[float]:
                 symbol_or_symbols=symbol,
                 timeframe=TimeFrame.Day,
                 start=start_date,
-                end=end_date
+                end=end_date,
+                feed=DataFeed.IEX,
             )
 
             bars = client.get_stock_bars(request)

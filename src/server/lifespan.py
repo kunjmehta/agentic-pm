@@ -55,6 +55,11 @@ async def lifespan(app: FastAPI):
     _state._graph = build_graph(checkpointer=_state._checkpointer)
     logger.info("[OK] Graph compiled with HITL interrupt_before=['executor_node']")
 
+    # ── Schema init — API owns analysis writes ─────────────────────────────────
+    from src.common.dao.analysis_dao import AnalysisDAO
+    AnalysisDAO()  # creates analysis.duckdb + schema if not present
+    logger.info("[OK] Analysis DB schema ensured")
+
     # ── IoC callbacks ──────────────────────────────────────────────────────────
     from src.server.ws_manager import ws_manager as _ws_manager
     from src.common.registry import strategy_registry as _strategy_registry_mod

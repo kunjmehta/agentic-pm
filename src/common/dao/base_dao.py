@@ -423,9 +423,12 @@ class BaseDAO:
                 sql_content = f.read()
 
             conn = self.connect()
-            # DuckDB only executes the first statement in a multi-statement string;
-            # split by ';' and execute each statement individually.
-            statements = [s.strip() for s in sql_content.split(';')]
+            # Strip -- comments before splitting on ';' to avoid fragments from
+            # semicolons inside comment text (e.g. "persisted; intraday" in a --
+            # comment line becoming a bare non-SQL token after the split).
+            import re
+            stripped = re.sub(r'--[^\n]*', '', sql_content)
+            statements = [s.strip() for s in stripped.split(';')]
             for stmt in statements:
                 if stmt:
                     conn.execute(stmt)

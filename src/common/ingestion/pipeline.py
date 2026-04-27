@@ -515,11 +515,10 @@ class IndicatorsETL:
 
             for name, skill in strategies.items():
                 try:
-                    result = skill.analyze_bars(window_df)
+                    raw = skill.analyze_bars(window_df)
+                    result = raw.model_dump() if hasattr(raw, "model_dump") else (raw if isinstance(raw, dict) else {})
                 except Exception as e:
                     logger.debug(f"Strategy {name} error at index {i}: {e}")
-                    result = {}
-                if not isinstance(result, dict):
                     result = {}
 
                 rec = result.get("trade_recommendation", {})

@@ -9,7 +9,7 @@ import asyncio
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from src.server.ws_manager import ws_manager
@@ -19,6 +19,17 @@ from src.common.utils import get_logger
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/market", tags=["market"])
+
+
+@router.post("/internal/broadcast")
+async def internal_broadcast(message: Dict[str, Any]) -> Dict[str, bool]:
+    """Internal endpoint — ETL process forwards bar/trade updates to WS clients.
+
+    Called by the ETL process broadcaster so that the API's connected ws_manager
+    receives real-time data even though ETL runs in a separate OS process.
+    """
+    await ws_manager.broadcast(message)
+    return {"ok": True}
 
 
 @router.get("/previous-close")
