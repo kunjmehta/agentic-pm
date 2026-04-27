@@ -1,1 +1,1 @@
-"""Common sub-package: shared DAO, core, data_gatherer, ETL, skills, and utils."""
+"""Common sub-package: shared DAO, core, ingestion, skills, and utils."""

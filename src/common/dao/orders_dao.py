@@ -1,6 +1,6 @@
 """Orders Data Access Object.
 
-Manages the ``live_orders`` table in ``market_data.duckdb``.
+Manages the ``live_orders`` table in ``portfolio.duckdb``.
 Records every broker order submitted through the HITL approval flow or the
 direct orders API and tracks fill status via the reconciliation loop.
 """
@@ -21,15 +21,15 @@ logger = get_logger(__name__)
 
 
 class OrdersDAO(BaseDAO):
-    """DAO for the ``live_orders`` table in the market data database.
+    """DAO for the ``live_orders`` table in the portfolio database.
 
     Inherits all DuckDB helpers from ``BaseDAO`` and targets the
-    ``market`` database (``data/market_data.duckdb``).
+    ``portfolio`` database (``data/portfolio.duckdb``).
     """
 
     def __init__(self) -> None:
-        """Initialize with the market data database."""
-        super().__init__(db_type="market")
+        """Initialize with the portfolio database."""
+        super().__init__(db_type="portfolio")
         self._ensure_table()
 
     # ------------------------------------------------------------------
@@ -37,33 +37,15 @@ class OrdersDAO(BaseDAO):
     # ------------------------------------------------------------------
 
     def _ensure_table(self) -> None:
-        """Create ``live_orders`` if it does not already exist.
+        """Create ``live_orders`` table and indexes if they do not already exist.
 
-        Safe to call on every startup — uses ``IF NOT EXISTS``.
+        Delegates to the canonical schema file so the DDL lives in one place.
         """
-        self.execute("""
-            CREATE TABLE IF NOT EXISTS live_orders (
-                id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-                signal_id INTEGER,
-                symbol VARCHAR NOT NULL,
-                side VARCHAR NOT NULL,
-                qty INTEGER NOT NULL,
-                order_type VARCHAR DEFAULT 'market',
-                limit_price DECIMAL(10, 4),
-                broker_order_id VARCHAR,
-                status VARCHAR DEFAULT 'submitted',
-                submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                filled_at TIMESTAMP,
-                filled_price DECIMAL(10, 4),
-                realized_pnl DECIMAL(15, 4)
-            )
-        """)
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS idx_live_orders_status ON live_orders(status, submitted_at DESC)"
+        schema_file = (
+            Path(__file__).parent.parent.parent.parent
+            / "config" / "schema" / "orders_schema.sql"
         )
-        self.execute(
-            "CREATE INDEX IF NOT EXISTS idx_live_orders_signal ON live_orders(signal_id)"
-        )
+        self.execute_schema_file(str(schema_file), check_table="live_orders")
 
     # ------------------------------------------------------------------
     # Write operations
@@ -248,56 +230,47 @@ class OrdersDAO(BaseDAO):
             return []
         return df.to_dict(orient="records")
 
+    def get_recent_orders_by_symbols(
+        self,
+        symbol_side_pairs: List[tuple],
+        lookback_hours: int = 24,
+    ) -> dict:
+        """Return recent order counts keyed by (symbol, side) for batch duplicate detection.
 
-# =============================================================================
-# Main block — smoke test
-# =============================================================================
+        Queries all symbols in one round-trip instead of one query per symbol,
+        eliminating the N+1 pattern in ``signal_aggregator.generate_signal_batch``.
 
-if __name__ == "__main__":
-    import json
+        Args:
+            symbol_side_pairs: List of (symbol, side) tuples to check.
+            lookback_hours: Hours to look back for recent orders. Default 24.
 
-    print("=" * 60)
-    print("OrdersDAO smoke test")
-    print("=" * 60)
+        Returns:
+            Dict mapping ``(symbol, side)`` → count of recent matching orders.
+            Pairs not in the result had zero recent orders.
+        """
+        if not symbol_side_pairs:
+            return {}
 
-    dao = OrdersDAO()
-    print("[OK] Table ensured")
+        from datetime import timedelta
 
-    # Insert a test order
-    oid = dao.save_order(
-        symbol="AAPL",
-        side="buy",
-        qty=10,
-        broker_order_id="test-broker-id-001",
-        order_type="market",
-        signal_id=None,
-    )
-    print(f"[OK] save_order → id={oid}")
+        cutoff = datetime.now() - timedelta(hours=lookback_hours)
+        symbols = list({pair[0].upper() for pair in symbol_side_pairs})
+        placeholders = ", ".join("?" for _ in symbols)
 
-    # Check submitted list
-    rows = dao.get_submitted_orders()
-    assert any(r["broker_order_id"] == "test-broker-id-001" for r in rows), \
-        "Test order not found in submitted list"
-    print(f"[OK] get_submitted_orders → {len(rows)} row(s)")
-
-    # Mark as filled
-    dao.update_fill(
-        broker_order_id="test-broker-id-001",
-        filled_at=datetime.now(),
-        filled_price=175.50,
-        realized_pnl=12.50,
-    )
-    print("[OK] update_fill")
-
-    # Verify no longer in submitted
-    rows_after = dao.get_submitted_orders()
-    assert not any(r["broker_order_id"] == "test-broker-id-001" for r in rows_after), \
-        "Filled order should not appear in submitted list"
-    print("[OK] order removed from submitted after fill")
-
-    # Cleanup
-    dao.execute("DELETE FROM live_orders WHERE broker_order_id = 'test-broker-id-001'")
-    dao.close()
-    print("=" * 60)
-    print("All smoke tests passed")
-    print("=" * 60)
+        df = self.fetch_df(
+            f"SELECT symbol, side, COUNT(*) AS cnt "
+            f"FROM live_orders "
+            f"WHERE symbol IN ({placeholders}) "
+            f"  AND submitted_at >= ? "
+            f"GROUP BY symbol, side",
+            tuple(symbols) + (cutoff,),
+        )
+        if df.empty:
+            return {}
+        # Build lookup; filter to only the requested (symbol, side) pairs
+        requested = {(p[0].upper(), p[1].lower()) for p in symbol_side_pairs}
+        return {
+            (row["symbol"], row["side"]): int(row["cnt"])
+            for _, row in df.iterrows()
+            if (row["symbol"], row["side"]) in requested
+        }

@@ -97,12 +97,7 @@ class VolumeSkill:
 volume_skill = VolumeSkill()
 
 
-def calc_volume_flow(df: pd.DataFrame) -> Dict:
-    """Legacy alias: delegate to VolumeSkill.analyze_bars."""
-    return volume_skill.analyze_bars(df)
-
-
-__all__ = ["VolumeSkill", "volume_skill", "calc_volume_flow"]
+__all__ = ["VolumeSkill", "volume_skill"]
 
 
 if __name__ == "__main__":

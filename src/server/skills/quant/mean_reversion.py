@@ -427,10 +427,7 @@ class MeanReversionSkill:
 # Singleton
 mean_reversion_skill = MeanReversionSkill()
 
-# Backward-compat alias used by registry
-MeanReversionStrategy = MeanReversionSkill
-
-__all__ = ["MeanReversionSkill", "mean_reversion_skill", "MeanReversionStrategy"]
+__all__ = ["MeanReversionSkill", "mean_reversion_skill"]
 
 
 if __name__ == "__main__":

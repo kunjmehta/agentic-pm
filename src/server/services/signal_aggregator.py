@@ -14,11 +14,12 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
-from src.common.dao.strategy_dao import StrategyDAO
+from src.common.dao.analysis_dao import AnalysisDAO
 from src.common.dao.orders_dao import OrdersDAO
 from src.common.dao.alpaca_dao import AlpacaDAO
 from src.common.utils import get_logger
@@ -37,18 +38,18 @@ class SignalAggregator:
 
     def __init__(
         self,
-        strategy_dao: Optional[StrategyDAO] = None,
+        analysis_dao: Optional[AnalysisDAO] = None,
         orders_dao: Optional[OrdersDAO] = None,
         portfolio_dao: Optional[AlpacaDAO] = None
     ):
         """Initialize SignalAggregator with DAO dependencies.
 
         Args:
-            strategy_dao: DAO for strategy results. Auto-created if None.
+            analysis_dao: DAO for strategy results. Auto-created if None.
             orders_dao: DAO for order history. Auto-created if None.
             portfolio_dao: DAO for portfolio data. Auto-created if None.
         """
-        self.strategy_dao = strategy_dao or StrategyDAO()
+        self.analysis_dao = analysis_dao or AnalysisDAO()
         self.orders_dao = orders_dao or OrdersDAO()
         self.portfolio_dao = portfolio_dao or AlpacaDAO()
 
@@ -67,9 +68,10 @@ class SignalAggregator:
             List of StrategySignal objects.
         """
         try:
-            raw_signals = self.strategy_dao.get_actionable_signals_by_time(
+            raw_signals = await asyncio.to_thread(
+                self.analysis_dao.get_actionable_signals_by_time,
                 min_confidence=min_confidence,
-                lookback_minutes=lookback_minutes
+                lookback_minutes=lookback_minutes,
             )
 
             if not raw_signals:
@@ -231,7 +233,7 @@ class SignalAggregator:
                         stop_loss=stop,
                         take_profit=target,
                         reason=combined_reason,
-                        timestamp=datetime.now(),
+                        timestamp=max(s.timestamp for s in best_signals),
                         source_signals=best_signals
                     )
 
@@ -247,83 +249,48 @@ class SignalAggregator:
         logger.info(f"[signal_agg] Aggregated {len(aggregated)} symbols from {len(signals)} signals")
         return aggregated
 
-    async def check_recent_orders(
+    def _check_portfolio_constraints(
         self,
         symbol: str,
         action: str,
-        lookback_hours: int = 24
-    ) -> bool:
-        """Check if a similar order was recently placed.
-
-        Args:
-            symbol: Stock ticker.
-            action: Proposed action ("buy" or "sell").
-            lookback_hours: How far back to check. Default 24.
-
-        Returns:
-            True if recent order exists (duplicate), False otherwise.
-        """
-        try:
-            recent = self.orders_dao.get_recent_orders_for_symbol(
-                symbol=symbol,
-                side=action,
-                lookback_hours=lookback_hours
-            )
-            if recent:
-                logger.info(
-                    f"[signal_agg] {symbol} duplicate check: found {len(recent)} "
-                    f"recent {action} order(s) in last {lookback_hours}h"
-                )
-                return True
-            return False
-        except Exception as exc:
-            logger.error(f"[signal_agg] Error checking recent orders for {symbol}: {exc}")
-            return False  # On error, don't block (fail-open)
-
-    async def validate_portfolio_constraints(
-        self,
-        symbol: str,
-        action: str
+        account: dict,
+        positions_by_symbol: dict,
     ) -> Tuple[bool, str]:
-        """Check if order would violate position limits.
-
-        Validates:
-        - Max position size: 5% of equity
-        - Already at max position for this symbol
+        """Check if an order would violate position limits using pre-fetched data.
 
         Args:
             symbol: Stock ticker.
             action: Proposed action ("buy" or "sell").
+            account: Pre-fetched account dict (from ``fetch_account_info``).
+            positions_by_symbol: Pre-fetched positions keyed by symbol.
 
         Returns:
             Tuple (is_valid: bool, reason: str).
         """
         try:
-            # Get account equity
-            from src.common.external.alpaca_portfolio import fetch_account_info, fetch_positions
-            account = fetch_account_info()
-            equity = float(account.get('equity', 0))
-
+            equity = float(account.get("equity", 0))
             if equity == 0:
                 return False, "Account equity is zero"
 
             max_position_value = equity * 0.05  # 5% max
 
-            # Get current position
-            positions = fetch_positions()
-            current_position = next((p for p in positions if p['symbol'] == symbol), None)
-
             if action == "buy":
+                current_position = positions_by_symbol.get(symbol)
                 if current_position:
-                    current_value = float(current_position.get('market_value', 0))
+                    current_value = float(current_position.get("market_value", 0))
                     if current_value >= max_position_value:
-                        return False, f"Position already at max (${current_value:,.2f} >= ${max_position_value:,.2f})"
+                        return False, (
+                            f"Position already at max "
+                            f"(${current_value:,.2f} >= ${max_position_value:,.2f})"
+                        )
 
-            # If we get here, constraints are satisfied
             return True, "Portfolio constraints satisfied"
 
         except Exception as exc:
-            logger.error(f"[signal_agg] Error validating constraints for {symbol}: {exc}", exc_info=True)
+            logger.error(
+                f"[signal_agg] Error validating constraints for {symbol}: {exc}",
+                exc_info=True,
+            )
             return False, f"Validation error: {exc}"
 
     async def generate_signal_batch(
@@ -332,6 +299,9 @@ class SignalAggregator:
         lookback_minutes: int = 30
     ) -> Optional[SignalBatch]:
         """Main orchestration: fetch → aggregate → validate → return batch.
+
+        Fetches shared account state and order history once before the
+        validation loop (avoids N Alpaca API calls → 2 calls).
 
         Args:
             min_confidence: Minimum confidence threshold. Default 0.65.
@@ -358,23 +328,32 @@ class SignalAggregator:
                 logger.info("[signal_agg] No signals passed aggregation")
                 return None
 
-            # Step 3: Filter by recent orders and portfolio constraints
+            # Step 3: Fetch shared state ONCE (2 Alpaca calls total regardless of signal count)
+            from src.common.external.alpaca_portfolio import fetch_account_info, fetch_positions
+            account = await asyncio.to_thread(fetch_account_info)
+            raw_positions = await asyncio.to_thread(fetch_positions)
+            positions_by_symbol = {p["symbol"]: p for p in raw_positions}
+
+            # Batch duplicate-order check (1 DB query for all symbols)
+            symbol_side_pairs = [(sym, sig.action) for sym, sig in aggregated.items()]
+            recent_order_counts = await asyncio.to_thread(
+                self.orders_dao.get_recent_orders_by_symbols,
+                symbol_side_pairs,
+                lookback_hours=24,
+            )
+
+            # Step 4: Filter by recent orders and portfolio constraints
             validated_signals = []
             for symbol, agg_signal in aggregated.items():
-                # Check for duplicate orders
-                is_duplicate = await self.check_recent_orders(
-                    symbol=symbol,
-                    action=agg_signal.action,
-                    lookback_hours=24
-                )
-                if is_duplicate:
+                if recent_order_counts.get((symbol, agg_signal.action), 0) > 0:
                     logger.info(f"[signal_agg] {symbol}: skipping (duplicate order)")
                     continue
 
-                # Check portfolio constraints
-                is_valid, reason = await self.validate_portfolio_constraints(
+                is_valid, reason = self._check_portfolio_constraints(
                     symbol=symbol,
-                    action=agg_signal.action
+                    action=agg_signal.action,
+                    account=account,
+                    positions_by_symbol=positions_by_symbol,
                 )
                 if not is_valid:
                     logger.info(f"[signal_agg] {symbol}: skipping ({reason})")

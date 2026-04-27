@@ -21,27 +21,22 @@ The ``skills.py`` shim also re-exports all of these for backward compat.
 from src.server.skills.quant.momentum_skill import (
     MomentumSkill,
     momentum_skill,
-    calc_momentum_package,
 )
 from src.server.skills.quant.volatility_skill import (
     VolatilitySkill,
     volatility_skill,
-    calc_volatility_bands,
 )
 from src.server.skills.quant.volume_skill import (
     VolumeSkill,
     volume_skill,
-    calc_volume_flow,
 )
 from src.server.skills.quant.candlestick_skill import (
     CandlestickSkill,
     candlestick_skill,
-    analyze_candle_structure,
 )
 from src.server.skills.quant.mean_reversion import (
     MeanReversionSkill,
     mean_reversion_skill,
-    MeanReversionStrategy,
 )
 
 # Day trading strategy classes
@@ -114,11 +109,5 @@ __all__ = [
     "golden_cross_skill",
     "breakout_52w_skill",
     "earnings_drift_skill",
-    "buy_and_hold_skill",
-    # Legacy aliases
-    "calc_momentum_package",
-    "calc_volatility_bands",
-    "calc_volume_flow",
-    "analyze_candle_structure",
-    "MeanReversionStrategy",
+    "buy_and_hold_skill"
 ]

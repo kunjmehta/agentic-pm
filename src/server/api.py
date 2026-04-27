@@ -1,18 +1,46 @@
-"""FastAPI server for the semi-auto multi-agent portfolio manager.
+"""FastAPI server for the trading multi-agent portfolio manager.
 
-Runs on port 8000.  All endpoint logic lives in src/semi_auto/routers/*.
+Runs on port 8000.  All endpoint logic lives in src/server/routers/*.
 
 Two-phase HITL flow:
-  POST /v1/query         -> runs reasoning nodes -> returns TaskPreviewResponse
-  POST /v1/approve/{id}  -> resumes graph -> returns SemiAutoResponse
-  POST /v1/reject/{id}   -> cancels pending execution
+  POST /v1/query              -> reasoning nodes -> TaskPreviewResponse (interrupt)
+  POST /v1/approve/{id}       -> resume graph   -> SemiAutoResponse
+  POST /v1/reject/{id}        -> cancel pending execution
+
+Order execution endpoints (src/server/routers/orders.py):
+  POST /v1/orders/execute     -> place market or limit order
+  POST /v1/orders/scale       -> scale position to target portfolio %
+  POST /v1/orders/signal      -> execute strategy signal (buy/sell/hold)
+  POST /v1/orders/close/{sym} -> liquidate a position
+  DELETE /v1/orders/{id}      -> cancel an open order
+
+Configuration endpoints (src/server/routers/config.py):
+  GET  /v1/config             -> full configuration
+  GET  /v1/config/ui          -> UI-formatted configuration
+  PUT  /v1/config/ui          -> update configuration from UI format
+  GET  /v1/config/{section}   -> specific config section
+  PUT  /v1/config/{section}   -> update config section
+  POST /v1/config/watchlist/add         -> add ticker with strategies
+  DELETE /v1/config/watchlist/{symbol}  -> remove ticker from watchlist
+
+Streaming / real-time endpoints:
+  GET /v1/telemetry/stream/{thread_id}  -> SSE stream of execution telemetry
+  WS  /v1/portfolio/ws                  -> WebSocket for real-time portfolio updates
+  WS  /v1/redis/stream/{symbol}         -> WebSocket Redis stream proxy (market data)
+  GET /v1/redis/health                  -> Redis connection health check
 
 DAO read endpoints:
-  GET /v1/market/...        AlpacaDAO
-  GET /v1/fundamentals/...  AlphaVantageDAO
-  GET /v1/analyst/...       AnalystDAO
-  GET /v1/strategy/...      StrategyDAO
-  GET /v1/backtest/...      BacktestDAO
+  GET /v1/market/...          AlpacaDAO (bars, quotes, trades, snapshots)
+  GET /v1/fundamentals/...    AlphaVantageDAO (income, balance, earnings, etc.)
+  GET /v1/analyst/...         AnalysisDAO (EOD analyst summaries)
+  GET /v1/strategy/...        AnalysisDAO (strategy signals and results)
+  GET /v1/backtest/...        BacktestDAO (backtest runs, metrics, equity curves)
+  GET /v1/portfolio/...       Portfolio positions and history
+Utility endpoints:
+  GET /v1/health              -> liveness check
+  GET /v1/registry            -> list registered agent functions
+  POST /v1/ingestion/...      -> trigger data ingestion pipeline
+  /v1/sandbox/...             -> Daytona cloud sandbox (Monaco editor + quant agent)
 """
 
 import sys
@@ -36,9 +64,10 @@ from src.server.routers.analyst import router as analyst_router
 from src.server.routers.strategy import router as strategy_router
 from src.server.routers.backtest import router as backtest_router
 from src.server.routers.orders import router as orders_router
-from src.server.routers.reports import router as reports_router
 from src.server.routers.config import router as config_router
 from src.server.routers.telemetry import router as telemetry_router
+from src.server.routers.redis_ws_proxy import router as redis_ws_router
+from src.server.routers.sandbox_router import router as sandbox_router
 from src.common.utils import config as app_config
 from src.server.models.endpoints import RootResponse
 
@@ -74,9 +103,10 @@ app.include_router(analyst_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
 app.include_router(orders_router)
-app.include_router(reports_router)
 app.include_router(config_router)
 app.include_router(telemetry_router)
+app.include_router(redis_ws_router)
+app.include_router(sandbox_router)
 
 
 # -- Root ----------------------------------------------------------------------
@@ -110,6 +140,8 @@ async def root():
             "DELETE /v1/config/watchlist/{symbol}": "Remove ticker from watchlist",
             "GET /v1/telemetry/stream/{thread_id}": "SSE stream of execution telemetry",
             "WS /v1/portfolio/ws": "WebSocket for real-time portfolio updates",
+            "WS /v1/redis/stream/{symbol}": "WebSocket for Redis Stream proxy (real-time market data)",
+            "GET /v1/redis/health": "Redis connection health check",
         },
     }
 

@@ -88,15 +88,14 @@ async def health_detailed():
 
     # Analysis database
     try:
-        from src.common.dao.analytics_dao import AnalyticsDAO
-        dao = AnalyticsDAO()
-        # Check connection by verifying table exists
-        has_metrics = dao.table_exists("strategy_metrics")
+        from src.common.dao.analysis_dao import AnalysisDAO
+        dao = AnalysisDAO()
+        has_summaries = dao.table_exists("analyst_summaries")
         dao.close()
         components["analysis_db"] = {
             "status": "ok",
-            "tables": {"strategy_metrics": has_metrics},
-            "path": "data/analysis.duckdb"
+            "tables": {"analyst_summaries": has_summaries},
+            "path": "data/analysis.duckdb",
         }
     except Exception as exc:
         components["analysis_db"] = {"status": "error", "error": str(exc)}

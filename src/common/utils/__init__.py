@@ -32,6 +32,12 @@ from .logger import (
     LoggerSetup,
 )
 
+# Converter exports
+from .converters import df_to_records
+
+# Prompt loader
+from .prompt_loader import load_prompt
+
 __all__ = [
     # Config
     "config",
@@ -44,4 +50,8 @@ __all__ = [
     "get_logger",
     "setup_logging",
     "LoggerSetup",
+    # Converters
+    "df_to_records",
+    # Prompt loader
+    "load_prompt",
 ]

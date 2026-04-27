@@ -1,4 +1,4 @@
-"""Data availability pre-check node for the semi-auto multi-agent system.
+"""Data availability pre-check node for the trading multi-agent system.
 
 Runs immediately after ``classify_intent`` so every downstream reasoning
 agent (quant, backtester) knows exactly what data already exists in the
@@ -23,6 +23,7 @@ three flags are set to ``False`` and the node returns immediately.
 Sets state field: ``data_availability``
 """
 
+import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,7 +32,9 @@ from typing import Any, Dict, Optional
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
+from src.common.dao import AlpacaDAO
 from src.common.utils import get_logger, config
+from src.server.routers._helpers import dao_context
 
 logger = get_logger(__name__)
 
@@ -62,15 +65,13 @@ def _check_indicators(symbol: str, timeframe: str, now: datetime) -> Dict[str, A
         ``latest_ts`` (ISO string or None).
     """
     try:
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        df = dao.get_computed_indicators(
-            symbol,
-            start=now - timedelta(hours=_RECENCY_HOURS),
-            end=now,
-            timeframe=timeframe,
-        )
-        dao.close()
+        with dao_context(AlpacaDAO) as dao:
+            df = dao.get_computed_indicators(
+                symbol,
+                start=now - timedelta(hours=_RECENCY_HOURS),
+                end=now,
+                timeframe=timeframe,
+            )
         row_count = len(df) if df is not None else 0
         latest_ts: Optional[str] = None
         if row_count > 0 and "timestamp" in df.columns:
@@ -95,16 +96,14 @@ def _check_bars(symbol: str, timeframe: str, now: datetime) -> Dict[str, Any]:
         ``latest_ts`` (ISO string or None).
     """
     try:
-        from src.common.dao import AlpacaDAO
         min_bars = int(config.get("strategy.mean_reversion.lookback", default=_MIN_BARS))
-        dao = AlpacaDAO()
-        df = dao.get_bars(
-            symbol=symbol,
-            start=now - timedelta(days=_BARS_LOOKBACK_DAYS),
-            end=now,
-            timeframe=timeframe,
-        )
-        dao.close()
+        with dao_context(AlpacaDAO) as dao:
+            df = dao.get_bars(
+                symbol=symbol,
+                start=now - timedelta(days=_BARS_LOOKBACK_DAYS),
+                end=now,
+                timeframe=timeframe,
+            )
         bar_count = len(df) if df is not None else 0
         latest_ts: Optional[str] = None
         if bar_count > 0 and "timestamp" in df.columns:
@@ -130,14 +129,12 @@ def _check_trades(symbol: str, now: datetime) -> Dict[str, Any]:
         Dict with ``available`` (bool) and ``trade_count`` (int).
     """
     try:
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        df = dao.get_trades(
-            symbol,
-            start=now - timedelta(hours=_RECENCY_HOURS),
-            end=now,
-        )
-        dao.close()
+        with dao_context(AlpacaDAO) as dao:
+            df = dao.get_trades(
+                symbol,
+                start=now - timedelta(hours=_RECENCY_HOURS),
+                end=now,
+            )
         trade_count = len(df) if df is not None else 0
         return {"available": trade_count > 0, "trade_count": trade_count}
     except Exception as exc:
@@ -145,7 +142,7 @@ def _check_trades(symbol: str, now: datetime) -> Dict[str, Any]:
         return {"available": False, "trade_count": 0}
 
 
-def data_availability_node(state: dict) -> dict:
+async def data_availability_node(state: dict) -> dict:
     """Pre-check data availability for the resolved symbol before agent reasoning.
 
     Runs immediately after ``classify_intent`` so both quant and backtester
@@ -194,6 +191,16 @@ def data_availability_node(state: dict) -> dict:
         logger.info("[data_avail] no symbol — skipping data checks")
         return {"data_availability": result}
 
+    # ── Evict stale cache entries (keeps dict bounded in long-running processes) ─
+    expired_keys = [
+        k for k, (_, ts) in _data_availability_cache.items()
+        if (now - ts).total_seconds() > _CACHE_TTL_SECONDS
+    ]
+    for k in expired_keys:
+        _data_availability_cache.pop(k, None)
+    if expired_keys:
+        logger.debug(f"[data_avail] evicted {len(expired_keys)} expired cache entry(ies)")
+
     # ── Check cache first ──────────────────────────────────────────────────────
     cache_key = (symbol, timeframe)
     if cache_key in _data_availability_cache:
@@ -204,14 +211,8 @@ def data_availability_node(state: dict) -> dict:
                 f"[data_avail] cache HIT for {symbol}/{timeframe} "
                 f"(age={int(age_seconds)}s, TTL={_CACHE_TTL_SECONDS}s)"
             )
-            # Return cached result with promoted flags
-            return {
-                "data_availability": cached_result,
-                "_indicators_available": cached_result["indicators_available"],
-                "_bars_available": cached_result["bars_available"],
-                "_trades_available": cached_result["trades_available"],
-                "_should_precompute_indicators": cached_result.get("should_precompute_indicators", False),
-            }
+            # Return cached result
+            return {"data_availability": cached_result}
         else:
             logger.info(f"[data_avail] cache EXPIRED for {symbol}/{timeframe} (age={int(age_seconds)}s)")
 
@@ -229,9 +230,11 @@ def data_availability_node(state: dict) -> dict:
         f"(strategies={len(strategies)}, precompute={should_precompute}) ..."
     )
 
-    ind = _check_indicators(symbol, timeframe, now)
-    bars = _check_bars(symbol, timeframe, now)
-    trades = _check_trades(symbol, now)
+    ind, bars, trades = await asyncio.gather(
+        asyncio.to_thread(_check_indicators, symbol, timeframe, now),
+        asyncio.to_thread(_check_bars, symbol, timeframe, now),
+        asyncio.to_thread(_check_trades, symbol, now),
+    )
 
     result = {
         "symbol": symbol,
@@ -266,41 +269,49 @@ def data_availability_node(state: dict) -> dict:
     _data_availability_cache[cache_key] = (result, now)
     logger.debug(f"[data_avail] cache UPDATED for {symbol}/{timeframe} (TTL={_CACHE_TTL_SECONDS}s)")
 
-    return {
-        "data_availability": result,
-        # Promoted top-level flags — consumed directly by portfolio_node
-        # and graph routing without unpacking the nested dict.
-        "_indicators_available": ind["available"],
-        "_bars_available": bars["available"],
-        "_trades_available": trades["available"],
-        "_should_precompute_indicators": should_precompute,
-    }
+    return {"data_availability": result}
 
 
 if __name__ == "__main__":
     """Functional test against the live market DB."""
     import json
 
-    print("=" * 60)
-    print("data_availability_node Functional Test")
-    print("=" * 60)
+    async def _run_tests() -> None:
+        print("=" * 60)
+        print("data_availability_node Functional Test")
+        print("=" * 60)
 
-    # Test 1: known symbol
-    print("\n[1/2] Testing with symbol=AAPL ...")
-    r1 = data_availability_node({"symbol": "AAPL"})
-    da = r1["data_availability"]
-    print(json.dumps(da, indent=2, default=str))
-    assert "indicators_available" in da
-    assert "bars_available" in da
-    assert "trades_available" in da
-    print("[OK] All flags present")
+        # Test 1: known symbol
+        print("\n[1/2] Testing with symbol=AAPL ...")
+        r1 = await data_availability_node({"symbol": "AAPL"})
+        da = r1["data_availability"]
+        print(json.dumps(da, indent=2, default=str))
+        assert "indicators_available" in da
+        assert "bars_available" in da
+        assert "trades_available" in da
+        print("[OK] All flags present")
 
-    # Test 2: no symbol (portfolio query)
-    print("\n[2/2] Testing with symbol=None ...")
-    r2 = data_availability_node({"symbol": None})
-    da2 = r2["data_availability"]
-    assert da2["indicators_available"] is False
-    assert da2["bars_available"] is False
-    print("[OK] Symbol=None → all False")
+        # Test 2: no symbol (portfolio query)
+        print("\n[2/2] Testing with symbol=None ...")
+        r2 = await data_availability_node({"symbol": None})
+        da2 = r2["data_availability"]
+        assert da2["indicators_available"] is False
+        assert da2["bars_available"] is False
+        print("[OK] Symbol=None → all False")
 
-    print("\n[ALL OK] data_availability_node smoke test passed")
+        # Test 3: cache eviction (inject a stale entry, verify it is removed)
+        print("\n[3/3] Testing cache eviction ...")
+        stale_key = ("STALE_SYM", "1Min")
+        stale_ts = datetime.now(timezone.utc).replace(
+            second=0, microsecond=0
+        ) - __import__("datetime").timedelta(seconds=_CACHE_TTL_SECONDS + 60)
+        _data_availability_cache[stale_key] = ({}, stale_ts)
+        assert stale_key in _data_availability_cache, "Setup: stale entry not inserted"
+        # Trigger a real node call so eviction runs
+        await data_availability_node({"symbol": "AAPL"})
+        assert stale_key not in _data_availability_cache, "Stale entry was not evicted"
+        print("[OK] Stale cache entry evicted correctly")
+
+        print("\n[ALL OK] data_availability_node smoke test passed")
+
+    asyncio.run(_run_tests())

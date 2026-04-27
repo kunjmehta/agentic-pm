@@ -64,12 +64,18 @@ class BaseDAO:
         # Handle in-memory database as special case
         if db_path == ":memory:":
             self.db_path = db_path
+            self._use_shared_conn = False
         else:
             # Ensure path is absolute
             if not Path(db_path).is_absolute():
                 db_path = str(project_root / db_path)
 
             self.db_path = db_path
+            # Use the shared WAL connection only when the path matches a known DB_FILE_MAP
+            # entry. Custom paths (tests, temp files) get a private connection.
+            abs_map = {str(project_root / v): k for k, v in self.DB_FILE_MAP.items()}
+            self._db_type_key: Optional[str] = abs_map.get(self.db_path)
+            self._use_shared_conn: bool = self._db_type_key is not None
 
             # Ensure database directory exists (only if not already there)
             db_dir = Path(self.db_path).parent
@@ -83,12 +89,25 @@ class BaseDAO:
     def connect(self) -> duckdb.DuckDBPyConnection:
         """Get or create database connection.
 
+        For known DB types (market, portfolio, analysis, backtest) returns the
+        process-level shared WAL connection from :mod:`src.common.db_connections`.
+        For custom paths (tests, in-memory) falls back to a private connection.
+
         Returns:
             DuckDB connection instance
 
         Raises:
             Exception: If connection fails
         """
+        if getattr(self, '_use_shared_conn', False) and self._db_type_key:
+            try:
+                from src.common.db_connections import get_connection
+                return get_connection(self._db_type_key)
+            except Exception as e:
+                error_msg = f"Failed to get shared connection for {self._db_type_key}: {str(e)}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
+
         if self._conn is None:
             try:
                 self._conn = duckdb.connect(self.db_path)
@@ -404,9 +423,12 @@ class BaseDAO:
                 sql_content = f.read()
 
             conn = self.connect()
-            # DuckDB only executes the first statement in a multi-statement string;
-            # split by ';' and execute each statement individually.
-            statements = [s.strip() for s in sql_content.split(';')]
+            # Strip -- comments before splitting on ';' to avoid fragments from
+            # semicolons inside comment text (e.g. "persisted; intraday" in a --
+            # comment line becoming a bare non-SQL token after the split).
+            import re
+            stripped = re.sub(r'--[^\n]*', '', sql_content)
+            statements = [s.strip() for s in stripped.split(';')]
             for stmt in statements:
                 if stmt:
                     conn.execute(stmt)
@@ -425,62 +447,3 @@ class BaseDAO:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
-
-
-if __name__ == "__main__":
-    """Test BaseDAO functionality."""
-    print("=" * 60)
-    print("Testing BaseDAO")
-    print("=" * 60)
-
-    # Create test DAO
-    dao = BaseDAO(db_path="data/test.duckdb")
-
-    # Test 1: Create table
-    print("\n1. Creating test table...")
-    try:
-        dao.execute("""
-            CREATE TABLE IF NOT EXISTS test_table (
-                id INTEGER PRIMARY KEY,
-                name VARCHAR,
-                value DOUBLE
-            )
-        """)
-        print("   [OK] Table created")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 2: Insert DataFrame
-    print("\n2. Inserting test data...")
-    try:
-        test_df = pd.DataFrame({
-            'id': [1, 2, 3],
-            'name': ['Alice', 'Bob', 'Charlie'],
-            'value': [10.5, 20.3, 15.7]
-        })
-        rows = dao.insert_df("test_table", test_df, if_exists="append")
-        print(f"   [OK] Inserted {rows} rows")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 3: Query data
-    print("\n3. Querying data...")
-    try:
-        result = dao.fetch_df("SELECT * FROM test_table ORDER BY id")
-        print(f"   [OK] Retrieved {len(result)} rows")
-        print(f"\n{result}")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 4: Check table exists
-    print("\n4. Checking table exists...")
-    exists = dao.table_exists("test_table")
-    print(f"   [OK] Table exists: {exists}")
-
-    # Cleanup
-    print("\n5. Cleaning up...")
-    dao.execute("DROP TABLE IF EXISTS test_table")
-    dao.close()
-    print("   [OK] Test complete")
-
-    print("\n" + "=" * 60)

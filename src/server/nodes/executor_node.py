@@ -1,4 +1,4 @@
-"""Executor node for the semi-auto multi-agent system.
+"""Executor node for the trading multi-agent system.
 
 Reads all three task queues (portfolio, quant, backtester) from state and
 executes the planned functions. Independent tasks run in parallel via
@@ -22,6 +22,10 @@ project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.common.utils import get_logger
+import src.server.app_state as _state
+from src.server.constants import MAX_READ_WORKERS, MAX_WRITE_WORKERS, METADATA_KEYS
+from src.server.registry.functions import FUNCTION_ACCESS, FUNCTION_REGISTRY
+from src.server.services.execution_bus import execution_bus
 
 logger = get_logger(__name__)
 
@@ -41,57 +45,9 @@ def _push_event(thread_id: Optional[str], event: dict) -> None:
     if not thread_id:
         return
     try:
-        import src.server.app_state as _state
-        q = _state._execution_queues.get(thread_id)
-        loop = _state._event_loop
-        if q is not None and loop is not None and loop.is_running():
-            loop.call_soon_threadsafe(q.put_nowait, event)
+        execution_bus.publish_threadsafe(thread_id, event, _state._event_loop)
     except Exception:
         pass  # telemetry failures must never break execution
-
-MAX_READ_WORKERS = 12  # Read-heavy tasks (fetch, analyze, compute)
-MAX_WRITE_WORKERS = 4  # Write tasks (orders, DB writes) — conservative for DuckDB
-
-# Read-only functions that can run with higher parallelism
-READ_ONLY_FUNCTIONS = frozenset({
-    "get_portfolio_status",
-    "get_positions_summary",
-    "check_portfolio_health",
-    "check_data_availability",
-    "calc_momentum",
-    "calc_volatility",
-    "calc_volume",
-    "analyze_candles",
-    "calc_mean_reversion",
-    "backtest_strategy",
-    "snapshot_worth",
-    # Strategy signal functions
-    "vwap_reversion_signal",
-    "opening_range_breakout_signal",
-    "rsi_divergence_scalp_signal",
-    "momentum_burst_signal",
-    "golden_cross_signal",
-    "breakout_52w_signal",
-    "mean_reversion_daily_signal",
-    "earnings_drift_signal",
-})
-
-# Write functions that require conservative parallelism
-WRITE_FUNCTIONS = frozenset({
-    "execute_order",
-    "close_position",
-    "scale_position",
-    "execute_strategy_signal",
-    "save_eod_snapshot",
-    "swap_positions",
-})
-
-# Task-level metadata keys that must never be passed as function parameters.
-# These are top-level planning fields emitted by the LLM agents alongside params.
-_METADATA_KEYS = frozenset({
-    "task_id", "priority", "depends_on", "workflow_type",
-    "note", "metrics_requested", "description", "retry_count",
-})
 
 
 # ── Numpy/pandas type conversion ─────────────────────────────────────────────
@@ -141,8 +97,6 @@ def _run_task(task: Dict[str, Any], extra_params: Dict[str, Any]) -> Dict[str, A
     Returns:
         Result dict with status, result, task_id, function_name, timing.
     """
-    from src.server.registry.functions import FUNCTION_REGISTRY
-
     fn_name = task.get("function_name", "")
     task_id = task.get("task_id", "unknown")
 
@@ -161,7 +115,7 @@ def _run_task(task: Dict[str, Any], extra_params: Dict[str, Any]) -> Dict[str, A
     # Strip task metadata that the LLM sometimes embeds inside params.
     # These are top-level planning fields and must never reach the function.
     raw_params = task.get("params", {})
-    params = {k: v for k, v in raw_params.items() if k not in _METADATA_KEYS}
+    params = {k: v for k, v in raw_params.items() if k not in METADATA_KEYS}
     params.update(extra_params)
     if len(params) != len(raw_params):
         stripped = set(raw_params) - set(params)
@@ -248,6 +202,48 @@ def _extract_dep_params(dep_task_id: str, dep_result: Dict[str, Any], fn_name: s
     return {}
 
 
+def _run_parallel_tasks(
+    tasks: List[Dict[str, Any]],
+    max_workers: int,
+    thread_id: Optional[str],
+    execution_results: Dict[str, Any],
+    tool_timings: List[Dict[str, Any]],
+) -> None:
+    """Run a list of independent tasks in parallel and collect results in-place.
+
+    Args:
+        tasks: Task dicts to execute concurrently.
+        max_workers: Thread pool size cap.
+        thread_id: Conversation thread ID for live telemetry events.
+        execution_results: Mutable dict to write results into (keyed by task_id).
+        tool_timings: Mutable list to append timing records to.
+    """
+    if not tasks:
+        return
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {}
+        for t in tasks:
+            _push_event(thread_id, {
+                "type": "tool_call",
+                "data": {"task_id": t.get("task_id"), "function_name": t.get("function_name"), "status": "started"},
+            })
+            futures[pool.submit(_run_task, t, {})] = t
+        for future in as_completed(futures):
+            result = future.result()
+            execution_results[result["task_id"]] = result
+            if result.get("timing"):
+                tool_timings.append(result["timing"])
+            _push_event(thread_id, {
+                "type": "tool_call",
+                "data": {
+                    "task_id": result["task_id"],
+                    "function_name": result["function_name"],
+                    "status": result["status"],
+                    "duration_ms": result.get("timing", {}).get("duration_ms"),
+                },
+            })
+
+
 def _run_queue(
     state: dict,
     queue_specs: List[tuple],
@@ -302,12 +298,10 @@ def _run_queue(
     independent = [t for t in all_tasks if not t.get("depends_on") and t.get("priority", 1) < 3]
     sequential = [t for t in all_tasks if t.get("depends_on") or t.get("priority", 1) >= 3]
 
-    # Categorize independent tasks as read vs write for optimal parallelism
-    read_tasks = [t for t in independent if t.get("function_name") in READ_ONLY_FUNCTIONS]
-    write_tasks = [t for t in independent if t.get("function_name") in WRITE_FUNCTIONS]
-    # Unknown functions default to write (conservative)
-    unknown_tasks = [t for t in independent if t.get("function_name") not in READ_ONLY_FUNCTIONS and t.get("function_name") not in WRITE_FUNCTIONS]
-    write_tasks.extend(unknown_tasks)
+    # Categorize independent tasks as read vs write for optimal parallelism.
+    # Unknown functions default to write pool (conservative).
+    read_tasks  = [t for t in independent if FUNCTION_ACCESS.get(t.get("function_name")) == "read"]
+    write_tasks = [t for t in independent if FUNCTION_ACCESS.get(t.get("function_name")) != "read"]
 
     thread_id: Optional[str] = state.get("thread_id")
     logger.info(
@@ -315,63 +309,8 @@ def _run_queue(
         f"sequential={len(sequential)}"
     )
 
-    # Execute read tasks with high parallelism
-    if read_tasks:
-        with ThreadPoolExecutor(max_workers=MAX_READ_WORKERS) as pool:
-            futures = {}
-            for t in read_tasks:
-                _push_event(thread_id, {
-                    "type": "tool_call",
-                    "data": {
-                        "task_id": t.get("task_id"),
-                        "function_name": t.get("function_name"),
-                        "status": "started",
-                    },
-                })
-                futures[pool.submit(_run_task, t, {})] = t
-            for future in as_completed(futures):
-                result = future.result()
-                execution_results[result["task_id"]] = result
-                if result.get("timing"):
-                    tool_timings.append(result["timing"])
-                _push_event(thread_id, {
-                    "type": "tool_call",
-                    "data": {
-                        "task_id": result["task_id"],
-                        "function_name": result["function_name"],
-                        "status": result["status"],
-                        "duration_ms": result.get("timing", {}).get("duration_ms"),
-                    },
-                })
-
-    # Execute write tasks with conservative parallelism
-    if write_tasks:
-        with ThreadPoolExecutor(max_workers=MAX_WRITE_WORKERS) as pool:
-            futures = {}
-            for t in write_tasks:
-                _push_event(thread_id, {
-                    "type": "tool_call",
-                    "data": {
-                        "task_id": t.get("task_id"),
-                        "function_name": t.get("function_name"),
-                        "status": "started",
-                    },
-                })
-                futures[pool.submit(_run_task, t, {})] = t
-            for future in as_completed(futures):
-                result = future.result()
-                execution_results[result["task_id"]] = result
-                if result.get("timing"):
-                    tool_timings.append(result["timing"])
-                _push_event(thread_id, {
-                    "type": "tool_call",
-                    "data": {
-                        "task_id": result["task_id"],
-                        "function_name": result["function_name"],
-                        "status": result["status"],
-                        "duration_ms": result.get("timing", {}).get("duration_ms"),
-                    },
-                })
+    _run_parallel_tasks(read_tasks, MAX_READ_WORKERS, thread_id, execution_results, tool_timings)
+    _run_parallel_tasks(write_tasks, MAX_WRITE_WORKERS, thread_id, execution_results, tool_timings)
 
     for task in sequential:
         retry_count = task.get("retry_count", 0)

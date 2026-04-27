@@ -14,6 +14,10 @@ import asyncio
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from src.common.utils import config, get_logger
+from src.server.services.notifications.helpers import (
+    notify_backtest_completed,
+    notify_backtest_failed
+)
 
 logger = get_logger(__name__)
 
@@ -154,11 +158,38 @@ class BacktestScheduler:
                 f"(thread: {thread_id}, tasks: {tasks_executed})"
             )
 
+            # Send notification on scheduled backtest completion
+            try:
+                await notify_backtest_completed(
+                    backtest_id=thread_id,
+                    strategy=backtest_config.get('strategy', 'unknown'),
+                    symbol=symbol,
+                    timeframe=backtest_config.get('timeframe', 'unknown'),
+                    sharpe_ratio=None,  # Not available from graph result
+                    total_return=None,
+                    max_drawdown=None
+                )
+            except Exception as notify_exc:
+                logger.warning(f"Failed to send scheduled backtest notification: {notify_exc}")
+
         except Exception as exc:
             logger.error(
                 f"[SCHEDULER] ✗ Failed: {backtest_config['name']} for {symbol}: {exc}",
                 exc_info=True
             )
+
+            # Send notification on scheduled backtest failure
+            try:
+                await notify_backtest_failed(
+                    backtest_id=thread_id if 'thread_id' in locals() else "unknown",
+                    strategy=backtest_config.get('strategy', 'unknown'),
+                    symbol=symbol,
+                    timeframe=backtest_config.get('timeframe', 'unknown'),
+                    error_message=str(exc)
+                )
+            except Exception as notify_exc:
+                logger.warning(f"Failed to send scheduled backtest failure notification: {notify_exc}")
+
             raise
 
 

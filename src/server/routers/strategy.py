@@ -1,11 +1,13 @@
-"""Strategy router — read-only StrategyDAO endpoints at /v1/strategy/..."""
+"""Strategy router — read-only AnalysisDAO endpoints at /v1/strategy/..."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from src.server.routers._helpers import _df_to_records
+from src.common.dao.analysis_dao import AnalysisDAO
+from src.server.registry.register_strategies import ensure_strategies_registered
+from src.common.registry.strategy_registry import get_registry
 from src.common.utils import get_logger
 from src.server.models.endpoints import (
     ActionableSignalsResponse,
@@ -13,23 +15,19 @@ from src.server.models.endpoints import (
     RecentSignalsResponse,
     StrategyPerformanceResponse,
 )
-from src.server.models.strategies import StrategySignalOutput
+from src.server.routers._helpers import _df_to_records, dao_context, handle_http_errors, run_in_thread
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/strategy", tags=["strategy"])
 
 
-def _dao():
-    from src.common.dao.strategy_dao import StrategyDAO
-    return StrategyDAO()
-
-
 @router.get("/actionable", response_model=ActionableSignalsResponse)
+@handle_http_errors
 async def get_actionable_signals(
     min_confidence: float = Query(default=0.7, ge=0.0, le=1.0),
     action: Optional[str] = Query(None, description="Filter by action e.g. 'buy' | 'sell'"),
-):
+) -> Dict[str, Any]:
     """Return all strategy signals that meet the confidence threshold.
 
     Args:
@@ -39,201 +37,232 @@ async def get_actionable_signals(
     Returns:
         Dict with ``signals`` list and ``count``.
     """
-    try:
-        dao = _dao()
-        df = dao.get_actionable_signals(min_confidence=min_confidence, action_filter=action)
-        dao.close()
-        records = _df_to_records(df)
-        return {"signals": records, "count": len(records)}
-    except Exception as exc:
-        logger.warning(f"[strategy/actionable] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _fetch():
+        with dao_context(AnalysisDAO) as dao:
+            return dao.get_actionable_signals(min_confidence=min_confidence, action_filter=action)
+
+    records = _df_to_records(await run_in_thread(_fetch))
+    return {"signals": records, "count": len(records)}
 
 
 @router.get("/{strategy_name}/performance", response_model=StrategyPerformanceResponse)
+@handle_http_errors
 async def get_strategy_performance(
     strategy_name: str,
     days: int = Query(default=30, ge=1, le=365),
-):
+) -> Dict[str, Any]:
     """Return performance statistics for a strategy over the last N days.
 
     Returns:
         Dict with ``strategy_name``, ``days``, and ``performance``.
     """
-    try:
-        dao = _dao()
-        perf = dao.get_strategy_performance(strategy_name, days=days)
-        dao.close()
-        return {"strategy_name": strategy_name, "days": days, "performance": perf}
-    except Exception as exc:
-        logger.warning(f"[strategy/{strategy_name}/performance] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _fetch():
+        with dao_context(AnalysisDAO) as dao:
+            return dao.get_strategy_performance(strategy_name, days=days)
+
+    perf = await run_in_thread(_fetch)
+    return {"strategy_name": strategy_name, "days": days, "performance": perf}
 
 
 @router.get("/{symbol}/{strategy_name}/latest", response_model=LatestSignalResponse)
-async def get_latest_signal(symbol: str, strategy_name: str):
+@handle_http_errors
+async def get_latest_signal(symbol: str, strategy_name: str) -> Dict[str, Any]:
     """Return the most recent signal for a symbol + strategy combination.
 
     Returns:
         Dict with ``symbol``, ``strategy_name``, and ``signal`` (dict or null).
     """
-    try:
-        dao = _dao()
-        signal = dao.get_latest_signal(symbol.upper(), strategy_name)
-        dao.close()
-        return {"symbol": symbol.upper(), "strategy_name": strategy_name, "signal": signal}
-    except Exception as exc:
-        logger.warning(f"[strategy/{symbol}/{strategy_name}/latest] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _fetch():
+        with dao_context(AnalysisDAO) as dao:
+            return dao.get_latest_signal(symbol.upper(), strategy_name)
+
+    signal = await run_in_thread(_fetch)
+    return {"symbol": symbol.upper(), "strategy_name": strategy_name, "signal": signal}
 
 
 @router.get("/{symbol}/{strategy_name}/signals", response_model=RecentSignalsResponse)
+@handle_http_errors
 async def get_recent_signals(
     symbol: str,
     strategy_name: str,
     limit: int = Query(default=10, ge=1, le=200),
-):
+) -> Dict[str, Any]:
     """Return recent signals for a symbol + strategy combination.
 
     Returns:
         Dict with ``signals`` list and ``count``.
     """
-    try:
-        dao = _dao()
-        df = dao.get_recent_signals(symbol.upper(), strategy_name, limit=limit)
-        dao.close()
-        records = _df_to_records(df)
-        return {"symbol": symbol.upper(), "strategy_name": strategy_name, "signals": records, "count": len(records)}
-    except Exception as exc:
-        logger.warning(f"[strategy/{symbol}/{strategy_name}/signals] {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    def _fetch():
+        with dao_context(AnalysisDAO) as dao:
+            return dao.get_recent_signals(symbol.upper(), strategy_name, limit=limit)
+
+    records = _df_to_records(await run_in_thread(_fetch))
+    return {
+        "symbol": symbol.upper(),
+        "strategy_name": strategy_name,
+        "signals": records,
+        "count": len(records),
+    }
 
 
 # ── On-demand signal generation ───────────────────────────────────────────────
+
 
 class RunSignalsRequest(BaseModel):
     """Request body for on-demand strategy-signal generation.
 
     Attributes:
         symbol: Stock ticker (case-insensitive, normalised to upper-case).
-        strategy_name: One of the 9 supported strategy names or ``"all"``
-            to run every strategy applicable to *timeframe*.
+        strategy_name: Registered strategy name or ``"all"`` to run every
+            strategy applicable to *timeframe*.
         timeframe: AlpacaDAO canonical timeframe string (default ``"1Min"``).
-        lookback_bars: How many historical bars to fetch for the run
-            (default 300 — enough for golden-cross / 52w-breakout warmup).
+        lookback_bars: How many historical bars to fetch for the run.
         params_override: Optional flat dict of config-key overrides passed
-            directly to the skill's ``analyze_bars`` call (e.g.
-            ``{"lookback": 50, "threshold": 3.0}``).
+            to the skill's ``analyze_bars`` call.
     """
 
     symbol: str = Field(..., description="Ticker symbol, e.g. 'AAPL'")
-    strategy_name: str = Field(
-        default="all",
-        description=(
-            "Strategy name or 'all'.  Valid names: mean-reversion, "
-            "vwap-reversion, opening-range-breakout, rsi-divergence, "
-            "momentum-burst, golden-cross, breakout-52w, "
-            "mean-reversion-daily, earnings-drift"
-        ),
-    )
+    strategy_name: str = Field(default="all", description="Strategy name or 'all'")
     timeframe: str = Field(default="1Min", description="Bar timeframe, e.g. '1Min', '1Day'")
     lookback_bars: int = Field(default=300, ge=10, le=2000)
-    params_override: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Optional param overrides forwarded to analyze_bars.",
-    )
-
-
-_STRATEGY_TO_TIMEFRAME: Dict[str, str] = {
-    "mean-reversion": "intraday",
-    "vwap-reversion": "intraday",
-    "opening-range-breakout": "intraday",
-    "rsi-divergence": "intraday",
-    "momentum-burst": "intraday",
-    "golden-cross": "1Day",
-    "breakout-52w": "1Day",
-    "mean-reversion-daily": "1Day",
-    "earnings-drift": "1Day",
-}
+    params_override: Optional[Dict[str, Any]] = Field(default=None)
 
 
 @router.post("/signals/run", response_model=Dict[str, Any])
-async def run_signals_on_demand(body: RunSignalsRequest = Body(...)):
+@handle_http_errors
+async def run_signals_on_demand(body: RunSignalsRequest = Body(...)) -> Dict[str, Any]:
     """Trigger on-demand strategy signal generation for a symbol.
 
     Fetches the most recent *lookback_bars* bars for *symbol* / *timeframe*,
     runs the requested strategy (or all applicable strategies when
-    ``strategy_name == "all"``), persists every signal to StrategyDAO, and
+    ``strategy_name == "all"``), persists every signal to AnalysisDAO, and
     returns a summary dict.
 
     Args:
         body: ``RunSignalsRequest`` payload.
 
     Returns:
-        Dict with ``symbol``, ``timeframe``, ``strategy_name``, ``results``
-        (list of ``StrategySignalOutput``-compatible dicts), and ``count``.
+        Dict with ``symbol``, ``timeframe``, ``strategy_name``, ``results``,
+        and ``count``.
 
     Raises:
         HTTPException 400: Unknown strategy name.
-        HTTPException 500: Any unexpected error.
+        HTTPException 404: No bars found for symbol/timeframe.
     """
     symbol = body.symbol.upper()
     timeframe = body.timeframe
 
-    if body.strategy_name != "all" and body.strategy_name not in _STRATEGY_TO_TIMEFRAME:
+    # Validate strategy name against registry (not a hardcoded list)
+    ensure_strategies_registered()
+    registry = get_registry()
+    if body.strategy_name != "all" and registry.get_metadata(body.strategy_name) is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown strategy '{body.strategy_name}'. "
-                   f"Valid strategies: {sorted(_STRATEGY_TO_TIMEFRAME)} + 'all'",
+            detail=(
+                f"Unknown strategy '{body.strategy_name}'. "
+                f"Registered: {registry.get_all_names()}"
+            ),
         )
 
-    try:
-        from src.common.dao.alpaca_dao import AlpacaDAO
-        from src.common.config import config as cfg
+    from datetime import datetime, timedelta
+    from src.common.utils.container import get_alpaca_dao
 
-        a_dao = AlpacaDAO()
-        bars = a_dao.get_bars(symbol, timeframe=timeframe, limit=body.lookback_bars)
-        a_dao.close()
+    def _fetch_bars():
+        end = datetime.now()
+        # approximate: lookback_bars * minutes per bar → convert to days
+        _mins_per_bar = {"1Min": 1, "5Min": 5, "15Min": 15, "1H": 60, "1Day": 1440}.get(timeframe, 1)
+        lookback_days = max(1, (body.lookback_bars * _mins_per_bar) // 390 + 1)
+        start = end - timedelta(days=lookback_days)
+        return get_alpaca_dao().get_bars(symbol, start=start, end=end, timeframe=timeframe)
 
-        if bars is None or bars.empty:
-            raise HTTPException(status_code=404, detail=f"No bars found for {symbol}/{timeframe}")
+    bars = await run_in_thread(_fetch_bars)
+    if bars is None or bars.empty:
+        raise HTTPException(status_code=404, detail=f"No bars found for {symbol}/{timeframe}")
 
-        from src.common.data_gatherer.db_stream_handlers import (
-            _run_all_strategy_signals,
-        )
+    from src.common.ingestion import get_indicators_etl
+    await get_indicators_etl().trigger_bar_computation(symbol, timeframe)
 
-        await _run_all_strategy_signals(symbol, timeframe, bars, cfg)
+    strategies_to_query: List[str] = (
+        registry.list_by_timeframe(timeframe)
+        if body.strategy_name == "all"
+        else [body.strategy_name]
+    )
 
-        # Return the freshest signal for each strategy from StrategyDAO
-        from src.common.dao.strategy_dao import StrategyDAO
-        s_dao = StrategyDAO()
-
-        if body.strategy_name == "all":
-            strategies_to_query = [
-                s for s, tf in _STRATEGY_TO_TIMEFRAME.items()
-                if tf == "intraday" and timeframe != "1Day"
-                or tf == "1Day" and timeframe == "1Day"
-            ]
-        else:
-            strategies_to_query = [body.strategy_name]
-
+    def _fetch_signals():
         results = []
-        for strat in strategies_to_query:
-            sig = s_dao.get_latest_signal(symbol, strat)
-            if sig:
-                results.append(sig)
-        s_dao.close()
+        with dao_context(AnalysisDAO) as dao:
+            for strat in strategies_to_query:
+                sig = dao.get_latest_signal(symbol, strat)
+                if sig:
+                    results.append(sig)
+        return results
 
-        return {
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "strategy_name": body.strategy_name,
-            "results": results,
-            "count": len(results),
-        }
+    results = await run_in_thread(_fetch_signals)
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "strategy_name": body.strategy_name,
+        "results": results,
+        "count": len(results),
+    }
 
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"[strategy/signals/run] {symbol} {timeframe}: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+
+# ── Registry API Endpoints ───────────────────────────────────────────────────
+
+
+@router.get("/registry/list", response_model=Dict[str, Any])
+@handle_http_errors
+async def list_all_strategies(
+    category: Optional[str] = Query(None, description="Filter by category (intraday, daily)"),
+    timeframe: Optional[str] = Query(None, description="Filter by timeframe (1Min, 5Min, 1Day)"),
+    tag: Optional[str] = Query(None, description="Filter by tag (mean-reversion, volume, etc.)"),
+) -> Dict[str, Any]:
+    """List all registered strategies with optional filters.
+
+    Returns:
+        Dict with ``strategies``, ``count``, and ``filters``.
+    """
+    ensure_strategies_registered()
+    registry = get_registry()
+
+    if category:
+        names = registry.list_by_category(category)
+    elif timeframe:
+        names = registry.list_by_timeframe(timeframe)
+    elif tag:
+        names = registry.list_by_tag(tag)
+    else:
+        names = registry.get_all_names()
+
+    strategies = [
+        metadata.to_dict()
+        for name in names
+        if (metadata := registry.get_metadata(name)) is not None
+    ]
+    return {
+        "strategies": strategies,
+        "count": len(strategies),
+        "filters": {"category": category, "timeframe": timeframe, "tag": tag},
+    }
+
+
+@router.get("/registry/{strategy_name}", response_model=Dict[str, Any])
+@handle_http_errors
+async def get_strategy_metadata(strategy_name: str) -> Dict[str, Any]:
+    """Get detailed metadata for a specific strategy.
+
+    Returns:
+        Strategy metadata dict.
+
+    Raises:
+        HTTPException 404: Strategy not found.
+    """
+    ensure_strategies_registered()
+    registry = get_registry()
+    metadata = registry.get_metadata(strategy_name)
+    if metadata is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Strategy '{strategy_name}' not found. Available: {registry.get_all_names()}",
+        )
+    return metadata.to_dict()

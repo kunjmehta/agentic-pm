@@ -40,11 +40,11 @@ class AlpacaDAO(BaseDAO):
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        """Ensure Alpaca schema exists in database."""
+        """Ensure Alpaca schema exists in database, applying migrations as needed."""
         schema_file = "config/schema/alpaca_schema.sql"
         try:
-            # Only execute if market_bars table doesn't exist
-            self.execute_schema_file(schema_file, check_table="market_bars")
+            # Check against the most-recently-added table so new tables are always created
+            self.execute_schema_file(schema_file, check_table="precomputed_strategy_signals")
             logger.debug("Alpaca schema check completed")
         except Exception as e:
             logger.warning(f"Schema initialization skipped: {str(e)}")
@@ -629,6 +629,40 @@ class AlpacaDAO(BaseDAO):
             logger.error(error_msg)
             raise Exception(error_msg)
 
+    def save_strategy_signals(self, df: pd.DataFrame) -> int:
+        """Save pre-computed strategy signals.
+
+        Args:
+            df: DataFrame with columns: symbol, timestamp, timeframe, strategy_name,
+                action, confidence, reason, entry_price, stop_loss, take_profit.
+
+        Returns:
+            Number of rows saved.
+
+        Raises:
+            Exception: If save fails.
+        """
+        if df.empty:
+            logger.info("No strategy signals to save")
+            return 0
+
+        logger.info(f"Saving {len(df)} strategy signal rows")
+
+        try:
+            df = df.copy()
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            rows = self.upsert_df(
+                "precomputed_strategy_signals",
+                df,
+                key_columns=["symbol", "timestamp", "timeframe", "strategy_name"],
+            )
+            logger.info(f"Successfully saved {rows} strategy signal rows")
+            return rows
+        except Exception as e:
+            error_msg = f"Failed to save strategy signals: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
     def get_computed_indicators(
         self,
         symbol: str,
@@ -658,103 +692,32 @@ class AlpacaDAO(BaseDAO):
 
         return self.fetch_df(query, (symbol, timeframe, start, end))
 
+    def get_strategy_signals_range(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: str = "1Min",
+    ) -> pd.DataFrame:
+        """Retrieve precomputed strategy signals for a symbol over a time window.
 
-if __name__ == "__main__":
-    """Test AlpacaDAO functionality."""
-    print("=" * 60)
-    print("Testing AlpacaDAO")
-    print("=" * 60)
+        Args:
+            symbol: Stock ticker symbol.
+            start: Inclusive start timestamp.
+            end: Inclusive end timestamp.
+            timeframe: Timeframe string (e.g. ``'1Min'``).
 
-    # Create test DAO
-    dao = AlpacaDAO(db_path="data/test_alpaca.duckdb")
-
-    # Test 1: Add to watchlist
-    print("\n1. Adding symbols to watchlist...")
-    try:
-        dao.add_to_watchlist('AAPL', 'Tech leader')
-        dao.add_to_watchlist('MSFT', 'Software giant')
-        dao.add_to_watchlist('GOOGL')
-        print("   [OK] Added symbols to watchlist")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 2: Get watchlist
-    print("\n2. Retrieving watchlist...")
-    try:
-        watchlist = dao.get_watchlist()
-        print(f"   [OK] Watchlist: {watchlist}")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 3: Save bars
-    print("\n3. Saving market bars...")
-    try:
-        test_bars = pd.DataFrame([
-            {
-                'symbol': 'AAPL',
-                'timestamp': '2024-02-17 09:30:00',
-                'open': 180.0,
-                'high': 181.5,
-                'low': 179.5,
-                'close': 180.5,
-                'volume': 1000000,
-                'trade_count': 500,
-                'vwap': 180.2
-            },
-            {
-                'symbol': 'AAPL',
-                'timestamp': '2024-02-17 09:31:00',
-                'open': 180.5,
-                'high': 181.0,
-                'low': 180.0,
-                'close': 180.8,
-                'volume': 800000,
-                'trade_count': 450,
-                'vwap': 180.6
-            }
-        ])
-        rows = dao.save_bars(test_bars, timeframe='1Min')
-        print(f"   [OK] Saved {rows} bars")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 4: Get bars
-    print("\n4. Retrieving market bars...")
-    try:
-        start = datetime(2024, 2, 17, 9, 0)
-        end = datetime(2024, 2, 17, 10, 0)
-        bars = dao.get_bars('AAPL', start, end, timeframe='1Min')
-        print(f"   [OK] Retrieved {len(bars)} bars")
-        print(f"\n{bars}")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Test 5: Save trades
-    print("\n5. Saving historical trades...")
-    try:
-        test_trades = pd.DataFrame([
-            {
-                'symbol': 'AAPL',
-                'timestamp': '2024-02-17 09:30:15',
-                'trade_id': 123456,
-                'price': 180.25,
-                'size': 100,
-                'exchange': 'Q',
-                'conditions': '@',
-                'tape': 'C'
-            }
-        ])
-        rows = dao.save_trades(test_trades)
-        print(f"   [OK] Saved {rows} trades")
-    except Exception as e:
-        print(f"   [FAIL] {e}")
-
-    # Cleanup
-    print("\n6. Cleaning up...")
-    dao.close()
-    import os
-    if os.path.exists("data/test_alpaca.duckdb"):
-        os.remove("data/test_alpaca.duckdb")
-    print("   [OK] Test complete")
-
-    print("\n" + "=" * 60)
+        Returns:
+            DataFrame of signal rows ordered by timestamp ascending.
+        """
+        return self.fetch_df(
+            """
+            SELECT * FROM precomputed_strategy_signals
+            WHERE symbol = ?
+              AND timeframe = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (symbol, timeframe, start, end),
+        )

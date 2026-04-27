@@ -35,7 +35,6 @@ export interface ExecutionResult {
 export interface Trade {
   status?: string;
   entry_date?: string;
-  date?: string;
   timestamp?: string;
   entry_time?: string;
   entry_price?: number;
@@ -44,15 +43,20 @@ export interface Trade {
   exit_time?: string;
   exit_price?: number;
   quantity?: number;
-  shares?: number;
-  qty?: number;
   side?: string;
   entry_signal?: Record<string, unknown>;
   exit_reason?: string;
-  reason?: string;
   pnl?: number;
-  profit_loss?: number;
   pnl_pct?: number;
+}
+
+export interface BacktestMetrics {
+  total_return_pct?: number;
+  total_return_dollars?: number;
+  sharpe_ratio?: number;
+  max_drawdown_pct?: number;
+  max_drawdown_dollars?: number;
+  win_rate?: number;
 }
 
 export interface BacktestResult {
@@ -65,12 +69,7 @@ export interface BacktestResult {
     symbol?: string;
     ticker?: string;
     trades?: Trade[];
-    metrics?: {
-      total_return_pct?: number;
-      sharpe_ratio?: number;
-      max_drawdown_pct?: number;
-      win_rate?: number;
-    };
+    metrics?: BacktestMetrics;
     final_capital?: number;
   };
 }
@@ -104,6 +103,38 @@ export interface PortfolioStatResult {
   max_drawdown?: number;
   win_rate?: number;
   position_count?: number;
+}
+
+// ── Indicators ───────────────────────────────────────────────────────────────
+
+export interface MomentumIndicators {
+  rsi?: number;
+  macd_value?: number;
+  macd_signal?: number;
+  macd_histogram?: number;
+}
+
+export interface VolatilityIndicators {
+  bb_upper?: number;
+  bb_lower?: number;
+  bb_middle?: number;
+  atr?: number;
+  z_score?: number;
+}
+
+export interface VolumeIndicators {
+  obv?: number;
+  volume_trend?: string;
+  vwap?: number;
+}
+
+export interface IndicatorRecord {
+  symbol?: string;
+  timestamp?: string;
+  timeframe?: string;
+  momentum?: MomentumIndicators;
+  volatility?: VolatilityIndicators;
+  volume?: VolumeIndicators;
 }
 
 // ── Task preview (HITL) ──────────────────────────────────────────────────────

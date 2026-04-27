@@ -1,18 +1,8 @@
-"""Singleton LLM client registry for all semi-auto reasoning nodes.
+"""Singleton LLM client registry for all agent reasoning nodes.
 
 All reasoning nodes share pre-warmed ChatOpenAI instances keyed by role.
 This avoids creating a new HTTP client on every graph invocation and enables
 connection reuse across requests.
-
-Usage in nodes::
-
-    from src.semi_auto.agents import get_llm
-    structured_llm = get_llm("pm").with_structured_output(AgentOutput, method="function_calling")
-
-Initialization (called once at startup in lifespan.py)::
-
-    from src.semi_auto.agents import init_all_agents
-    init_all_agents()
 """
 
 import sys
@@ -39,6 +29,7 @@ _ALL_ROLES = (
     "order",        # order_node.py
     "synthesizer",  # synthesizer.py
     "classifier",   # classifier.py
+    "analyst",      # analyst_service.py (ETL 10-min summaries)
 )
 
 
@@ -78,13 +69,3 @@ def init_all_agents() -> None:
     for role in _ALL_ROLES:
         get_llm(role)
     logger.info(f"[agents] {len(_ALL_ROLES)} LLM singletons initialized: {_ALL_ROLES}")
-
-
-if __name__ == "__main__":
-    print("--- agents.py smoke test ---")
-    init_all_agents()
-    for role in _ALL_ROLES:
-        llm = get_llm(role)
-        assert llm is get_llm(role), f"Singleton violated for role={role}"
-        print(f"  [{role}] singleton OK — {type(llm).__name__}")
-    print("All LLM singletons verified.")

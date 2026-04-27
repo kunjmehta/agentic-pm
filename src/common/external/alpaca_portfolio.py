@@ -93,6 +93,38 @@ def _assert_trading_allowed() -> None:
         raise RuntimeError(f"Could not verify account trading status: {exc}") from exc
 
 
+def _assert_sell_position(symbol: str, qty: float) -> None:
+    """Raise ValueError if we do not hold enough available shares to fill a sell order.
+
+    Queries the broker directly (bypasses the 30-second positions cache) so the
+    check reflects any pending orders that may have already locked shares.
+
+    Args:
+        symbol: Stock ticker.
+        qty: Shares requested to sell.
+
+    Raises:
+        ValueError: If no position exists or qty > qty_available.
+    """
+    try:
+        pos = trading_client.get_open_position(symbol.upper())
+        qty_available = float(pos.qty_available)
+    except Exception as exc:
+        raise ValueError(
+            f"No open position in {symbol} — cannot place sell order"
+        ) from exc
+
+    if qty_available <= 0:
+        raise ValueError(
+            f"No shares available to sell for {symbol} "
+            "(position may be fully locked in pending orders)"
+        )
+    if qty > qty_available:
+        raise ValueError(
+            f"Sell qty {qty} exceeds available {qty_available:.0f} shares for {symbol}"
+        )
+
+
 # =============================================================================
 # Account Information
 # =============================================================================
@@ -412,6 +444,8 @@ def place_market_order(symbol: str, qty: float, side: str) -> Dict:
     logger.info(f"[place_market_order] {side.upper()} {qty} {symbol}")
 
     _assert_trading_allowed()
+    if side.lower() == "sell":
+        _assert_sell_position(symbol, qty)
 
     try:
         request = MarketOrderRequest(
@@ -488,6 +522,8 @@ def place_limit_order(
     logger.info(f"[place_limit_order] {side.upper()} {qty} {symbol} @ ${limit_price:.2f}")
 
     _assert_trading_allowed()
+    if side.lower() == "sell":
+        _assert_sell_position(symbol, qty)
 
     try:
         request = LimitOrderRequest(
@@ -571,6 +607,8 @@ def place_stop_order(
     logger.info(f"[place_stop_order] {side.upper()} {qty} {symbol} stop@${stop_price:.2f}")
 
     _assert_trading_allowed()
+    if side.lower() == "sell":
+        _assert_sell_position(symbol, qty)
 
     try:
         request = StopOrderRequest(
@@ -661,6 +699,8 @@ def place_stop_limit_order(
     )
 
     _assert_trading_allowed()
+    if side.lower() == "sell":
+        _assert_sell_position(symbol, qty)
 
     try:
         request = StopLimitOrderRequest(

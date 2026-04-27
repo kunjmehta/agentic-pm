@@ -10,6 +10,7 @@
 import { useState, useCallback, memo, useMemo } from 'react';
 import { FixedSizeList as List } from 'react-window';
 import { useOrdersStream, OrderMessage } from '../hooks/useOrdersStream';
+import { useMarketStream, MarketMessage } from '../hooks/useMarketStream';
 
 interface Order {
   order_id: string;
@@ -76,14 +77,12 @@ export default function OrderBook({ apiUrl }: Props) {
   const [sideFilter, setSideFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
 
-  const handleMessage = useCallback((msg: OrderMessage) => {
+  const handleOrderMessage = useCallback((msg: OrderMessage) => {
     if (msg.type === 'order_update' && msg.order_id) {
       setOrders((prev) => {
-        // Check if order already exists (update scenario)
         const existingIndex = prev.findIndex((o) => o.order_id === msg.order_id!);
 
         if (existingIndex !== -1) {
-          // Update existing order
           const updated = [...prev];
           updated[existingIndex] = {
             ...updated[existingIndex],
@@ -92,7 +91,6 @@ export default function OrderBook({ apiUrl }: Props) {
           };
           return updated;
         } else {
-          // New order - prepend and keep last 50
           const newOrder: Order = {
             order_id: msg.order_id!,
             symbol: msg.symbol || '',
@@ -108,11 +106,36 @@ export default function OrderBook({ apiUrl }: Props) {
     }
   }, []);
 
-  const { isConnected, error } = useOrdersStream({
+  const handleMarketMessage = useCallback((msg: MarketMessage) => {
+    if (msg.type === 'trade_update' && msg.symbol && msg.price) {
+      const ts = msg.timestamp || new Date().toISOString();
+      const tradeOrder: Order = {
+        order_id: `${msg.symbol}-${ts}`,
+        symbol: msg.symbol,
+        side: 'buy',
+        qty: msg.size ?? 0,
+        status: 'filled',
+        filled_price: msg.price,
+        timestamp: ts,
+      };
+      setOrders((prev) => [tradeOrder, ...prev].slice(0, 50));
+    }
+  }, []);
+
+  const { isConnected: ordersConnected, error: ordersError } = useOrdersStream({
     apiUrl,
-    onMessage: handleMessage,
+    onMessage: handleOrderMessage,
     enabled: true,
   });
+
+  const { isConnected: marketConnected } = useMarketStream({
+    apiUrl,
+    onMessage: handleMarketMessage,
+    enabled: true,
+  });
+
+  const isConnected = ordersConnected || marketConnected;
+  const error = ordersError;
 
   // Apply filters
   const filteredOrders = useMemo(() => {

@@ -5,18 +5,31 @@ This router provides WebSocket endpoints for streaming real-time market data
 and broadcast via db_stream_handlers.
 """
 
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional
-from alpaca.data.historical import StockHistoricalDataClient
+from typing import Any, Dict, Optional
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from src.server.ws_manager import ws_manager
-from src.common.utils import get_logger, secrets
+from src.server.helpers import get_alpaca_client
+from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/market", tags=["market"])
+
+
+@router.post("/internal/broadcast")
+async def internal_broadcast(message: Dict[str, Any]) -> Dict[str, bool]:
+    """Internal endpoint — ETL process forwards bar/trade updates to WS clients.
+
+    Called by the ETL process broadcaster so that the API's connected ws_manager
+    receives real-time data even though ETL runs in a separate OS process.
+    """
+    await ws_manager.broadcast(message)
+    return {"ok": True}
 
 
 @router.get("/previous-close")
@@ -46,45 +59,34 @@ async def get_previous_close(symbols: str = Query(..., description="Comma-separa
     symbol_list = [s.strip().upper() for s in symbols.split(',')]
     results: Dict[str, Optional[float]] = {}
 
-    # Initialize Alpaca client
-    api_key = secrets.get("alpaca.api_key")
-    api_secret = secrets.get("alpaca.secret_key")
+    client = get_alpaca_client()
 
-    try:
-        client = StockHistoricalDataClient(api_key, api_secret)
-    except Exception as exc:
-        logger.error(f"Failed to initialize Alpaca client: {exc}")
-        return {"previous_close": {sym: None for sym in symbol_list}, "error": str(exc)}
-
-    # Fetch previous close for each symbol
-    for symbol in symbol_list:
-        try:
-            # Search back up to 5 days for last trading day close
-            for days_back in range(1, 6):
-                end_date = datetime.now() - timedelta(days=days_back)
-                start_date = end_date - timedelta(days=1)
-
-                request = StockBarsRequest(
-                    symbol_or_symbols=symbol,
-                    timeframe=TimeFrame.Day,
-                    start=start_date,
-                    end=end_date
+    async def _fetch_close(symbol: str) -> tuple[str, float | None]:
+        for days_back in range(1, 6):
+            end_date = datetime.now() - timedelta(days=days_back)
+            start_date = end_date - timedelta(days=1)
+            try:
+                bars = await asyncio.to_thread(
+                    client.get_stock_bars,
+                    StockBarsRequest(
+                        symbol_or_symbols=symbol,
+                        timeframe=TimeFrame.Day,
+                        start=start_date,
+                        end=end_date,
+                    ),
                 )
-
-                bars = client.get_stock_bars(request)
-
                 if symbol in bars and len(bars[symbol]) > 0:
-                    results[symbol] = float(bars[symbol][-1].close)
-                    logger.debug(f"Previous close for {symbol}: ${results[symbol]:.2f} ({days_back} days back)")
-                    break
-            else:
-                # No data found in last 5 days
-                results[symbol] = None
-                logger.warning(f"No previous close data found for {symbol} in last 5 days")
+                    price = float(bars[symbol][-1].close)
+                    logger.debug(f"Previous close for {symbol}: ${price:.2f} ({days_back} days back)")
+                    return symbol, price
+            except Exception as exc:
+                logger.error(f"Failed to fetch previous close for {symbol}: {exc}")
+                return symbol, None
+        logger.warning(f"No previous close data found for {symbol} in last 5 days")
+        return symbol, None
 
-        except Exception as exc:
-            logger.error(f"Failed to fetch previous close for {symbol}: {exc}")
-            results[symbol] = None
+    pairs = await asyncio.gather(*[_fetch_close(sym) for sym in symbol_list])
+    results = dict(pairs)
 
     return {"previous_close": results}
 

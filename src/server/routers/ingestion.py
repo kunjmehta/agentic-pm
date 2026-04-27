@@ -5,7 +5,6 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException, Query
 
-import src.server.app_state as _state
 from src.common.utils import get_logger, config as app_config
 from src.server.models.endpoints import (
     FlushCacheResponse,
@@ -31,18 +30,18 @@ async def ingestion_status():
         Dict with data_stream, cache, and etl sub-sections.
     """
     # ── Data stream ───────────────────────────────────────────────────────
-    stream_running = _state._stream_task is not None and not _state._stream_task.done()
-    symbols = _state._data_coordinator.symbols if _state._data_coordinator is not None else []
+    # Streaming is managed by the ETL process (src/processes/etl_process.py),
+    # not by the API server. Report configuration only.
     data_stream_info: Dict[str, Any] = {
         "enabled": app_config.get("data_stream.enabled", default=False),
-        "running": stream_running,
-        "symbols": symbols,
-        "task_name": _state._stream_task.get_name() if _state._stream_task is not None else None,
+        "running": None,  # managed by ETL process — status not available here
+        "symbols": app_config.get_watchlist_symbols() or [],
+        "note": "Streaming is managed by the ETL process",
     }
 
     # ── Trade cache ───────────────────────────────────────────────────────
     try:
-        from src.common.data_gatherer.trade_cache import get_cache
+        from src.common.ingestion import get_cache
         cache = get_cache()
         cache_size = len(cache._cache) if hasattr(cache, "_cache") else 0
         cache_max = app_config.get("cache.max_size", default=100_000)
@@ -82,17 +81,17 @@ async def trigger_etl():
         Dict with status, total_rows computed, and symbols processed.
     """
     try:
-        from src.common.etl.pipeline import IndicatorsETL
+        from src.common.ingestion import get_indicators_etl
         logger.info("[ingestion/trigger-etl] manual ETL triggered")
-        etl = IndicatorsETL()
+        etl = get_indicators_etl()
         result = etl.run_for_watchlist()
-        etl.close()
         logger.info(f"[ingestion/trigger-etl] complete: {result.get('total_rows')} rows")
+        symbols_processed = list(result.get("symbols", {}).keys())
         return {
             "status": "success",
-            "message": f"ETL completed for {len(result.get('symbols', []))} symbol(s)",
+            "message": f"ETL completed for {len(symbols_processed)} symbol(s)",
             "total_rows": result.get("total_rows"),
-            "symbols": result.get("symbols"),
+            "symbols": symbols_processed,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as exc:
@@ -127,9 +126,8 @@ async def flush_cache(
     Returns:
         Dict with trades_flushed (step 1) and trades_archived (step 2).
     """
-    from src.common.data_gatherer.trade_cache import get_cache
-    from src.common.data_gatherer.db_stream_handlers import flush_cache_to_db
-    from src.common.dao.alpaca_dao import AlpacaDAO
+    from src.common.ingestion import get_cache, flush_cache_to_db
+    from src.common.utils.container import get_alpaca_dao
 
     result: dict = {
         "status": "success",
@@ -160,13 +158,10 @@ async def flush_cache(
     # ── Step 2: archive aged live_trades → historical_trades ──────────────
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=archive_older_than_minutes)
-        dao = AlpacaDAO()
-        try:
-            archived = dao.archive_live_trades(cutoff_time=cutoff)
-            result["trades_archived"] = archived
-            logger.info(f"[ingestion/flush-cache] archived {archived} trade(s) older than {cutoff.isoformat()}")
-        finally:
-            dao.close()
+        dao = get_alpaca_dao()
+        archived = dao.archive_live_trades(cutoff_time=cutoff)
+        result["trades_archived"] = archived
+        logger.info(f"[ingestion/flush-cache] archived {archived} trade(s) older than {cutoff.isoformat()}")
     except Exception as exc:
         logger.error(f"[ingestion/flush-cache] archive step failed: {exc}", exc_info=True)
         result["archive_warning"] = str(exc)

@@ -1,4 +1,4 @@
-"""Context node for the semi-auto multi-agent system.
+"""Context node for the trading multi-agent system.
 
 Loads conversation history from PortfolioDAO before reasoning begins.
 Resolves conversation_id and turn_number for multi-turn support.

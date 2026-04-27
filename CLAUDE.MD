@@ -11,6 +11,8 @@
 
     Strict Iteration: Follow the cycle: Plan → Code → Test → Review → Iterate until all tests pass before going back to the user to approve a commit.
 
+    Follow SOLID principles, especially dependency injection and single responsibility principle for every function, module, component
+
 🎯 PROJECT CONTEXT
 
     Project Type: Single-developer AI-driven Python application. This is a prototype autonomous multi-agent zero person portfolio manager
@@ -24,7 +26,7 @@
 
 🔧 DEVELOPMENT PATTERNS
 
-    Coding Standards: Adhere strictly to PEP 8. Use Type Hinting for all function signatures.
+    Coding Standards: Adhere strictly to PEP 8. Use Type Hinting for all function signatures. Implement SOLID design priciples, dependency injection and IoC where possible. Always think about edge cases and iterate over best low level design. Build the application for scale of at least in the order of thousands
 
     Docstrings: Use Google-style docstrings for all classes and functions.
 
@@ -34,9 +36,13 @@
 
         docs/: Any markdown files related to the project or other documentation
 
+        New code should not add to bloat or complicate the existing codebase. Review how to integrate new code without creating bloat and refactor __main__ blocks and tests as per new code
+
     Testing Strategy: Unit tests via pytest. Functional verification via the main block in the working file.
 
     ## Async Python Patterns
+    
+    - All code that includes ETL, function calls / RPCs or tasks has to be written in async pattern by default
     
     - When writing async code, always ensure: coroutines are awaited, signal handlers are registered on the main thread only, and event loop cleanup is handled gracefully with `asyncio.run()` or equivalent.
 
@@ -85,7 +91,7 @@ For every task, the AI must follow these steps, and use available documentaion M
 
     Conda Check: Verify agent is running in the conda environment provided by user
 
-    Code Implementation: Write the code with a main function for testing.
+    Code Implementation: Write the code with a main function for testing. Ensure no addition in bloat and that all tests and code are sync
 
     Local Test: Run python <file_name>.py and pytest.
 
@@ -95,5 +101,7 @@ For every task, the AI must follow these steps, and use available documentaion M
 
     Push/PR: Once the feature branch is complete, push to origin and prepare the Pull Request.
 
+
+DO NOT MAKE ANY MISTAKES
 
 TECH STACK - Python 3.13+, Langchain 1.x, Deepagents, Langgraph, A2A-Python, duckdb

@@ -6,16 +6,20 @@ in api.py are collected here so routers can import them without coupling to
 the monolith.
 """
 
+import asyncio
+import functools
 import json
 import os
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Dict, Generator, List, TypeVar
 
 from fastapi import HTTPException, status
 
 import src.server.app_state as _state
+from src.common.utils.converters import df_to_records as _df_to_records  # noqa: F401  re-exported
 from src.server.models.responses import (
     ExecutionResult,
     SemiAutoResponse,
@@ -25,6 +29,65 @@ from src.common.utils import get_logger
 
 logger = get_logger(__name__)
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+# ── Shared middleware ──────────────────────────────────────────────────────────
+
+
+def handle_http_errors(fn: _F) -> _F:
+    """Decorator: convert unhandled exceptions into HTTP 500 responses.
+
+    Re-raises :class:`fastapi.HTTPException` unchanged so intentional HTTP
+    errors (404, 503, etc.) pass through unmodified.  All other exceptions are
+    caught, logged, and converted to a 500 with the exception message as the
+    ``detail`` field.
+
+    Usage::
+
+        @router.get("/v1/something")
+        @handle_http_errors
+        async def my_endpoint():
+            ...
+
+    Args:
+        fn: The async endpoint function to wrap.
+
+    Returns:
+        Wrapped async function with unified error handling.
+    """
+    @functools.wraps(fn)
+    async def _wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await fn(*args, **kwargs)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception(f"[{fn.__name__}] Unhandled error: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            ) from exc
+
+    return _wrapper  # type: ignore[return-value]
+
+
+async def run_in_thread(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a synchronous callable in a thread pool without blocking the event loop.
+
+    Wraps :func:`asyncio.to_thread` with a readable name used across all
+    routers instead of repeating the boilerplate.
+
+    Args:
+        fn: Synchronous callable to execute in a thread.
+        *args: Positional arguments forwarded to ``fn``.
+        **kwargs: Keyword arguments forwarded to ``fn``.
+
+    Returns:
+        Return value of ``fn(*args, **kwargs)``.
+    """
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
 
 # ── Graph access ───────────────────────────────────────────────────────────────
 
@@ -32,18 +95,14 @@ logger = get_logger(__name__)
 def _get_graph():
     """Return compiled graph or raise HTTP 503.
 
-    Reads from :data:`src.semi_auto.app_state._graph` so that the value
-    set by the lifespan (or patched in tests) is always visible.
+    Delegates to :func:`src.server.dependencies.get_graph` so there is a
+    single canonical place for graph-access + error handling.
     """
-    if _state._graph is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Graph not yet initialized",
-        )
-    return _state._graph
+    from src.server.helpers import get_graph
+    return get_graph()
 
 
-def _make_config(thread_id: str) -> dict:
+def _make_config(thread_id: str) -> Dict[str, Dict[str, str]]:
     """Build LangGraph config for a thread."""
     return {"configurable": {"thread_id": thread_id}}
 
@@ -127,7 +186,7 @@ def _state_to_response(state: dict, thread_id: str, query: str, start_ms: int) -
 # ── Conversation persistence ───────────────────────────────────────────────────
 
 
-def _load_conversation(thread_id: str) -> list:
+def _load_conversation(thread_id: str) -> List[Dict[str, Any]]:
     """Load conversation turns from JSON file.
 
     Args:
@@ -146,7 +205,7 @@ def _load_conversation(thread_id: str) -> list:
         return []
 
 
-def _save_conversation(thread_id: str, turns: list) -> None:
+def _save_conversation(thread_id: str, turns: List[Dict[str, Any]]) -> None:
     """Atomically write conversation turns to JSON file.
 
     Uses a .tmp file + os.replace for crash-safe writes.
@@ -163,89 +222,24 @@ def _save_conversation(thread_id: str, turns: list) -> None:
     logger.debug(f"[_save_conversation] saved {len(turns)} turn(s) → {path}")
 
 
-def _persist_reasoning_trace(thread_id: str, turn_number: int, state: dict) -> None:
-    """Store LLM reasoning traces to analytics database for audit/compliance.
+# ── DAO lifecycle helpers ─────────────────────────────────────────────────────
 
-    Persists all reasoning outputs from the multi-agent workflow:
-    - portfolio_reasoning (PM planning)
-    - quant_reasoning (quant analyst signals)
-    - backtester_reasoning (backtest results)
-    - order_reasoning (order planning)
-    - pm_review_notes (PM approval notes)
-    - pm_decision_reasoning (post-execution order decision)
+
+@contextmanager
+def dao_context(dao_class: Any) -> Generator[Any, None, None]:
+    """Context manager that guarantees DAO.close() is called even on exception.
 
     Args:
-        thread_id: Conversation thread identifier.
-        turn_number: Sequential turn number within conversation.
-        state: Current GraphState dict with reasoning traces.
+        dao_class: DAO class to instantiate (e.g. AnalystDAO).
 
-    Note:
-        Silently catches and logs any persistence errors to prevent blocking
-        the main workflow. Analytics persistence is best-effort.
+    Yields:
+        Open DAO instance.
     """
+    dao = dao_class()
     try:
-        from src.common.dao import AnalyticsDAO
-
-        dao = AnalyticsDAO()
-
-        # Extract reasoning traces from state
-        reasoning_data = {
-            "thread_id": thread_id,
-            "turn_number": turn_number,
-            "conversation_id": state.get("conversation_id"),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "query": state.get("query"),
-            "intent": state.get("intent"),
-            "symbol": state.get("symbol"),
-            # Reasoning traces from each agent
-            "portfolio_reasoning": state.get("portfolio_reasoning"),
-            "quant_reasoning": state.get("quant_reasoning"),
-            "backtester_reasoning": state.get("backtester_reasoning"),
-            "order_reasoning": state.get("order_reasoning"),
-            "pm_review_notes": state.get("pm_review_notes"),
-            "pm_decision_reasoning": state.get("pm_decision_reasoning"),
-            # Approval status
-            "pm_review_approved": state.get("pm_review_approved"),
-            "execute_orders": state.get("_execute_orders"),
-            # Task counts
-            "portfolio_task_count": len(state.get("portfolio_task_queue") or []),
-            "quant_task_count": len(state.get("quant_task_queue") or []),
-            "backtester_task_count": len(state.get("backtester_task_queue") or []),
-            "order_task_count": len(state.get("order_task_queue") or []),
-            # Execution metadata
-            "error": state.get("error"),
-            "execution_time_ms": state.get("execution_time_ms"),
-        }
-
-        # Save to analytics database
-        dao.save_reasoning_trace(reasoning_data)
+        yield dao
+    finally:
         dao.close()
 
-        logger.info(
-            f"[audit] Persisted reasoning trace: thread={thread_id} turn={turn_number} "
-            f"intent={reasoning_data.get('intent')} symbol={reasoning_data.get('symbol')}"
-        )
-
-    except Exception as exc:
-        # Non-blocking: log warning but don't fail the request
-        logger.warning(
-            f"[audit] Failed to persist reasoning trace for {thread_id}/{turn_number}: {exc}"
-        )
 
 
-# ── DAO response helpers ───────────────────────────────────────────────────────
-
-
-def _df_to_records(df) -> list:
-    """Convert a pandas DataFrame to a JSON-serialisable list of dicts.
-
-    Returns an empty list if ``df`` is ``None`` or empty.
-    """
-    if df is None:
-        return []
-    try:
-        if hasattr(df, "empty") and df.empty:
-            return []
-        return df.to_dict(orient="records")
-    except Exception:
-        return []
