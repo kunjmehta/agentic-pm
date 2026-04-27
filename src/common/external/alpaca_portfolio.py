@@ -1,0 +1,1056 @@
+"""Alpaca Portfolio API integration functions.
+
+This module provides functions to interact with Alpaca's Trading API
+for portfolio management, account information, positions, and orders.
+
+Reference: https://docs.alpaca.markets/reference/
+"""
+
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
+
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Tuple
+import pandas as pd
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    MarketOrderRequest,
+    LimitOrderRequest,
+    StopOrderRequest,
+    StopLimitOrderRequest,
+)
+from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+from src.common.utils import secrets, get_logger
+
+# Initialize logger
+logger = get_logger(__name__)
+
+# Initialize Alpaca client with credentials from secrets
+API_KEY = secrets.get("alpaca.api_key")
+SECRET_KEY = secrets.get("alpaca.secret_key")
+
+# Initialize trading client
+trading_client = TradingClient(API_KEY, SECRET_KEY)
+logger.info("Alpaca trading client initialized")
+
+# =============================================================================
+# Cache with TTL (Time To Live)
+# =============================================================================
+
+_CACHE_TTL_SECONDS = 30  # Cache portfolio data for 30 seconds
+_account_cache: Optional[Tuple[datetime, Dict]] = None  # (timestamp, data)
+_positions_cache: Optional[Tuple[datetime, List[Dict]]] = None  # (timestamp, data)
+
+
+def _is_cache_valid(cached_data: Optional[Tuple[datetime, any]], ttl_seconds: int = _CACHE_TTL_SECONDS) -> bool:
+    """Check if cached data is still valid based on TTL.
+
+    Args:
+        cached_data: Tuple of (timestamp, data) or None
+        ttl_seconds: Time to live in seconds
+
+    Returns:
+        True if cache exists and is within TTL window
+    """
+    if cached_data is None:
+        return False
+    timestamp, _ = cached_data
+    return (datetime.now() - timestamp).total_seconds() < ttl_seconds
+
+
+# =============================================================================
+# Pre-flight guards
+# =============================================================================
+
+
+class InsufficientFundsError(Exception):
+    """Raised when an order is rejected due to insufficient buying power."""
+
+
+def _assert_trading_allowed() -> None:
+    """Raise RuntimeError if the account is blocked from trading.
+
+    Call this before every order submission to surface account-level
+    restrictions before hitting the broker API.
+
+    Raises:
+        RuntimeError: If ``account.trading_blocked`` is True.
+    """
+    try:
+        account = trading_client.get_account()
+        if account.trading_blocked:
+            raise RuntimeError(
+                "Alpaca account trading is currently blocked — orders cannot be submitted. "
+                "Check account status at alpaca.markets."
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        # If we cannot reach the API, surface the error rather than silently continuing.
+        raise RuntimeError(f"Could not verify account trading status: {exc}") from exc
+
+
+# =============================================================================
+# Account Information
+# =============================================================================
+
+def fetch_account_info() -> Dict:
+    """Fetch current account information from Alpaca with caching.
+
+    Returns account equity, cash, buying power, and other account metrics.
+    Results are cached for 30 seconds to reduce API calls.
+
+    Reference: https://docs.alpaca.markets/reference/getaccount-1
+
+    Returns:
+        Dict with account information including:
+        - equity: Total account value
+        - cash: Available cash
+        - buying_power: Margin buying power
+        - portfolio_value: Current portfolio value
+        - account_status: Account status (ACTIVE, etc.)
+
+    Raises:
+        Exception: If API request fails
+    """
+    global _account_cache
+
+    # Return cached data if valid
+    if _is_cache_valid(_account_cache):
+        _, account_data = _account_cache
+        logger.debug("Returning cached account info")
+        return account_data
+
+    logger.debug("Fetching account information from Alpaca")
+
+    try:
+        account = trading_client.get_account()
+
+        account_data = {
+            "id": str(account.id),
+            "account_number": str(account.account_number),
+            "status": account.status.value,
+            "currency": account.currency,
+            "buying_power": float(account.buying_power),
+            "cash": float(account.cash),
+            "portfolio_value": float(account.portfolio_value),
+            "pattern_day_trader": account.pattern_day_trader,
+            "trading_blocked": account.trading_blocked,
+            "transfers_blocked": account.transfers_blocked,
+            "account_blocked": account.account_blocked,
+            "created_at": str(account.created_at),
+            "shorting_enabled": account.shorting_enabled,
+            "equity": float(account.equity),
+            "last_equity": float(account.last_equity),
+            "multiplier": float(account.multiplier),
+            "initial_margin": float(account.initial_margin),
+            "maintenance_margin": float(account.maintenance_margin),
+            "last_maintenance_margin": float(account.last_maintenance_margin),
+            "daytrade_count": account.daytrade_count,
+        }
+
+        # Cache the result
+        _account_cache = (datetime.now(), account_data)
+
+        logger.debug(f"Account info fetched: equity=${account_data['equity']:.2f}, "
+                    f"cash=${account_data['cash']:.2f}")
+
+        return account_data
+
+    except Exception as e:
+        error_msg = f"Failed to fetch account info: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+# =============================================================================
+# Positions
+# =============================================================================
+
+def fetch_positions() -> List[Dict]:
+    """Fetch all current positions from Alpaca with caching.
+
+    Returns detailed position information including unrealized P&L,
+    cost basis, and current market value for each position.
+    Results are cached for 30 seconds to reduce API calls.
+
+    Reference: https://docs.alpaca.markets/reference/getallopenpositions-1
+
+    Returns:
+        List of dicts, each containing:
+        - symbol: Stock ticker
+        - qty: Quantity (positive for long, negative for short)
+        - side: 'long' or 'short'
+        - market_value: Current market value
+        - cost_basis: Total cost basis
+        - unrealized_pl: Unrealized profit/loss
+        - unrealized_plpc: Unrealized P&L percentage
+        - current_price: Current market price
+        - avg_entry_price: Average entry price
+
+    Raises:
+        Exception: If API request fails
+    """
+    global _positions_cache
+
+    # Return cached data if valid
+    if _is_cache_valid(_positions_cache):
+        _, positions_list = _positions_cache
+        logger.debug(f"Returning cached positions ({len(positions_list)} positions)")
+        return positions_list
+
+    logger.debug("Fetching all positions from Alpaca")
+
+    try:
+        positions = trading_client.get_all_positions()
+
+        positions_list = []
+        for pos in positions:
+            position_data = {
+                "asset_id": str(pos.asset_id),
+                "symbol": pos.symbol,
+                "exchange": pos.exchange.value,
+                "asset_class": pos.asset_class.value,
+                "avg_entry_price": float(pos.avg_entry_price),
+                "qty": float(pos.qty),
+                "qty_available": float(pos.qty_available),
+                "side": "long" if float(pos.qty) > 0 else "short",
+                "market_value": float(pos.market_value),
+                "cost_basis": float(pos.cost_basis),
+                "unrealized_pl": float(pos.unrealized_pl),
+                "unrealized_plpc": float(pos.unrealized_plpc),
+                "unrealized_intraday_pl": float(pos.unrealized_intraday_pl),
+                "unrealized_intraday_plpc": float(pos.unrealized_intraday_plpc),
+                "current_price": float(pos.current_price),
+                "lastday_price": float(pos.lastday_price),
+                "change_today": float(pos.change_today),
+            }
+            positions_list.append(position_data)
+
+        # Cache the result
+        _positions_cache = (datetime.now(), positions_list)
+
+        logger.debug(f"Fetched {len(positions_list)} positions")
+
+        return positions_list
+
+    except Exception as e:
+        error_msg = f"Failed to fetch positions: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def fetch_position(symbol: str) -> Dict:
+    """Fetch a specific position by symbol.
+
+    Args:
+        symbol: Stock ticker symbol (e.g., "AAPL")
+
+    Returns:
+        Dict with position details (same structure as fetch_positions items)
+
+    Raises:
+        Exception: If position not found or API request fails
+    """
+    logger.info(f"Fetching position for {symbol}")
+
+    try:
+        pos = trading_client.get_open_position(symbol)
+
+        position_data = {
+            "asset_id": str(pos.asset_id),
+            "symbol": pos.symbol,
+            "exchange": pos.exchange.value,
+            "asset_class": pos.asset_class.value,
+            "avg_entry_price": float(pos.avg_entry_price),
+            "qty": float(pos.qty),
+            "qty_available": float(pos.qty_available),
+            "side": "long" if float(pos.qty) > 0 else "short",
+            "market_value": float(pos.market_value),
+            "cost_basis": float(pos.cost_basis),
+            "unrealized_pl": float(pos.unrealized_pl),
+            "unrealized_plpc": float(pos.unrealized_plpc),
+            "current_price": float(pos.current_price),
+        }
+
+        logger.info(f"Position for {symbol}: qty={position_data['qty']}, "
+                   f"unrealized_pl=${position_data['unrealized_pl']:.2f}")
+
+        return position_data
+
+    except Exception as e:
+        error_msg = f"Failed to fetch position for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+# =============================================================================
+# Orders
+# =============================================================================
+
+def fetch_orders(
+    status: Optional[str] = None,
+    limit: int = 100,
+    after: Optional[datetime] = None,
+    until: Optional[datetime] = None
+) -> List[Dict]:
+    """Fetch orders from Alpaca with optional filters.
+
+    Reference: https://docs.alpaca.markets/reference/getallorders-1
+
+    Args:
+        status: Filter by status - 'open', 'closed', 'all' (default: 'all')
+        limit: Maximum number of orders to return (default: 100)
+        after: Filter orders after this timestamp
+        until: Filter orders before this timestamp
+
+    Returns:
+        List of dicts, each containing order details:
+        - id: Order ID
+        - symbol: Stock ticker
+        - qty: Order quantity
+        - side: 'buy' or 'sell'
+        - type: Order type (market, limit, etc.)
+        - status: Order status
+        - filled_qty: Filled quantity
+        - filled_avg_price: Average fill price
+
+    Raises:
+        Exception: If API request fails
+    """
+    logger.info(f"Fetching orders (status={status}, limit={limit})")
+
+    try:
+        # Map status string to QueryOrderStatus enum
+        status_map = {
+            "open": QueryOrderStatus.OPEN,
+            "closed": QueryOrderStatus.CLOSED,
+            "all": QueryOrderStatus.ALL,
+        }
+
+        query_status = status_map.get(status, QueryOrderStatus.ALL)
+
+        # Build request
+        request = GetOrdersRequest(
+            status=query_status,
+            limit=limit,
+            after=after,
+            until=until
+        )
+
+        orders = trading_client.get_orders(filter=request)
+
+        orders_list = []
+        for order in orders:
+            order_data = {
+                "id": str(order.id),
+                "client_order_id": str(order.client_order_id),
+                "created_at": str(order.created_at),
+                "updated_at": str(order.updated_at),
+                "submitted_at": str(order.submitted_at),
+                "filled_at": str(order.filled_at) if order.filled_at else None,
+                "expired_at": str(order.expired_at) if order.expired_at else None,
+                "canceled_at": str(order.canceled_at) if order.canceled_at else None,
+                "asset_id": order.asset_id,
+                "symbol": order.symbol,
+                "asset_class": order.asset_class.value,
+                "qty": float(order.qty) if order.qty else None,
+                "filled_qty": float(order.filled_qty) if order.filled_qty else 0,
+                "type": order.type.value,
+                "side": order.side.value,
+                "time_in_force": order.time_in_force.value,
+                "limit_price": float(order.limit_price) if order.limit_price else None,
+                "stop_price": float(order.stop_price) if order.stop_price else None,
+                "filled_avg_price": float(order.filled_avg_price) if order.filled_avg_price else None,
+                "status": order.status.value,
+                "extended_hours": order.extended_hours,
+                "legs": order.legs,
+            }
+            orders_list.append(order_data)
+
+        logger.info(f"Fetched {len(orders_list)} orders")
+
+        return orders_list
+
+    except Exception as e:
+        error_msg = f"Failed to fetch orders: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_market_order(symbol: str, qty: float, side: str) -> Dict:
+    """Place a market order via Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+
+    Returns:
+        Dict with order details:
+        - id: Order UUID
+        - symbol: Ticker
+        - qty: Requested quantity
+        - side: "buy" | "sell"
+        - type: "market"
+        - status: Order status from Alpaca
+        - submitted_at: ISO-8601 submission timestamp
+        - client_order_id: Client-side UUID
+
+    Raises:
+        ValueError: If qty <= 0 or side is invalid.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    logger.info(f"[place_market_order] {side.upper()} {qty} {symbol}")
+
+    _assert_trading_allowed()
+
+    try:
+        request = MarketOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_market_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for {side} {qty} {symbol}: {err_str}"
+            ) from e
+        error_msg = f"Failed to place market order ({side} {qty} {symbol}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_limit_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    limit_price: float,
+    time_in_force: str = "day",
+) -> Dict:
+    """Place a limit order via Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+        limit_price: Maximum (buy) or minimum (sell) execution price.
+        time_in_force: "day" | "gtc" | "ioc" | "fok". Default "day".
+
+    Returns:
+        Dict with order details (same shape as place_market_order).
+
+    Raises:
+        ValueError: If qty <= 0 or limit_price <= 0.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    if limit_price <= 0:
+        raise ValueError(f"limit_price must be > 0, got {limit_price}")
+
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    tif_map = {
+        "day": TimeInForce.DAY,
+        "gtc": TimeInForce.GTC,
+        "ioc": TimeInForce.IOC,
+        "fok": TimeInForce.FOK,
+    }
+    tif_enum = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+    logger.info(f"[place_limit_order] {side.upper()} {qty} {symbol} @ ${limit_price:.2f}")
+
+    _assert_trading_allowed()
+
+    try:
+        request = LimitOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            limit_price=limit_price,
+            time_in_force=tif_enum,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "limit_price": float(order.limit_price) if order.limit_price else limit_price,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_limit_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for {side} {qty} {symbol} @ {limit_price}: {err_str}"
+            ) from e
+        error_msg = f"Failed to place limit order ({side} {qty} {symbol} @ {limit_price}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_stop_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    time_in_force: str = "day",
+) -> Dict:
+    """Place a stop (stop-market) order via Alpaca.
+
+    When the market price reaches ``stop_price`` the order becomes a market
+    order and fills at the next available price.  Commonly used as a stop-loss
+    on an existing position.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price.  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+
+    Returns:
+        Dict with order details: id, symbol, qty, side, type, stop_price,
+        status, submitted_at, time_in_force.
+
+    Raises:
+        ValueError: If qty <= 0 or stop_price <= 0.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    if stop_price <= 0:
+        raise ValueError(f"stop_price must be > 0, got {stop_price}")
+
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    tif_map = {
+        "day": TimeInForce.DAY,
+        "gtc": TimeInForce.GTC,
+        "ioc": TimeInForce.IOC,
+        "fok": TimeInForce.FOK,
+    }
+    tif_enum = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+    logger.info(f"[place_stop_order] {side.upper()} {qty} {symbol} stop@${stop_price:.2f}")
+
+    _assert_trading_allowed()
+
+    try:
+        request = StopOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            stop_price=stop_price,
+            time_in_force=tif_enum,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "stop_price": float(order.stop_price) if order.stop_price else stop_price,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_stop_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for stop {side} {qty} {symbol} @ {stop_price}: {err_str}"
+            ) from e
+        error_msg = f"Failed to place stop order ({side} {qty} {symbol} stop@{stop_price}): {err_str}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def place_stop_limit_order(
+    symbol: str,
+    qty: float,
+    side: str,
+    stop_price: float,
+    limit_price: float,
+    time_in_force: str = "day",
+) -> Dict:
+    """Place a stop-limit order via Alpaca.
+
+    When the market price reaches ``stop_price`` a limit order at
+    ``limit_price`` is submitted.  Provides trigger control (stop) AND
+    execution price control (limit) — ideal for risk-managed entries/exits.
+
+    Reference: https://docs.alpaca.markets/reference/postorder
+
+    Args:
+        symbol: Stock ticker (e.g. "AAPL").
+        qty: Number of shares to buy or sell.  Must be > 0.
+        side: "buy" or "sell".
+        stop_price: Trigger price that activates the limit order.  Must be > 0.
+        limit_price: Execution price cap (buy) or floor (sell).  Must be > 0.
+        time_in_force: "day" | "gtc" | "ioc" | "fok".  Default "day".
+
+    Returns:
+        Dict with order details: id, symbol, qty, side, type, stop_price,
+        limit_price, status, submitted_at, time_in_force.
+
+    Raises:
+        ValueError: If qty <= 0, stop_price <= 0, or limit_price <= 0.
+        Exception: If Alpaca API request fails.
+    """
+    if qty <= 0:
+        raise ValueError(f"qty must be > 0, got {qty}")
+    if stop_price <= 0:
+        raise ValueError(f"stop_price must be > 0, got {stop_price}")
+    if limit_price <= 0:
+        raise ValueError(f"limit_price must be > 0, got {limit_price}")
+
+    side_enum = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+    tif_map = {
+        "day": TimeInForce.DAY,
+        "gtc": TimeInForce.GTC,
+        "ioc": TimeInForce.IOC,
+        "fok": TimeInForce.FOK,
+    }
+    tif_enum = tif_map.get(time_in_force.lower(), TimeInForce.DAY)
+    logger.info(
+        f"[place_stop_limit_order] {side.upper()} {qty} {symbol} "
+        f"stop@${stop_price:.2f} limit@${limit_price:.2f}"
+    )
+
+    _assert_trading_allowed()
+
+    try:
+        request = StopLimitOrderRequest(
+            symbol=symbol.upper(),
+            qty=qty,
+            side=side_enum,
+            stop_price=stop_price,
+            limit_price=limit_price,
+            time_in_force=tif_enum,
+        )
+        order = trading_client.submit_order(request)
+        result = {
+            "id": str(order.id),
+            "client_order_id": str(order.client_order_id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else qty,
+            "side": order.side.value,
+            "type": order.type.value,
+            "stop_price": float(order.stop_price) if order.stop_price else stop_price,
+            "limit_price": float(order.limit_price) if order.limit_price else limit_price,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+            "time_in_force": order.time_in_force.value,
+        }
+        logger.info(f"[place_stop_limit_order] submitted order {result['id']} status={result['status']}")
+        return result
+    except (ValueError, RuntimeError):
+        raise
+    except Exception as e:
+        err_str = str(e)
+        if "403" in err_str or "insufficient" in err_str.lower():
+            raise InsufficientFundsError(
+                f"Insufficient buying power for stop-limit {side} {qty} {symbol}: {err_str}"
+            ) from e
+        error_msg = (
+            f"Failed to place stop-limit order "
+            f"({side} {qty} {symbol} stop@{stop_price} limit@{limit_price}): {err_str}"
+        )
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def cancel_order(order_id: str) -> Dict:
+    """Cancel an open order by its UUID.
+
+    Reference: https://docs.alpaca.markets/reference/deleteorderbyorderid-1
+
+    Args:
+        order_id: Alpaca order UUID string.
+
+    Returns:
+        Dict with {"order_id": str, "status": "cancelled", "timestamp": str}.
+
+    Raises:
+        Exception: If the order does not exist or cannot be cancelled.
+    """
+    logger.info(f"[cancel_order] order_id={order_id}")
+    try:
+        trading_client.cancel_order_by_id(order_id)
+        result = {
+            "order_id": order_id,
+            "status": "cancelled",
+            "timestamp": datetime.now().isoformat(),
+        }
+        logger.info(f"[cancel_order] order {order_id} cancelled")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to cancel order {order_id}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def cancel_all_orders() -> Dict:
+    """Cancel all open orders.
+
+    Reference: https://docs.alpaca.markets/reference/deleteallorders-1
+
+    Returns:
+        Dict with {"cancelled_count": int, "status": "all_cancelled", "timestamp": str}.
+
+    Raises:
+        Exception: If Alpaca API request fails.
+    """
+    logger.info("[cancel_all_orders] cancelling all open orders")
+    try:
+        cancel_statuses = trading_client.cancel_orders()
+        count = len(cancel_statuses) if cancel_statuses else 0
+        result = {
+            "cancelled_count": count,
+            "status": "all_cancelled",
+            "timestamp": datetime.now().isoformat(),
+        }
+        logger.info(f"[cancel_all_orders] cancelled {count} orders")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to cancel all orders: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def close_position(symbol: str) -> Dict:
+    """Liquidate an open position for a symbol at market price.
+
+    Reference: https://docs.alpaca.markets/reference/deleteaccessopenposition-1
+
+    Args:
+        symbol: Stock ticker whose position to close.
+
+    Returns:
+        Dict with order details of the closing market order.
+
+    Raises:
+        Exception: If the position does not exist or cannot be closed.
+    """
+    logger.info(f"[close_position] closing position for {symbol}")
+    try:
+        order = trading_client.close_position(symbol.upper())
+        result = {
+            "id": str(order.id),
+            "symbol": order.symbol,
+            "qty": float(order.qty) if order.qty else None,
+            "side": order.side.value,
+            "type": order.type.value,
+            "status": order.status.value,
+            "submitted_at": str(order.submitted_at),
+        }
+        logger.info(f"[close_position] close order {result['id']} submitted for {symbol}")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to close position for {symbol}: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def close_all_positions(cancel_orders_first: bool = True) -> Dict:
+    """Liquidate all open positions at market price.
+
+    Reference: https://docs.alpaca.markets/reference/deleteallopenpositions-1
+
+    Args:
+        cancel_orders_first: Cancel open orders before closing positions.
+            Default True to avoid partial-fill conflicts.
+
+    Returns:
+        Dict with {"closed_count": int, "status": "all_closed", "timestamp": str}.
+
+    Raises:
+        Exception: If Alpaca API request fails.
+    """
+    logger.info(f"[close_all_positions] cancel_orders_first={cancel_orders_first}")
+    try:
+        close_responses = trading_client.close_all_positions(
+            cancel_orders=cancel_orders_first
+        )
+        count = len(close_responses) if close_responses else 0
+        result = {
+            "closed_count": count,
+            "status": "all_closed",
+            "cancel_orders_first": cancel_orders_first,
+            "timestamp": datetime.now().isoformat(),
+        }
+        logger.info(f"[close_all_positions] submitted close orders for {count} positions")
+        return result
+    except Exception as e:
+        error_msg = f"Failed to close all positions: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+# =============================================================================
+# Portfolio History
+# =============================================================================
+
+def fetch_portfolio_history(
+    period: str = "1M",
+    timeframe: str = "1D",
+    extended_hours: bool = False
+) -> Dict:
+    """Fetch portfolio performance history from Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/getportfoliohistory-1
+
+    Args:
+        period: Time period - "1D", "1W", "1M", "3M", "1A", "all"
+        timeframe: Aggregation timeframe - "1Min", "5Min", "15Min", "1H", "1D"
+        extended_hours: Include extended hours data
+
+    Returns:
+        Dict with portfolio history:
+        - timestamp: List of timestamps
+        - equity: List of equity values
+        - profit_loss: List of profit/loss values
+        - profit_loss_pct: List of P&L percentages
+        - base_value: Starting portfolio value
+        - timeframe: Aggregation timeframe used
+
+    Raises:
+        Exception: If API request fails
+    """
+    logger.info(f"Fetching portfolio history (period={period}, timeframe={timeframe})")
+
+    try:
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+        request = GetPortfolioHistoryRequest(
+            period=period,
+            timeframe=timeframe,
+            extended_hours=extended_hours
+        )
+
+        history = trading_client.get_portfolio_history(request)
+
+        history_data = {
+            "timestamp": [str(ts) for ts in history.timestamp],
+            "equity": [float(e) for e in history.equity],
+            "profit_loss": [float(pl) for pl in history.profit_loss],
+            "profit_loss_pct": [float(plp) for plp in history.profit_loss_pct],
+            "base_value": float(history.base_value),
+            "timeframe": history.timeframe,
+        }
+
+        logger.info(f"Portfolio history fetched: {len(history_data['timestamp'])} data points")
+
+        return history_data
+
+    except Exception as e:
+        error_msg = f"Failed to fetch portfolio history: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+# =============================================================================
+# Watchlists
+# =============================================================================
+
+def fetch_watchlists() -> List[Dict]:
+    """Fetch all watchlists from Alpaca.
+
+    Reference: https://docs.alpaca.markets/reference/getwatchlists-1
+
+    Returns:
+        List of watchlist dictionaries, each containing:
+        - id: Watchlist UUID
+        - name: Watchlist name
+        - account_id: Account UUID
+        - created_at: Creation timestamp
+        - updated_at: Last update timestamp
+        - assets: List of asset dicts with symbol info
+
+    Raises:
+        Exception: If API request fails
+    """
+    logger.info("Fetching watchlists from Alpaca")
+
+    try:
+        watchlists = trading_client.get_watchlists()
+
+        watchlists_data = []
+        for wl in watchlists:
+            watchlist_dict = {
+                "id": str(wl.id),
+                "name": wl.name,
+                "account_id": str(wl.account_id),
+                "created_at": str(wl.created_at) if hasattr(wl, 'created_at') else None,
+                "updated_at": str(wl.updated_at) if hasattr(wl, 'updated_at') else None,
+                "assets": []
+            }
+
+            # Get watchlist details to fetch assets
+            try:
+                detailed_wl = trading_client.get_watchlist_by_id(wl.id)
+                if hasattr(detailed_wl, 'assets'):
+                    watchlist_dict["assets"] = [
+                        {
+                            "symbol": asset.symbol,
+                            "class": asset.asset_class if hasattr(asset, 'asset_class') else None,
+                            "exchange": asset.exchange if hasattr(asset, 'exchange') else None
+                        }
+                        for asset in detailed_wl.assets
+                    ]
+            except Exception as e:
+                logger.warning(f"Could not fetch assets for watchlist {wl.name}: {e}")
+
+            watchlists_data.append(watchlist_dict)
+
+        logger.info(f"Fetched {len(watchlists_data)} watchlists")
+
+        return watchlists_data
+
+    except Exception as e:
+        error_msg = f"Failed to fetch watchlists: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+def get_all_watchlist_symbols() -> List[str]:
+    """Get all unique symbols across all watchlists.
+
+    Returns:
+        List of unique stock symbols from all watchlists
+
+    Raises:
+        Exception: If API request fails
+    """
+    try:
+        watchlists = fetch_watchlists()
+        symbols = set()
+
+        for wl in watchlists:
+            for asset in wl.get("assets", []):
+                if asset.get("symbol"):
+                    symbols.add(asset["symbol"])
+
+        symbols_list = sorted(list(symbols))
+        logger.info(f"Found {len(symbols_list)} unique symbols across all watchlists")
+
+        return symbols_list
+
+    except Exception as e:
+        error_msg = f"Failed to get watchlist symbols: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise Exception(error_msg)
+
+
+# =============================================================================
+# Main Block for Functional Testing
+# =============================================================================
+
+if __name__ == "__main__":
+    """Functional tests for Alpaca portfolio skills."""
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Test Alpaca portfolio skills")
+    parser.add_argument("--test", choices=["account", "positions", "orders", "history", "all"],
+                        default="all", help="Which test to run")
+    parser.add_argument("--symbol", default="AAPL", help="Symbol for position test")
+
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print("Alpaca Portfolio Skills Functional Tests")
+    print("=" * 60)
+
+    if args.test in ["account", "all"]:
+        print("\n[TEST 1] fetch_account_info()")
+        print("-" * 60)
+        try:
+            account = fetch_account_info()
+            print(json.dumps(account, indent=2))
+        except Exception as e:
+            print(f"[FAIL] {e}")
+
+    if args.test in ["positions", "all"]:
+        print("\n[TEST 2] fetch_positions()")
+        print("-" * 60)
+        try:
+            positions = fetch_positions()
+            print(json.dumps(positions, indent=2))
+        except Exception as e:
+            print(f"[FAIL] {e}")
+
+        # Test single position if symbol specified
+        if args.symbol:
+            print(f"\n[TEST 2b] fetch_position('{args.symbol}')")
+            print("-" * 60)
+            try:
+                position = fetch_position(args.symbol)
+                print(json.dumps(position, indent=2))
+            except Exception as e:
+                print(f"[FAIL] {e}")
+
+    if args.test in ["orders", "all"]:
+        print("\n[TEST 3] fetch_orders()")
+        print("-" * 60)
+        try:
+            orders = fetch_orders(status="all", limit=10)
+            print(json.dumps(orders, indent=2))
+        except Exception as e:
+            print(f"[FAIL] {e}")
+
+    if args.test in ["history", "all"]:
+        print("\n[TEST 4] fetch_portfolio_history()")
+        print("-" * 60)
+        try:
+            history = fetch_portfolio_history(period="1M", timeframe="1D")
+            print(json.dumps(history, indent=2))
+        except Exception as e:
+            print(f"[FAIL] {e}")
+
+    print("\n" + "=" * 60)
+    print("Tests Complete")
+    print("=" * 60)

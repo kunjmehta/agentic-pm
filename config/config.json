@@ -1,5 +1,26 @@
 {
-  "watchlist": ["AAPL"],
+  "watchlist": {
+    "AAPL": {
+      "enabled": true,
+      "strategies": [
+        "mean_reversion",
+        "vwap_reversion",
+        "rsi_divergence",
+        "momentum_burst",
+        "golden_cross"
+      ],
+      "timeframes": ["1Min", "1Hour", "1Day"],
+      "auto_compute_indicators": true,
+      "autonomous_trading_enabled": false
+    }
+  },
+  "autonomous_trading": {
+    "enabled": false,
+    "min_signal_confidence": 0.65,
+    "require_hitl": true,
+    "duplicate_order_lookback_hours": 24,
+    "max_orders_per_cycle": 5
+  },
   "risk_management": {
     "max_position_size": 1000,
     "max_daily_trades": 10,
@@ -39,14 +60,16 @@
   "cache": {
     "enabled": true,
     "batch_interval_minutes": 5,
-    "max_size": 100000
+    "max_size": 100000,
+    "max_memory_mb": 500
   },
   "etl": {
     "enabled": true,
     "mode": "auto-run",
     "description": "Indicators computed automatically when bars are saved (no separate scheduler)",
     "timeframes": ["1Min", "1Hour", "1Day"],
-    "lookback_days": 60
+    "lookback_days": 60,
+    "schedule_interval_minutes": 30
   },
   "archival": {
     "enabled": true,
@@ -58,5 +81,140 @@
     "trades_page_limit": 10000,
     "trades_max_total": null
   },
-  "sandbox_mode": true
+  "strategy": {
+    "enabled": true,
+    "hitl": {
+      "enabled": true
+    },
+    "position_sizing": {
+      "method": "fixed_fractional",
+      "risk_pct": 0.02,
+      "max_position_pct": 0.20
+    },
+    "_comment_intraday": "All intraday strategies use 1Min bars with longer lookbacks for multi-hour analysis",
+    "mean_reversion": {
+      "threshold": 2.5,
+      "ma_period": 20,
+      "lookback": 120,
+      "sr_lookback": 60,
+      "_note": "1Min bars, 120-bar lookback = 2 hours of intraday data"
+    },
+    "vwap_reversion": {
+      "dev_pct": 0.002,
+      "vol_mult": 1.5,
+      "stop_pct": 0.003,
+      "min_bars": 60,
+      "_note": "1Min bars, 0.2% deviation threshold for intraday mean reversion to VWAP"
+    },
+    "opening_range_breakout": {
+      "range_bars": 30,
+      "_note": "1Min bars, 30-bar opening range = first 30 minutes of trading"
+    },
+    "rsi_divergence": {
+      "lookback": 60,
+      "oversold": 35.0,
+      "_note": "1Min bars, 60-bar lookback = 1 hour of divergence detection window"
+    },
+    "momentum_burst": {
+      "vol_mult": 2.0,
+      "min_move": 0.001,
+      "trail_pct": 0.002,
+      "min_bars": 20,
+      "_note": "1Min bars, 0.1% move threshold for intraday bursts, 2× volume spike"
+    },
+    "golden_cross": {
+      "fast": 50,
+      "slow": 200,
+      "_note": "1Min bars, 50/200 MAs = ~1hr/3.5hr crossover for intraday trend"
+    },
+    "breakout_52w": {
+      "lookback": 252,
+      "vol_mult": 1.5,
+      "trail_pct": 0.10,
+      "_note": "Daily bars, not intraday - uses end-of-day data"
+    },
+    "mean_reversion_daily": {
+      "lookback": 20,
+      "threshold": 2.5,
+      "ma_period": 20,
+      "_note": "Daily bars, not intraday - uses end-of-day data"
+    },
+    "earnings_drift": {
+      "lookback": 10,
+      "min_move": 0.04,
+      "vol_mult": 2.0,
+      "hold_days": 5,
+      "_note": "Daily bars, not intraday - post-earnings drift over multiple days"
+    }
+  },
+  "sandbox_mode": true,
+  "middleware": {
+    "model_call_limit": 5,
+    "tool_call_limit": 1,
+    "tool_retry_count": 2
+  },
+  "graph_api": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "reasoning_model": "gpt-5-mini",
+    "routing_model": "gpt-4o-mini",
+    "model_temperature": 0.0,
+    "synthesizer_temperature": 0.2,
+    "max_tokens": 2048
+  },
+  "scheduled_backtests": {
+    "enabled": true,
+    "schedule": "0 17 * * 1-5",
+    "_schedule_note": "5 PM ET weekdays (post-market close)",
+    "default_backtests": [
+      {
+        "name": "workflow_a_conservative",
+        "description": "Conservative mean-reversion with tight stops",
+        "strategy": "mean-reversion",
+        "workflow_type": "A",
+        "prompt": "Run backtest using mean-reversion strategy with conservative position sizing (max 5% per trade), stop loss at 1%, and take profit at 3%. Use 1-minute bars and analyze last 30 days.",
+        "timeframe": "1Min",
+        "lookback_days": 30,
+        "parameters": {
+          "threshold": 2.5,
+          "ma_period": 20,
+          "stop_loss_pct": 0.01,
+          "take_profit_pct": 0.03,
+          "max_position_pct": 0.05
+        }
+      },
+      {
+        "name": "workflow_b_momentum",
+        "description": "Momentum-burst scalping strategy",
+        "strategy": "momentum-burst",
+        "workflow_type": "B",
+        "prompt": "Execute momentum-burst backtest targeting 3x volume spikes with 0.5% minimum price move. Scale in aggressively (up to 10% position) and trail stops at 0.2%. Test on 1-minute bars for last 14 days.",
+        "timeframe": "1Min",
+        "lookback_days": 14,
+        "parameters": {
+          "vol_mult": 3.0,
+          "min_move": 0.005,
+          "trail_pct": 0.002,
+          "max_position_pct": 0.10
+        }
+      },
+      {
+        "name": "workflow_c_swing",
+        "description": "Daily swing trading with golden cross",
+        "strategy": "golden-cross",
+        "workflow_type": "C",
+        "prompt": "Backtest golden cross strategy (50/200 MA crossover) on daily bars over 1 year. Use 15% position sizing with 5% stop loss and 15% take profit. Exit on crossover reversal.",
+        "timeframe": "1Day",
+        "lookback_days": 365,
+        "parameters": {
+          "fast": 50,
+          "slow": 200,
+          "max_position_pct": 0.15,
+          "stop_loss_pct": 0.05,
+          "take_profit_pct": 0.15
+        }
+      }
+    ],
+    "apply_to_symbols": ["AAPL", "MSFT", "GOOGL", "TSLA"]
+  }
 }

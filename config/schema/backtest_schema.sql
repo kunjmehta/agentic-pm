@@ -71,7 +71,8 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     exit_price DECIMAL(10, 2),
 
     quantity INTEGER NOT NULL,
-    side VARCHAR NOT NULL,  -- long, short
+    side VARCHAR NOT NULL,  -- long, short (position direction)
+    action VARCHAR DEFAULT 'buy',  -- buy, sell, short, cover (the trade action taken)
 
     -- P&L tracking
     pnl DECIMAL(10, 2),
@@ -83,6 +84,9 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Migrate existing tables: add action column if absent
+ALTER TABLE backtest_trades ADD COLUMN IF NOT EXISTS action VARCHAR DEFAULT 'buy';
 
 -- Indexes for backtest_trades
 CREATE INDEX IF NOT EXISTS idx_backtest_trades_run
@@ -174,6 +178,8 @@ COMMENT ON COLUMN backtest_runs.run_id IS 'UUID identifier for the backtest run'
 COMMENT ON COLUMN backtest_runs.strategy_parameters IS 'JSON object containing strategy parameters used';
 COMMENT ON COLUMN backtest_runs.status IS 'Status: running, completed, or failed';
 
+COMMENT ON COLUMN backtest_trades.action IS 'Trade action: buy (long entry), sell (long exit), short (short entry), cover (short exit)';
+COMMENT ON COLUMN backtest_trades.side IS 'Position side: long or short';
 COMMENT ON COLUMN backtest_trades.entry_signal IS 'JSON object with indicator values that triggered trade entry';
 COMMENT ON COLUMN backtest_trades.exit_reason IS 'Reason for trade exit: stop_loss, take_profit, signal_reversal, or eod';
 
