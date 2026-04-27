@@ -27,9 +27,9 @@ from src.common.external.alpha_vantage import (
     fetch_balance_sheet,
     fetch_cash_flow
 )
-from src.common.dao import AlpacaDAO, AlphaVantageDAO
-from src.common.data_gatherer.alpaca_stream import AlpacaDataStreamer, default_bar_handler
-from src.common.data_gatherer.db_stream_handlers import combined_trade_cache_handler
+from src.common.utils.container import get_alpaca_dao, get_alpha_vantage_dao
+from src.common.ingestion.alpaca_stream import AlpacaDataStreamer, default_bar_handler
+from src.common.ingestion.stream_handlers import combined_trade_cache_handler
 from src.common.utils import get_logger, config
 
 
@@ -58,8 +58,8 @@ class DataCoordinator:
             symbols = config.get("watchlist", default=["AAPL"])
 
         self.symbols = [s.upper() for s in symbols]
-        self.alpaca_dao = AlpacaDAO()
-        self.av_dao = AlphaVantageDAO()
+        self.alpaca_dao = get_alpaca_dao()
+        self.av_dao = get_alpha_vantage_dao()
         self.streamers = {}  # symbol -> streamer mapping
         self.stream_tasks = []  # Track async tasks
 
@@ -96,7 +96,7 @@ class DataCoordinator:
                 end=end.isoformat(),
                 timeframe="1Day"
             )
-            logger.info(f"  ✓ Fetched {len(daily_bars)} daily bars")
+            logger.info(f"  Fetched {len(daily_bars)} daily bars")
 
             # 1-minute bars
             logger.info(f"  Fetching 1-minute bars ({days_back} days)...")
@@ -106,7 +106,7 @@ class DataCoordinator:
                 end=end.isoformat(),
                 timeframe="1Min"
             )
-            logger.info(f"  ✓ Fetched {len(minute_bars)} 1-minute bars")
+            logger.info(f"  Fetched {len(minute_bars)} 1-minute bars")
 
             # Historical trades
             logger.info(f"  Fetching historical trades ({days_back} days)...")
@@ -116,9 +116,9 @@ class DataCoordinator:
                 end=end.isoformat(),
                 limit=100000
             )
-            logger.info(f"  ✓ Fetched {len(trades)} trades")
+            logger.info(f"  Fetched {len(trades)} trades")
 
-            logger.info(f"✓ Historical market data for {symbol} complete")
+            logger.info(f"Historical market data for {symbol} complete")
 
         except Exception as e:
             logger.error(f"Failed to fetch historical market data for {symbol}: {e}", exc_info=True)
@@ -149,34 +149,34 @@ class DataCoordinator:
             # Company Overview
             logger.info(f"  Fetching company overview...")
             overview = fetch_company_overview(symbol)
-            logger.info(f"  ✓ Company: {overview.get('Name', 'N/A')}")
+            logger.info(f"  Company: {overview.get('Name', 'N/A')}")
 
             # Dividends
             logger.info(f"  Fetching dividend history...")
             dividends = fetch_dividend_history(symbol)
-            logger.info(f"  ✓ Fetched {len(dividends)} dividend records")
+            logger.info(f"  Fetched {len(dividends)} dividend records")
 
             # Earnings - Annual
             logger.info(f"  Fetching annual earnings...")
             earnings_a = fetch_earnings_history(symbol, quarterly=False)
-            logger.info(f"  ✓ Fetched {len(earnings_a)} annual earnings records")
+            logger.info(f"  Fetched {len(earnings_a)} annual earnings records")
 
             # Income Statements - Annual
             logger.info(f"  Fetching annual income statements...")
             income_a = fetch_income_statement(symbol, quarterly=False)
-            logger.info(f"  ✓ Fetched {len(income_a)} annual income statements")
+            logger.info(f"  Fetched {len(income_a)} annual income statements")
 
             # Balance Sheets - Annual
             logger.info(f"  Fetching annual balance sheets...")
             balance_a = fetch_balance_sheet(symbol, quarterly=False)
-            logger.info(f"  ✓ Fetched {len(balance_a)} annual balance sheets")
+            logger.info(f"  Fetched {len(balance_a)} annual balance sheets")
 
             # Cash Flows - Annual
             logger.info(f"  Fetching annual cash flows...")
             cash_a = fetch_cash_flow(symbol, quarterly=False)
-            logger.info(f"  ✓ Fetched {len(cash_a)} annual cash flows")
+            logger.info(f"  Fetched {len(cash_a)} annual cash flows")
 
-            logger.info(f"✓ ALL fundamental data for {symbol} complete")
+            logger.info(f"ALL fundamental data for {symbol} complete")
 
         except Exception as e:
             logger.error(f"Failed to fetch fundamentals for {symbol}: {e}", exc_info=True)
@@ -201,12 +201,12 @@ class DataCoordinator:
         self.alpaca_dao.add_to_watchlist(symbol, notes="Auto-added by DataCoordinator")
 
         # Fetch ALL historical market data
-        self.fetch_historical_market_data(symbol, days_back=days_back)
+        await asyncio.to_thread(self.fetch_historical_market_data, symbol, days_back)
 
         # Fetch ALL fundamental data
-        self.fetch_all_fundamentals(symbol)
+        await asyncio.to_thread(self.fetch_all_fundamentals, symbol)
 
-        logger.info(f"✓✓ {symbol} initialization complete ✓✓")
+        logger.info(f"{symbol} initialization complete")
 
     async def start_streaming(self, symbol: str):
         """Start real-time streaming for a symbol.
@@ -226,7 +226,7 @@ class DataCoordinator:
         # Run streamer in background thread and store task
         task = asyncio.create_task(asyncio.to_thread(streamer.run))
         self.stream_tasks.append(task)
-        logger.info(f"✓ Real-time stream started for {symbol}")
+        logger.info(f"Real-time stream started for {symbol}")
 
     async def run_all(self):
         """Initialize ALL symbols and start streaming for all.
@@ -255,7 +255,7 @@ class DataCoordinator:
         for symbol in self.symbols:
             await self.start_streaming(symbol)
 
-        logger.info("\n✓✓✓ DataCoordinator: All symbols initialized and streaming ✓✓✓\n")
+        logger.info("DataCoordinator: All symbols initialized and streaming")
 
     async def run_streaming_loop(self, shutdown_flag):
         """Keep the event loop running while streams are active.
@@ -288,30 +288,6 @@ class DataCoordinator:
 
         logger.info("All streams stopped")
 
-    def close(self):
-        """Close all DAO connections and release resources.
-        
-        This method should be called during shutdown to properly close
-        DuckDB connections and prevent file locks and resource leaks.
-        """
-        logger.info("Closing DAO connections...")
-        
-        try:
-            if self.alpaca_dao:
-                self.alpaca_dao.close()
-                logger.debug("AlpacaDAO connection closed")
-        except Exception as e:
-            logger.warning(f"Error closing AlpacaDAO: {e}")
-        
-        try:
-            if self.av_dao:
-                self.av_dao.close()
-                logger.debug("AlphaVantageDAO connection closed")
-        except Exception as e:
-            logger.warning(f"Error closing AlphaVantageDAO: {e}")
-        
-        logger.info("All DAO connections closed")
-
 
 if __name__ == "__main__":
     """Run the coordinator."""
@@ -325,7 +301,7 @@ if __name__ == "__main__":
         logger.info(f"Received signal {signum}. Initiating graceful shutdown...")
         shutdown_requested[0] = True
 
-    # Register signal handlers
+    # Register signal handlers (main thread only)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
@@ -354,7 +330,6 @@ if __name__ == "__main__":
         finally:
             logger.info("Shutting down...")
             coordinator.stop_all_streaming()
-            coordinator.close()  # Close DAO connections to release DuckDB locks
             logger.info("Coordinator stopped. Goodbye!")
 
     # Run the async main function

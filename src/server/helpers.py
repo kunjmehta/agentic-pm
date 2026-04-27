@@ -32,10 +32,10 @@ _project_root = Path(__file__).parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from src.common.container import DAOFactory, get_dao_factory
+from src.common.utils.container import DAOFactory, get_dao_factory
 from src.common.dao.alpaca_dao import AlpacaDAO
+from src.common.dao.analysis_dao import AnalysisDAO
 from src.common.dao.orders_dao import OrdersDAO
-from src.common.dao.strategy_dao import StrategyDAO
 from src.server.state_manager import ApplicationState, get_app_state
 
 
@@ -120,13 +120,13 @@ def get_alpaca_dao() -> AlpacaDAO:
     return get_dao_factory().get_alpaca_dao()
 
 
-def get_strategy_dao() -> StrategyDAO:
-    """Return the shared StrategyDAO singleton.
+def get_analysis_dao() -> AnalysisDAO:
+    """Return the shared AnalysisDAO singleton.
 
     Returns:
-        Cached StrategyDAO instance from the global DAOFactory.
+        Cached AnalysisDAO instance from the global DAOFactory.
     """
-    return get_dao_factory().get_strategy_dao()
+    return get_dao_factory().get_analysis_dao()
 
 
 def get_orders_dao() -> OrdersDAO:

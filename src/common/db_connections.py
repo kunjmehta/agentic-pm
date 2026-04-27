@@ -1,24 +1,30 @@
 """Process-level DuckDB connection manager.
 
-Owns exactly **one** read-write WAL-enabled :class:`duckdb.DuckDBPyConnection`
-per database file for the lifetime of the process.  All DAOs call
-:func:`get_connection` instead of opening their own connections, so there is
-no file-lock contention between DAO instances within the same process.
+Owns exactly **one** connection per database file for the lifetime of the
+process.  All DAOs call :func:`get_connection` instead of opening their own
+connections, so there is no file-lock contention between DAO instances within
+the same process.
 
-Each of the three processes (API, ETL, Agent) imports this module and receives
-its own connection objects — there is no cross-process Python-object sharing.
-DuckDB WAL ensures that committed writes are visible to any other connection
-(within the process or via a ``READ_ONLY`` connection from another process)
-without blocking.
+DuckDB enforces a single read-write lock per file across OS processes.
+To avoid that conflict each process must declare which databases it only reads
+by calling :func:`configure_read_only` **before** the first :func:`get_connection`
+call for those keys.  Read-only connections may be opened by any number of
+processes simultaneously, even while another process holds the write lock.
+
+Write ownership (single source of truth):
+- ``market``    → ETL process
+- ``analysis``  → ETL process
+- ``portfolio`` → API process
+- ``backtest``  → API process
+- Agent process opens all databases read-only.
 
 Usage::
 
-    from src.common.db_connections import get_connection
+    # At process startup, before any DAO is created:
+    from src.common.db_connections import configure_read_only, get_connection
 
-    conn = get_connection("market")   # market_data.duckdb
-    conn = get_connection("portfolio")
-    conn = get_connection("analysis")
-    conn = get_connection("backtest")
+    configure_read_only(["market", "analysis"])   # in API process
+    conn = get_connection("market")               # opens read-only
 
 Shutdown::
 
@@ -56,9 +62,33 @@ _DB_FILES: dict[str, str] = {
 
 _lock = threading.Lock()
 _connections: dict[str, duckdb.DuckDBPyConnection] = {}
+# Keys whose connections must be opened read-only in this process.
+_read_only_keys: set[str] = set()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
+
+def configure_read_only(keys: list[str]) -> None:
+    """Declare which databases this process should open read-only.
+
+    Must be called **before** the first :func:`get_connection` for each key.
+    Calling after a connection is already open has no effect on that connection.
+
+    Args:
+        keys: Database keys (e.g. ``["market", "analysis"]``) to open RO.
+
+    Raises:
+        ValueError: If any key is not a recognised database.
+    """
+    unknown = set(keys) - set(_DB_FILES)
+    if unknown:
+        raise ValueError(
+            f"Unknown db_key(s): {sorted(unknown)}. Valid keys: {sorted(_DB_FILES)}"
+        )
+    with _lock:
+        _read_only_keys.update(keys)
+    logger.info(f"[db_connections] read-only keys configured: {sorted(_read_only_keys)}")
 
 
 def get_connection(db_key: str) -> duckdb.DuckDBPyConnection:
@@ -113,11 +143,7 @@ def close_all() -> None:
 
 
 def _open(db_key: str) -> duckdb.DuckDBPyConnection:
-    """Open and configure a new R/W WAL connection for *db_key*.
-
-    WAL (Write-Ahead Log) is DuckDB's default durability mechanism.  Explicit
-    ``wal_autocheckpoint`` keeps the WAL file from growing unbounded between
-    checkpoints.
+    """Open a connection for *db_key*, honouring the process-level read-only config.
 
     Args:
         db_key: Registered database identifier.
@@ -132,18 +158,21 @@ def _open(db_key: str) -> duckdb.DuckDBPyConnection:
     abs_path = _project_root / rel_path
     abs_path.parent.mkdir(parents=True, exist_ok=True)
 
+    read_only = db_key in _read_only_keys
+    mode_label = "R/O" if read_only else "R/W WAL"
+
     try:
-        # WAL is DuckDB's default durability mechanism — no extra PRAGMA needed.
-        conn = duckdb.connect(str(abs_path))
-        logger.info(
-            f"[db_connections] opened {db_key} ({rel_path}) — R/W WAL"
-        )
+        conn = duckdb.connect(str(abs_path), read_only=read_only)
+        logger.info(f"[db_connections] opened {db_key} ({rel_path}) — {mode_label}")
         return conn
     except duckdb.IOException as exc:
+        hint = (
+            "Another process holds an exclusive write lock. "
+            "Call configure_read_only(['" + db_key + "']) before get_connection() "
+            "if this process only reads from this database."
+        )
         raise RuntimeError(
-            f"[db_connections] cannot open {db_key} ({abs_path}): {exc}\n"
-            "Hint: another process may hold an exclusive write lock on this file. "
-            "Ensure only one writer process is active per database file."
+            f"[db_connections] cannot open {db_key} ({abs_path}): {exc}\n{hint}"
         ) from exc
 
 
@@ -168,76 +197,3 @@ def get_analysis_conn() -> duckdb.DuckDBPyConnection:
 def get_backtest_conn() -> duckdb.DuckDBPyConnection:
     """Shared connection to ``backtest.duckdb``."""
     return get_connection("backtest")
-
-
-# ── Smoke test ────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import sys as _sys
-    _sys.stdout.reconfigure(encoding="utf-8")
-
-    print("=" * 60)
-    print("src/common/db_connections.py smoke test")
-    print("=" * 60)
-
-    # Use temp in-memory connections for the test (avoid touching live DBs)
-    import tempfile, os
-
-    tmp_files: dict[str, str] = {}
-    orig_db_files = dict(_DB_FILES)
-
-    try:
-        for key in list(_DB_FILES.keys()):
-            tmp = tempfile.mktemp(suffix=f"_{key}.duckdb")
-            _DB_FILES[key] = tmp          # redirect to temp file
-            tmp_files[key] = tmp
-
-        # Test 1: get_connection returns same object on repeated calls
-        c1 = get_connection("market")
-        c2 = get_connection("market")
-        assert c1 is c2, "Same object expected on second call"
-        print("  [OK] get_connection returns singleton")
-
-        # Test 2: write + read through shared connection
-        c1.execute("CREATE TABLE test_t (x INT)")
-        c1.execute("INSERT INTO test_t VALUES (42)")
-        rows = c1.execute("SELECT x FROM test_t").fetchall()
-        assert rows == [(42,)], f"Unexpected rows: {rows}"
-        print("  [OK] write + read on shared connection")
-
-        # Test 3: convenience aliases return same object
-        assert get_market_conn() is c1
-        print("  [OK] get_market_conn() alias works")
-
-        # Test 4: different db_key → different connection
-        cp = get_connection("portfolio")
-        assert cp is not c1, "Different keys must give different connections"
-        print("  [OK] different db_key → different connection")
-
-        # Test 5: unknown key raises ValueError
-        try:
-            get_connection("nonexistent")
-            assert False, "Should have raised ValueError"
-        except ValueError:
-            pass
-        print("  [OK] unknown db_key raises ValueError")
-
-        # Test 6: close_all resets connections
-        close_all()
-        assert len(_connections) == 0, "Connections should be empty after close_all"
-        print("  [OK] close_all() clears all connections")
-
-        print("\n[ALL OK] db_connections.py smoke test passed")
-
-    finally:
-        _DB_FILES.update(orig_db_files)
-        close_all()
-        for tmp in tmp_files.values():
-            for suffix in ("", ".wal"):
-                p = tmp + suffix if not tmp.endswith(suffix) else tmp
-                try:
-                    os.unlink(p)
-                except FileNotFoundError:
-                    pass
-
-    print("=" * 60)

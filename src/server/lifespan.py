@@ -9,16 +9,13 @@ Responsibilities:
 - LLM singleton warm-up
 - Strategy registration + IoC wiring (WS broadcaster, registry)
 - Notification service
-- Historical data seeding (read-only, one-off at startup)
 - Backtest scheduler
 """
 
 import asyncio
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -29,75 +26,9 @@ import src.server.app_state as _state
 from src.server.graph import build_graph
 from src.server.agents import init_all_agents
 from src.common.utils import get_logger, config as app_config
-from src.common.data_gatherer.db_stream_handlers import (
-    set_ws_broadcaster,
-    set_strategy_registry,
-)
+from src.common.ingestion import set_ws_broadcaster
 
 logger = get_logger(__name__)
-
-
-# ── Historical Data Initialization ─────────────────────────────────────────────
-
-
-async def _ensure_historical_data_loaded(symbols: List[str], years: int = 3) -> None:
-    """Ensure historical data is loaded for all watchlist symbols.
-
-    Checks if historical data exists in the database, and fetches it if missing.
-    Fetches N years of daily bars by default to ensure sufficient data for
-    backtesting and indicator calculation.
-
-    Args:
-        symbols: List of symbols to check/fetch.
-        years: Number of years of historical data to fetch. Default 3.
-    """
-    from src.common.dao.alpaca_dao import AlpacaDAO
-    from src.common.external.alpaca import fetch_historical_bars
-
-    logger.info("=" * 70)
-    logger.info(f"Checking historical data for {len(symbols)} symbols...")
-    logger.info("=" * 70)
-
-    dao = AlpacaDAO()
-    try:
-        for symbol in symbols:
-            try:
-                result = dao.fetch_one(
-                    "SELECT MAX(timestamp) as latest_ts, COUNT(*) as bar_count "
-                    "FROM bars WHERE symbol = ? AND timeframe = '1Day'",
-                    (symbol,),
-                )
-                latest_ts = result.get("latest_ts") if result else None
-                bar_count = result.get("bar_count", 0) if result else 0
-                expected_bars = years * 252
-
-                if latest_ts is not None and bar_count >= expected_bars * 0.8:
-                    logger.info(
-                        f"[{symbol}] ✓ Historical data OK: {bar_count} bars, "
-                        f"latest: {latest_ts}"
-                    )
-                    continue
-
-                logger.info(
-                    f"[{symbol}] Insufficient data ({bar_count} bars) — fetching {years} years..."
-                )
-                end = datetime.now(timezone.utc)
-                start = end - timedelta(days=years * 365)
-                bars_df = await asyncio.to_thread(
-                    fetch_historical_bars,
-                    symbol=symbol,
-                    start=start.isoformat(),
-                    end=end.isoformat(),
-                    timeframe="1Day",
-                )
-                logger.info(f"[{symbol}] ✓ Fetched {len(bars_df)} daily bars")
-
-            except Exception as exc:
-                logger.error(f"[{symbol}] Failed to load historical data: {exc}", exc_info=True)
-    finally:
-        dao.close()
-
-    logger.info("Historical data check complete")
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────────
@@ -131,8 +62,7 @@ async def lifespan(app: FastAPI):
 
     ensure_strategies_registered()
     set_ws_broadcaster(_ws_manager.broadcast)
-    set_strategy_registry(_strategy_registry_mod)
-    logger.info("[OK] WebSocket broadcaster and strategy registry wired")
+    logger.info("[OK] WebSocket broadcaster wired")
 
     # ── LLM warm-up ───────────────────────────────────────────────────────────
     logger.info("Pre-warming LLM singletons...")
@@ -154,16 +84,6 @@ async def lifespan(app: FastAPI):
         )
     else:
         logger.info("[OK] Notification service disabled in config")
-
-    # ── Historical data seeding ────────────────────────────────────────────────
-    watchlist = app_config.get_watchlist_symbols()
-    if watchlist:
-        try:
-            await _ensure_historical_data_loaded(watchlist, years=3)
-        except Exception as exc:
-            logger.warning(f"[startup] Historical data check failed: {exc}", exc_info=True)
-    else:
-        logger.warning("[startup] No watchlist symbols configured")
 
     # ── Account info banner ────────────────────────────────────────────────────
     try:

@@ -9,6 +9,7 @@ All formulas are sourced from the quant skill singletons in
 and backtester (which also use those same singletons).
 """
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -20,7 +21,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import pandas as pd
 
-from src.common.dao import AlpacaDAO
+from src.common.utils.container import get_alpaca_dao
 from src.common.utils import config, get_logger
 from src.server.skills.quant import (
     momentum_skill,
@@ -69,7 +70,7 @@ def _strategies_for_timeframe(timeframe: str) -> Dict[str, object]:
         timeframe: Bar timeframe string (e.g. '1Min', '1Hour', '1Day').
 
     Returns:
-        Dict mapping strategy name → skill singleton.
+        Dict mapping strategy name -> skill singleton.
     """
     if timeframe in ("1Min", "1Hour"):
         return _INTRADAY_STRATEGIES
@@ -90,6 +91,8 @@ class IndicatorsETL:
     6. Saves strategy signal rows to ``precomputed_strategy_signals`` table
 
     Can be run on-demand or scheduled (hourly) for all watchlist symbols.
+    Bar-triggered computation is handled by ``trigger_bar_computation`` which
+    runs full seed backfill on first bar and single-bar live computation thereafter.
     """
 
     def __init__(
@@ -109,7 +112,7 @@ class IndicatorsETL:
             default=["1Min", "1Hour", "1Day"],
         )
         self.lookback_days = lookback_days
-        self.dao = AlpacaDAO()
+        self.dao = get_alpaca_dao()
 
         logger.info(
             f"IndicatorsETL initialized: timeframes={self.timeframes}, "
@@ -201,12 +204,142 @@ class IndicatorsETL:
         return results
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self.dao:
-            self.dao.close()
+        """No-op: DAO is a process-level singleton managed by the container."""
 
     # -----------------------------------------------------------------------
-    # Internal helpers
+    # Bar-triggered computation — called by stream_handlers on every bar
+    # -----------------------------------------------------------------------
+
+    async def trigger_bar_computation(self, symbol: str, timeframe: str) -> None:
+        """Async entry point called on every bar arrival.
+
+        Offloads blocking DB + computation work to a thread so the event loop
+        is never stalled. Runs seed backfill on first bar, incremental on
+        subsequent bars (O(1) per bar after seeding).
+
+        Args:
+            symbol: Stock ticker.
+            timeframe: Bar timeframe string ('1Min', '1Hour', '1Day').
+        """
+        await asyncio.to_thread(self._run_bar_computation_sync, symbol, timeframe)
+
+    def _run_bar_computation_sync(self, symbol: str, timeframe: str) -> None:
+        """Seed or live indicator + signal computation. Called via asyncio.to_thread.
+
+        Detects whether seed backfill is needed (no indicator rows in last 24 h)
+        and switches between full rolling backfill and single-bar live mode.
+
+        Args:
+            symbol: Stock ticker.
+            timeframe: Bar timeframe string.
+        """
+        end = datetime.now()
+        start = end - timedelta(days=self.lookback_days)
+        bars = self.dao.get_bars(symbol, start, end, timeframe)
+
+        min_bars = int(config.get("strategy.mean_reversion.lookback", default=60))
+        if bars.empty or len(bars) < min_bars:
+            logger.info(
+                f"[ETL] {symbol} {timeframe}: insufficient bars "
+                f"({len(bars) if not bars.empty else 0}/{min_bars}), skipping"
+            )
+            return
+
+        recent = self.dao.get_computed_indicators(
+            symbol, end - timedelta(hours=24), end, timeframe
+        )
+
+        if recent.empty:
+            # Seed: full rolling backfill — same logic as batch ETL
+            indicator_rows = self._calculate_indicators_rolling(bars, symbol, timeframe)
+            signal_rows = self._calculate_strategy_signals_rolling(bars, symbol, timeframe)
+            mode = f"seed ({len(indicator_rows)} rows)"
+        else:
+            # Live: single latest bar only
+            indicator_rows = self._compute_single_bar(symbol, bars, timeframe)
+            signal_rows = self._compute_single_bar_signals(symbol, bars, timeframe)
+            mode = "live"
+
+        if indicator_rows:
+            self.dao.save_computed_indicators(pd.DataFrame(indicator_rows))
+        if signal_rows:
+            self.dao.save_strategy_signals(pd.DataFrame(signal_rows))
+
+        logger.info(f"[ETL] {symbol} {timeframe}: {mode} — indicators + signals saved")
+
+    def _compute_single_bar(
+        self, symbol: str, bars: pd.DataFrame, timeframe: str
+    ) -> List[dict]:
+        """Compute indicators for the latest bar only (live/incremental mode).
+
+        Skills use .tail(lookback) internally so passing the full window is correct.
+
+        Args:
+            symbol: Stock ticker.
+            bars: Full bar history DataFrame available at this tick.
+            timeframe: Bar timeframe string.
+
+        Returns:
+            List with one indicator dict for the latest bar timestamp.
+        """
+        try:
+            indicators = {
+                "momentum":       momentum_skill.analyze_bars(bars),
+                "volatility":     volatility_skill.analyze_bars(bars),
+                "volume":         volume_skill.analyze_bars(bars),
+                "candlestick":    candlestick_skill.analyze_bars(bars),
+                "mean_reversion": mean_reversion_skill.analyze_bars(bars),
+            }
+            timestamp = bars["timestamp"].iloc[-1]
+            return [self._flatten_indicators(symbol, timestamp, timeframe, indicators)]
+        except Exception as exc:
+            logger.warning(f"[ETL] live indicator error for {symbol} {timeframe}: {exc}")
+            return []
+
+    def _compute_single_bar_signals(
+        self, symbol: str, bars: pd.DataFrame, timeframe: str
+    ) -> List[dict]:
+        """Compute strategy signals for the latest bar only (live/incremental mode).
+
+        Args:
+            symbol: Stock ticker.
+            bars: Full bar history DataFrame available at this tick.
+            timeframe: Bar timeframe string.
+
+        Returns:
+            List of strategy signal dicts for the latest bar timestamp.
+        """
+        strategies = _strategies_for_timeframe(timeframe)
+        if not strategies:
+            return []
+
+        timestamp = bars["timestamp"].iloc[-1]
+        rows = []
+        for name, skill in strategies.items():
+            try:
+                result = skill.analyze_bars(bars)
+            except Exception:
+                result = {}
+            if not isinstance(result, dict):
+                result = {}
+            rec = result.get("trade_recommendation", {})
+            rows.append({
+                "symbol":        symbol,
+                "timestamp":     timestamp,
+                "timeframe":     timeframe,
+                "strategy_name": name,
+                "action":        result.get("action") or rec.get("action", "hold"),
+                "confidence":    result.get("confidence") if result.get("confidence") is not None
+                                 else rec.get("confidence", 0.0),
+                "reason":        result.get("reason") or rec.get("reason"),
+                "entry_price":   result.get("entry_price") or rec.get("entry_price"),
+                "stop_loss":     result.get("stop_loss") or rec.get("stop_loss"),
+                "take_profit":   result.get("take_profit") or rec.get("take_profit"),
+            })
+        return rows
+
+    # -----------------------------------------------------------------------
+    # Internal helpers — batch ETL
     # -----------------------------------------------------------------------
 
     def _process_timeframe(
@@ -342,7 +475,7 @@ class IndicatorsETL:
             "z_score":    stats.get("z_score"),
             "percentile": stats.get("percentile"),
             "vwap":       stats.get("vwap"),
-            # Candlestick — new columns
+            # Candlestick
             "candle_patterns":  json.dumps(candle.get("patterns", [])),
             "last_candle_type": candle.get("last_candle_type"),
             "last_body_pct":    candle.get("last_body_pct"),
@@ -386,9 +519,9 @@ class IndicatorsETL:
                 except Exception as e:
                     logger.debug(f"Strategy {name} error at index {i}: {e}")
                     result = {}
+                if not isinstance(result, dict):
+                    result = {}
 
-                # Strategy skills return action/confidence at top level;
-                # MeanReversionSkill nests them under trade_recommendation.
                 rec = result.get("trade_recommendation", {})
                 signal_rows.append({
                     "symbol":       symbol,
@@ -405,6 +538,28 @@ class IndicatorsETL:
                 })
 
         return signal_rows
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton — one ETL instance per process.
+# ---------------------------------------------------------------------------
+
+_etl: Optional[IndicatorsETL] = None
+
+
+def get_indicators_etl() -> IndicatorsETL:
+    """Return the process-level IndicatorsETL singleton.
+
+    Creates the instance on first call. Thread-safe for read access;
+    the constructor is lightweight (no DB I/O at construction time).
+
+    Returns:
+        Shared IndicatorsETL instance.
+    """
+    global _etl
+    if _etl is None:
+        _etl = IndicatorsETL()
+    return _etl
 
 
 if __name__ == "__main__":

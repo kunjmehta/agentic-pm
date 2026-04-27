@@ -1,11 +1,11 @@
-"""Strategy router — read-only StrategyDAO endpoints at /v1/strategy/..."""
+"""Strategy router — read-only AnalysisDAO endpoints at /v1/strategy/..."""
 
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from src.common.dao.strategy_dao import StrategyDAO
+from src.common.dao.analysis_dao import AnalysisDAO
 from src.server.registry.register_strategies import ensure_strategies_registered
 from src.common.registry.strategy_registry import get_registry
 from src.common.utils import get_logger
@@ -38,7 +38,7 @@ async def get_actionable_signals(
         Dict with ``signals`` list and ``count``.
     """
     def _fetch():
-        with dao_context(StrategyDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_actionable_signals(min_confidence=min_confidence, action_filter=action)
 
     records = _df_to_records(await run_in_thread(_fetch))
@@ -57,7 +57,7 @@ async def get_strategy_performance(
         Dict with ``strategy_name``, ``days``, and ``performance``.
     """
     def _fetch():
-        with dao_context(StrategyDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_strategy_performance(strategy_name, days=days)
 
     perf = await run_in_thread(_fetch)
@@ -73,7 +73,7 @@ async def get_latest_signal(symbol: str, strategy_name: str) -> Dict[str, Any]:
         Dict with ``symbol``, ``strategy_name``, and ``signal`` (dict or null).
     """
     def _fetch():
-        with dao_context(StrategyDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_latest_signal(symbol.upper(), strategy_name)
 
     signal = await run_in_thread(_fetch)
@@ -93,7 +93,7 @@ async def get_recent_signals(
         Dict with ``signals`` list and ``count``.
     """
     def _fetch():
-        with dao_context(StrategyDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_recent_signals(symbol.upper(), strategy_name, limit=limit)
 
     records = _df_to_records(await run_in_thread(_fetch))
@@ -135,7 +135,7 @@ async def run_signals_on_demand(body: RunSignalsRequest = Body(...)) -> Dict[str
 
     Fetches the most recent *lookback_bars* bars for *symbol* / *timeframe*,
     runs the requested strategy (or all applicable strategies when
-    ``strategy_name == "all"``), persists every signal to StrategyDAO, and
+    ``strategy_name == "all"``), persists every signal to AnalysisDAO, and
     returns a summary dict.
 
     Args:
@@ -164,19 +164,23 @@ async def run_signals_on_demand(body: RunSignalsRequest = Body(...)) -> Dict[str
             ),
         )
 
-    from src.common.dao.alpaca_dao import AlpacaDAO
-    from src.common.config import config as cfg
+    from datetime import datetime, timedelta
+    from src.common.utils.container import get_alpaca_dao
 
     def _fetch_bars():
-        with dao_context(AlpacaDAO) as dao:
-            return dao.get_bars(symbol, timeframe=timeframe, limit=body.lookback_bars)
+        end = datetime.now()
+        # approximate: lookback_bars * minutes per bar → convert to days
+        _mins_per_bar = {"1Min": 1, "5Min": 5, "15Min": 15, "1H": 60, "1Day": 1440}.get(timeframe, 1)
+        lookback_days = max(1, (body.lookback_bars * _mins_per_bar) // 390 + 1)
+        start = end - timedelta(days=lookback_days)
+        return get_alpaca_dao().get_bars(symbol, start=start, end=end, timeframe=timeframe)
 
     bars = await run_in_thread(_fetch_bars)
     if bars is None or bars.empty:
         raise HTTPException(status_code=404, detail=f"No bars found for {symbol}/{timeframe}")
 
-    from src.common.data_gatherer.db_stream_handlers import _run_all_strategy_signals
-    await _run_all_strategy_signals(symbol, timeframe, bars, cfg)
+    from src.common.ingestion import get_indicators_etl
+    await get_indicators_etl().trigger_bar_computation(symbol, timeframe)
 
     strategies_to_query: List[str] = (
         registry.list_by_timeframe(timeframe)
@@ -186,7 +190,7 @@ async def run_signals_on_demand(body: RunSignalsRequest = Body(...)) -> Dict[str
 
     def _fetch_signals():
         results = []
-        with dao_context(StrategyDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             for strat in strategies_to_query:
                 sig = dao.get_latest_signal(symbol, strat)
                 if sig:

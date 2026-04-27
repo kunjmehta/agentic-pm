@@ -19,7 +19,7 @@ from typing import Optional, Callable
 from alpaca.data.live.stock import StockDataStream
 from alpaca.data.enums import DataFeed
 from src.common.utils import secrets, get_logger
-from src.common.data_gatherer.db_stream_handlers import (
+from src.common.ingestion.stream_handlers import (
     combined_trade_handler,
     combined_bar_handler
 )
@@ -265,28 +265,3 @@ async def default_status_handler(status):
     """Default handler that prints status updates."""
     print(f"[STATUS] {status.symbol} | {status.status_message} "
           f"({status.status_code}) | {status.timestamp}")
-
-
-if __name__ == "__main__":
-    """Test the streamer with a real symbol."""
-    import sys
-
-    # Get symbol from command line or use default
-    symbol = sys.argv[1] if len(sys.argv) > 1 else "AAPL"
-
-    # Initialize streamer
-    streamer = AlpacaDataStreamer(symbol=symbol)
-
-    # Subscribe to all channels with default handlers
-    streamer.subscribe_trades(default_trade_handler)
-    streamer.subscribe_bars(default_bar_handler)
-    streamer.subscribe_statuses(default_status_handler)
-
-    # Run stream (blocking call - will run until Ctrl+C or error)
-    print("Press Ctrl+C to stop the stream")
-    try:
-        streamer.run()
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        print("\nStream ended")

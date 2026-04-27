@@ -32,12 +32,10 @@ Streaming / real-time endpoints:
 DAO read endpoints:
   GET /v1/market/...          AlpacaDAO (bars, quotes, trades, snapshots)
   GET /v1/fundamentals/...    AlphaVantageDAO (income, balance, earnings, etc.)
-  GET /v1/analyst/...         AnalystDAO (ratings, price targets, estimates)
-  GET /v1/strategy/...        StrategyDAO (strategy metadata and results)
+  GET /v1/analyst/...         AnalysisDAO (EOD analyst summaries)
+  GET /v1/strategy/...        AnalysisDAO (strategy signals and results)
   GET /v1/backtest/...        BacktestDAO (backtest runs, metrics, equity curves)
   GET /v1/portfolio/...       Portfolio positions and history
-  GET /v1/reports/...         Performance and attribution reports
-
 Utility endpoints:
   GET /v1/health              -> liveness check
   GET /v1/registry            -> list registered agent functions
@@ -66,7 +64,6 @@ from src.server.routers.analyst import router as analyst_router
 from src.server.routers.strategy import router as strategy_router
 from src.server.routers.backtest import router as backtest_router
 from src.server.routers.orders import router as orders_router
-# from src.server.routers.reports import router as reports_router  # disabled — reconciliation job not yet implemented
 from src.server.routers.config import router as config_router
 from src.server.routers.telemetry import router as telemetry_router
 from src.server.routers.redis_ws_proxy import router as redis_ws_router
@@ -106,7 +103,6 @@ app.include_router(analyst_router)
 app.include_router(strategy_router)
 app.include_router(backtest_router)
 app.include_router(orders_router)
-# app.include_router(reports_router)  # disabled
 app.include_router(config_router)
 app.include_router(telemetry_router)
 app.include_router(redis_ws_router)

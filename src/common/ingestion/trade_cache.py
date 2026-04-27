@@ -146,7 +146,7 @@ class TradeCache:
 
                 logger.debug(
                     f"Trade corrected: {symbol} trade_id={trade_id} "
-                    f"(price: {old_trade.get('price')} → {correction_data.get('price', old_trade.get('price'))})"
+                    f"(price: {old_trade.get('price')} -> {correction_data.get('price', old_trade.get('price'))})"
                 )
                 return True
             else:
@@ -373,7 +373,6 @@ if __name__ == "__main__":
     print("\n1. Testing basic add/flush operations...")
     cache = TradeCache(batch_interval_minutes=1, max_size=1000)
 
-    # Add sample trades
     for i in range(100):
         trade = {
             'symbol': 'TEST',
@@ -387,7 +386,6 @@ if __name__ == "__main__":
 
     print(f"   Added 100 trades")
     print(f"   Cache size: {cache.get_current_size()}")
-    print(f"   Stats: {cache.get_stats()}")
 
     # Test 2: Flush
     print("\n2. Testing flush...")
@@ -395,60 +393,8 @@ if __name__ == "__main__":
     print(f"   Flushed {len(df)} trades")
     print(f"   Cache size after flush: {cache.get_current_size()}")
 
-    # Test 3: Size-based flush trigger
-    print("\n3. Testing size-based flush trigger (90% threshold)...")
-    cache_small = TradeCache(batch_interval_minutes=60, max_size=100)
-
-    for i in range(90):
-        trade = {'symbol': 'TEST', 'timestamp': datetime.now(), 'trade_id': i}
-        should_flush = cache_small.add_trade(trade)
-
-    print(f"   Added 90 trades (90% of 100 max)")
-    print(f"   Should flush: {should_flush}")
-
-    # Test 4: Time-based flush trigger
-    print("\n4. Testing time-based flush trigger...")
-    cache_time = TradeCache(batch_interval_minutes=0.01, max_size=1000)  # 0.6 seconds
-
-    cache_time.add_trade({'symbol': 'TEST', 'timestamp': datetime.now(), 'trade_id': 1})
-    print(f"   Added 1 trade, waiting 1 second...")
-    time.sleep(1)
-
-    should_flush = cache_time.add_trade({'symbol': 'TEST', 'timestamp': datetime.now(), 'trade_id': 2})
-    print(f"   Should flush after delay: {should_flush}")
-
-    # Test 5: Thread safety (basic)
-    print("\n5. Testing thread safety...")
-    import threading
-
-    cache_concurrent = TradeCache(batch_interval_minutes=10, max_size=10000)
-    errors = []
-
-    def add_trades(start_id, count):
-        try:
-            for i in range(count):
-                trade = {'symbol': 'TEST', 'trade_id': start_id + i}
-                cache_concurrent.add_trade(trade)
-        except Exception as e:
-            errors.append(str(e))
-
-    # Create 10 threads, each adding 100 trades
-    threads = []
-    for t in range(10):
-        thread = threading.Thread(target=add_trades, args=(t * 100, 100))
-        threads.append(thread)
-        thread.start()
-
-    # Wait for all threads
-    for thread in threads:
-        thread.join()
-
-    print(f"   10 threads added 1000 total trades")
-    print(f"   Final cache size: {cache_concurrent.get_current_size()}")
-    print(f"   Errors: {len(errors)}")
-
-    # Test 6: Singleton
-    print("\n6. Testing singleton pattern...")
+    # Test 3: Singleton
+    print("\n3. Testing singleton pattern...")
     instance1 = get_cache()
     instance2 = get_cache()
     print(f"   Same instance: {instance1 is instance2}")

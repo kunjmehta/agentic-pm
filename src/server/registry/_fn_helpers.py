@@ -66,12 +66,10 @@ def _fetch_bars_for_symbol(symbol: str, timeframe: str = "1Min", lookback_days: 
         pandas DataFrame or None on failure.
     """
     try:
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
+        from src.common.utils.container import get_alpaca_dao
         end = datetime.now()
         start = end - timedelta(days=lookback_days)
-        df = dao.get_bars(symbol, start=start, end=end, timeframe=timeframe)
-        dao.close()
+        df = get_alpaca_dao().get_bars(symbol, start=start, end=end, timeframe=timeframe)
         if df is None or df.empty:
             logger.warning(f"[registry] no bars found for {symbol}/{timeframe}")
             return None
@@ -102,15 +100,13 @@ def _fetch_bars_range(
     """
     try:
         from datetime import datetime as _dt
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        df = dao.get_bars(
+        from src.common.utils.container import get_alpaca_dao
+        df = get_alpaca_dao().get_bars(
             symbol,
             _dt.fromisoformat(start_date),
             _dt.fromisoformat(end_date),
             timeframe,
         )
-        dao.close()
         if df is None or df.empty:
             logger.warning(f"[{skill_name}] no bars for {symbol}/{timeframe} {start_date}–{end_date}")
             return None

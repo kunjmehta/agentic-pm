@@ -19,6 +19,11 @@ from pathlib import Path
 _project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_project_root))
 
+# ETL owns writes to market + analysis; API owns portfolio + backtest.
+# Open ETL-owned databases read-only to avoid DuckDB's single-writer lock.
+from src.common.db_connections import configure_read_only
+configure_read_only(["market", "analysis"])
+
 # Import the application from the main server module.
 # The lifespan registered there handles API-only concerns.
 from src.server.api import app  # noqa: E402 — path setup must precede this

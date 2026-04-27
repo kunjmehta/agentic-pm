@@ -1,6 +1,6 @@
 """Orders Data Access Object.
 
-Manages the ``live_orders`` table in ``market_data.duckdb``.
+Manages the ``live_orders`` table in ``portfolio.duckdb``.
 Records every broker order submitted through the HITL approval flow or the
 direct orders API and tracks fill status via the reconciliation loop.
 """
@@ -21,15 +21,15 @@ logger = get_logger(__name__)
 
 
 class OrdersDAO(BaseDAO):
-    """DAO for the ``live_orders`` table in the market data database.
+    """DAO for the ``live_orders`` table in the portfolio database.
 
     Inherits all DuckDB helpers from ``BaseDAO`` and targets the
-    ``market`` database (``data/market_data.duckdb``).
+    ``portfolio`` database (``data/portfolio.duckdb``).
     """
 
     def __init__(self) -> None:
-        """Initialize with the market data database."""
-        super().__init__(db_type="market")
+        """Initialize with the portfolio database."""
+        super().__init__(db_type="portfolio")
         self._ensure_table()
 
     # ------------------------------------------------------------------

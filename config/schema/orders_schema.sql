@@ -1,5 +1,5 @@
 -- ============================================================================
--- Orders Schema for DuckDB (market_data.duckdb)
+-- Orders Schema for DuckDB (portfolio.duckdb)
 -- ============================================================================
 -- Tracks broker orders submitted through the HITL approval flow or direct API.
 -- Reconciliation job updates filled_at and filled_price by polling Alpaca.

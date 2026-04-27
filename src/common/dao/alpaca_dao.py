@@ -40,11 +40,11 @@ class AlpacaDAO(BaseDAO):
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        """Ensure Alpaca schema exists in database."""
+        """Ensure Alpaca schema exists in database, applying migrations as needed."""
         schema_file = "config/schema/alpaca_schema.sql"
         try:
-            # Only execute if market_bars table doesn't exist
-            self.execute_schema_file(schema_file, check_table="market_bars")
+            # Check against the most-recently-added table so new tables are always created
+            self.execute_schema_file(schema_file, check_table="precomputed_strategy_signals")
             logger.debug("Alpaca schema check completed")
         except Exception as e:
             logger.warning(f"Schema initialization skipped: {str(e)}")

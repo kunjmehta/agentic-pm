@@ -35,70 +35,61 @@ def _reconcile_sync() -> ReconcileResult:
     Returns:
         ReconcileResult with counts and timestamp.
     """
-    from src.common.dao import OrdersDAO
-    from src.common.dao.strategy_dao import StrategyDAO
+    from src.common.utils.container import get_orders_dao, get_analysis_dao
     from src.common.external.alpaca_portfolio import fetch_orders
 
-    orders_dao = OrdersDAO()
-    try:
-        submitted = orders_dao.get_submitted_orders()
+    orders_dao = get_orders_dao()
+    submitted = orders_dao.get_submitted_orders()
 
-        if not submitted:
-            return ReconcileResult(0, 0, 0)
+    if not submitted:
+        return ReconcileResult(0, 0, 0)
 
-        # Fetch recent closed orders from Alpaca (covers fills + cancellations).
-        broker_orders = fetch_orders(status="closed", limit=200)
-        broker_map: dict[str, dict] = {o["id"]: o for o in broker_orders}
+    # Fetch recent closed orders from Alpaca (covers fills + cancellations).
+    broker_orders = fetch_orders(status="closed", limit=200)
+    broker_map: dict[str, dict] = {o["id"]: o for o in broker_orders}
 
-        reconciled = 0
-        skipped = 0
-        signal_ids_filled: list[str] = []
+    reconciled = 0
+    skipped = 0
+    signal_ids_filled: list[str] = []
 
-        for row in submitted:
-            bid = row.get("broker_order_id")
-            if not bid or bid not in broker_map:
-                skipped += 1
-                continue
+    for row in submitted:
+        bid = row.get("broker_order_id")
+        if not bid or bid not in broker_map:
+            skipped += 1
+            continue
 
-            alpaca_order = broker_map[bid]
-            alpaca_status = alpaca_order.get("status", "")
+        alpaca_order = broker_map[bid]
+        alpaca_status = alpaca_order.get("status", "")
 
-            if alpaca_status == "filled":
-                filled_at_raw = alpaca_order.get("filled_at")
-                filled_at = (
-                    datetime.fromisoformat(filled_at_raw.replace("Z", "+00:00"))
-                    if filled_at_raw
-                    else datetime.now(timezone.utc)
-                )
-                filled_price = float(alpaca_order.get("filled_avg_price") or 0.0)
-                orders_dao.update_fill(
-                    broker_order_id=bid,
-                    filled_at=filled_at,
-                    filled_price=filled_price,
-                )
-                if row.get("signal_id"):
-                    signal_ids_filled.append(row["signal_id"])
-                reconciled += 1
-            elif alpaca_status in ("canceled", "expired", "rejected"):
-                orders_dao.update_status(broker_order_id=bid, status=alpaca_status)
-                reconciled += 1
-
-    finally:
-        orders_dao.close()
+        if alpaca_status == "filled":
+            filled_at_raw = alpaca_order.get("filled_at")
+            filled_at = (
+                datetime.fromisoformat(filled_at_raw.replace("Z", "+00:00"))
+                if filled_at_raw
+                else datetime.now(timezone.utc)
+            )
+            filled_price = float(alpaca_order.get("filled_avg_price") or 0.0)
+            orders_dao.update_fill(
+                broker_order_id=bid,
+                filled_at=filled_at,
+                filled_price=filled_price,
+            )
+            if row.get("signal_id"):
+                signal_ids_filled.append(row["signal_id"])
+            reconciled += 1
+        elif alpaca_status in ("canceled", "expired", "rejected"):
+            orders_dao.update_status(broker_order_id=bid, status=alpaca_status)
+            reconciled += 1
 
     # Propagate fill status to strategy_results for linked signals — single batch query.
     signals_updated = 0
     if signal_ids_filled:
-        s_dao = StrategyDAO()
-        try:
-            placeholders = ", ".join("?" * len(signal_ids_filled))
-            s_dao.execute(
-                f"UPDATE strategy_results SET status = 'filled' WHERE id IN ({placeholders})",
-                signal_ids_filled,
-            )
-            signals_updated = len(signal_ids_filled)
-        finally:
-            s_dao.close()
+        placeholders = ", ".join("?" * len(signal_ids_filled))
+        get_analysis_dao().execute(
+            f"UPDATE strategy_results SET status = 'filled' WHERE id IN ({placeholders})",
+            signal_ids_filled,
+        )
+        signals_updated = len(signal_ids_filled)
 
     logger.info(
         f"[reconcile] done: reconciled={reconciled} skipped={skipped} "

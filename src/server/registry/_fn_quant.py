@@ -4,7 +4,7 @@ Covers:
   - Technical indicators: momentum (MACD/RSI), volatility (Bollinger), volume (OBV), candles
   - Intraday strategies: VWAP reversion, opening-range breakout, RSI divergence, momentum burst
   - Swing strategies: golden cross, 52-week breakout, mean reversion (daily), earnings drift
-  - Mean reversion (intraday, with StrategyDAO persistence)
+  - Mean reversion (intraday, with AnalysisDAO persistence)
   - Backtest strategy runner
 """
 
@@ -245,7 +245,7 @@ def _analyze_candles_wrapped(
 
 
 def _save_mean_reversion_signal(symbol: str, timeframe: str, result: Dict) -> None:
-    """Persist a mean-reversion analysis result to StrategyDAO.
+    """Persist a mean-reversion analysis result to AnalysisDAO.
 
     Called after both live and historical runs so user-directed signals appear
     alongside automated pipeline signals (distinguishable via model_used="user-directed").
@@ -256,10 +256,10 @@ def _save_mean_reversion_signal(symbol: str, timeframe: str, result: Dict) -> No
         result: Full analysis dict as returned by MeanReversionSkill.
     """
     try:
-        from src.common.dao.strategy_dao import StrategyDAO
+        from src.common.utils.container import get_analysis_dao
         rec = result.get("trade_recommendation", {})
         signals = result.get("signals", {})
-        s_dao = StrategyDAO()
+        s_dao = get_analysis_dao()
         s_dao.save_strategy_result(
             symbol=symbol,
             strategy_name="mean-reversion",
@@ -286,8 +286,7 @@ def _save_mean_reversion_signal(symbol: str, timeframe: str, result: Dict) -> No
         from src.common.utils import config as _cfg
         if _cfg.get("strategy.hitl.enabled", False):
             try:
-                s_dao2 = StrategyDAO()
-                s_dao2.execute(
+                get_analysis_dao().execute(
                     """
                     UPDATE strategy_results
                        SET status = 'pending_review'
@@ -300,17 +299,15 @@ def _save_mean_reversion_signal(symbol: str, timeframe: str, result: Dict) -> No
                     """,
                     (symbol,),
                 )
-                s_dao2.close()
                 logger.info(f"[registry] Signal for {symbol} marked 'pending_review' (HITL enabled)")
             except Exception as _hitl_exc:
                 logger.warning(f"[registry] HITL status update failed for {symbol}: {_hitl_exc}")
-        s_dao.close()
         logger.info(
             f"[registry] Persisted user-directed signal for {symbol}/{timeframe}: "
             f"action={rec.get('action','hold')}  confidence={rec.get('confidence',0.0):.2f}"
         )
     except Exception as exc:
-        logger.warning(f"[registry] StrategyDAO persist failed for {symbol}: {exc}")
+        logger.warning(f"[registry] AnalysisDAO persist failed for {symbol}: {exc}")
 
 
 def _mean_reversion_analyze(

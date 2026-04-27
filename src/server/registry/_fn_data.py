@@ -3,8 +3,7 @@
 Covers:
   - AlpacaDAO: market bars, latest price, indicators, tick trades, trade count, intraday stats, watchlist
   - AlphaVantageDAO: fundamentals, dividends, earnings, income statement, balance sheet, cash flow
-  - AnalystDAO: EOD summaries
-  - StrategyDAO: recent signals, actionable signals, strategy performance
+  - AnalysisDAO: EOD summaries, recent signals, actionable signals, strategy performance
   - BacktestDAO: backtest runs, trades, performance history
   - PortfolioDAO: snapshot history, risk parameters
 """
@@ -17,6 +16,13 @@ _project_root = Path(__file__).parent.parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from src.common.utils.container import (
+    get_alpaca_dao,
+    get_alpha_vantage_dao,
+    get_analysis_dao,
+    get_backtest_dao,
+    get_portfolio_dao,
+)
 from src.common.utils import get_logger
 from src.server.registry._fn_helpers import _to_native, _df_to_records
 
@@ -49,15 +55,14 @@ def _get_market_bars(
     """
     try:
         from datetime import datetime as _dt
-        from src.common.dao import AlpacaDAO
 
         _TF_MAP = {"1d": "1Day", "1day": "1Day", "1h": "1Hour", "1hour": "1Hour",
                    "1m": "1Min", "1min": "1Min"}
         tf = _TF_MAP.get(timeframe.lower(), timeframe)
 
-        dao = AlpacaDAO()
-        df = dao.get_bars(symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), tf)
-        dao.close()
+        df = get_alpaca_dao().get_bars(
+            symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), tf
+        )
 
         if df.empty:
             logger.info(f"[registry] get_market_bars: no local data for {symbol}, fetching from API")
@@ -93,10 +98,9 @@ def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
     """
     try:
         from datetime import datetime as _dt, timedelta as _td
-        from src.common.dao import AlpacaDAO
 
         symbol = symbol.strip().upper()
-        dao = AlpacaDAO()
+        dao = get_alpaca_dao()
 
         try:
             now = _dt.now()
@@ -105,7 +109,6 @@ def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
             )
             if not df_live.empty:
                 last = df_live.iloc[-1]
-                dao.close()
                 return {
                     "symbol": symbol,
                     "close": float(last["price"]),
@@ -116,7 +119,6 @@ def _get_latest_price(symbol: str, timeframe: str = "1Min") -> dict:
             pass
 
         result = dao.get_latest_bar(symbol, timeframe)
-        dao.close()
         if result:
             result = _to_native(result)
             result.setdefault("source", "bar")
@@ -143,12 +145,9 @@ def _get_precomputed_indicators(
     """
     try:
         from datetime import datetime as _dt
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        df = dao.get_computed_indicators(
+        df = get_alpaca_dao().get_computed_indicators(
             symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), timeframe
         )
-        dao.close()
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_precomputed_indicators failed for {symbol}: {exc}")
@@ -171,12 +170,9 @@ def _get_tick_trades(
     """
     try:
         from datetime import datetime as _dt
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        df = dao.get_recent_trades(
+        df = get_alpaca_dao().get_recent_trades(
             symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date), limit=limit
         )
-        dao.close()
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_tick_trades failed for {symbol}: {exc}")
@@ -196,12 +192,9 @@ def _get_trade_count(symbol: str, start_date: str, end_date: str) -> dict:
     """
     try:
         from datetime import datetime as _dt
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        count = dao.get_recent_trade_count(
+        count = get_alpaca_dao().get_recent_trade_count(
             symbol, _dt.fromisoformat(start_date), _dt.fromisoformat(end_date)
         )
-        dao.close()
         return {"symbol": symbol, "start_date": start_date, "end_date": end_date, "trade_count": count}
     except Exception as exc:
         logger.warning(f"[registry] get_trade_count failed for {symbol}: {exc}")
@@ -220,10 +213,7 @@ def _get_intraday_stats(symbol: str, date: str) -> dict:
     """
     try:
         from datetime import date as _date
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        result = dao.calculate_intraday_stats(symbol, _date.fromisoformat(date))
-        dao.close()
+        result = get_alpaca_dao().calculate_intraday_stats(symbol, _date.fromisoformat(date))
         return _to_native(result) if result else {"error": f"No intraday data for {symbol} on {date}"}
     except Exception as exc:
         logger.warning(f"[registry] get_intraday_stats failed for {symbol}: {exc}")
@@ -237,10 +227,7 @@ def _get_watchlist() -> list:
         List of symbol strings.
     """
     try:
-        from src.common.dao import AlpacaDAO
-        dao = AlpacaDAO()
-        result = dao.get_watchlist(active_only=True)
-        dao.close()
+        result = get_alpaca_dao().get_watchlist(active_only=True)
         return result or []
     except Exception as exc:
         logger.warning(f"[registry] get_watchlist failed: {exc}")
@@ -260,10 +247,7 @@ def _get_company_fundamentals(symbol: str) -> dict:
         Company overview dict or error dict.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        result = dao.get_company_overview(symbol)
-        dao.close()
+        result = get_alpha_vantage_dao().get_company_overview(symbol)
         return _to_native(result) if result else {"error": f"No fundamentals found for {symbol}"}
     except Exception as exc:
         logger.warning(f"[registry] get_company_fundamentals failed for {symbol}: {exc}")
@@ -281,10 +265,7 @@ def _get_dividends(symbol: str, limit: int = 10) -> list:
         List of dividend dicts or empty list.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        df = dao.get_dividends(symbol, limit=limit)
-        dao.close()
+        df = get_alpha_vantage_dao().get_dividends(symbol, limit=limit)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_dividends failed for {symbol}: {exc}")
@@ -303,10 +284,7 @@ def _get_earnings_history(symbol: str, quarterly: bool = True, limit: int = 4) -
         List of earnings dicts or empty list.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        df = dao.get_earnings(symbol, quarterly=quarterly, limit=limit)
-        dao.close()
+        df = get_alpha_vantage_dao().get_earnings(symbol, quarterly=quarterly, limit=limit)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_earnings_history failed for {symbol}: {exc}")
@@ -325,10 +303,7 @@ def _get_income_statement(symbol: str, quarterly: bool = False, limit: int = 4) 
         List of income statement dicts or empty list.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        df = dao.get_income_statement(symbol, quarterly=quarterly, limit=limit)
-        dao.close()
+        df = get_alpha_vantage_dao().get_income_statement(symbol, quarterly=quarterly, limit=limit)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_income_statement failed for {symbol}: {exc}")
@@ -347,10 +322,7 @@ def _get_balance_sheet(symbol: str, quarterly: bool = False, limit: int = 4) -> 
         List of balance sheet dicts or empty list.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        df = dao.get_balance_sheet(symbol, quarterly=quarterly, limit=limit)
-        dao.close()
+        df = get_alpha_vantage_dao().get_balance_sheet(symbol, quarterly=quarterly, limit=limit)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_balance_sheet failed for {symbol}: {exc}")
@@ -369,10 +341,7 @@ def _get_cash_flow(symbol: str, quarterly: bool = False, limit: int = 4) -> list
         List of cash flow dicts or empty list.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        df = dao.get_cash_flow(symbol, quarterly=quarterly, limit=limit)
-        dao.close()
+        df = get_alpha_vantage_dao().get_cash_flow(symbol, quarterly=quarterly, limit=limit)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_cash_flow failed for {symbol}: {exc}")
@@ -386,17 +355,14 @@ def _get_all_fundamentals() -> list:
         List of company overview dicts for all tracked symbols.
     """
     try:
-        from src.common.dao import AlphaVantageDAO
-        dao = AlphaVantageDAO()
-        df = dao.get_all_fundamentals()
-        dao.close()
+        df = get_alpha_vantage_dao().get_all_fundamentals()
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_all_fundamentals failed: {exc}")
         return {"error": str(exc)}
 
 
-# ── AnalystDAO ────────────────────────────────────────────────────────────────
+# ── AnalysisDAO ────────────────────────────────────────────────────────────────
 
 
 def _get_eod_summaries(symbol: str, start_date: str, end_date: str) -> list:
@@ -412,19 +378,16 @@ def _get_eod_summaries(symbol: str, start_date: str, end_date: str) -> list:
     """
     try:
         from datetime import date as _date
-        from src.common.dao import AnalystDAO
-        dao = AnalystDAO()
-        df = dao.get_eod_summaries(
+        df = get_analysis_dao().get_eod_summaries(
             symbol, _date.fromisoformat(start_date), _date.fromisoformat(end_date)
         )
-        dao.close()
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_eod_summaries failed for {symbol}: {exc}")
         return {"error": str(exc)}
 
 
-# ── StrategyDAO ───────────────────────────────────────────────────────────────
+# ── AnalysisDAO ───────────────────────────────────────────────────────────────
 
 
 def _get_recent_signals(symbol: str, strategy_name: str, limit: int = 10) -> list:
@@ -439,10 +402,7 @@ def _get_recent_signals(symbol: str, strategy_name: str, limit: int = 10) -> lis
         List of signal dicts or empty list.
     """
     try:
-        from src.common.dao import StrategyDAO
-        dao = StrategyDAO()
-        df = dao.get_recent_signals(symbol, strategy_name, limit=limit)
-        dao.close()
+        df = get_analysis_dao().get_recent_signals(symbol, strategy_name, limit=limit)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_recent_signals failed for {symbol}: {exc}")
@@ -462,10 +422,9 @@ def _get_actionable_signals(
         List of actionable signal dicts.
     """
     try:
-        from src.common.dao import StrategyDAO
-        dao = StrategyDAO()
-        df = dao.get_actionable_signals(min_confidence=min_confidence, action_filter=action_filter)
-        dao.close()
+        df = get_analysis_dao().get_actionable_signals(
+            min_confidence=min_confidence, action_filter=action_filter
+        )
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_actionable_signals failed: {exc}")
@@ -483,10 +442,7 @@ def _get_strategy_performance(strategy_name: str, days: int = 30) -> dict:
         Performance stats dict (win rate, avg return, signal count, etc.).
     """
     try:
-        from src.common.dao import StrategyDAO
-        dao = StrategyDAO()
-        result = dao.get_strategy_performance(strategy_name, days=days)
-        dao.close()
+        result = get_analysis_dao().get_strategy_performance(strategy_name, days=days)
         return _to_native(result) if result else {"error": f"No performance data for {strategy_name}"}
     except Exception as exc:
         logger.warning(f"[registry] get_strategy_performance failed for {strategy_name}: {exc}")
@@ -506,10 +462,7 @@ def _get_backtest_run(run_id: str) -> dict:
         Run details dict or error dict.
     """
     try:
-        from src.common.dao import BacktestDAO
-        dao = BacktestDAO()
-        result = dao.get_run(run_id)
-        dao.close()
+        result = get_backtest_dao().get_run(run_id)
         return _to_native(result) if result else {"error": f"No backtest run found: {run_id}"}
     except Exception as exc:
         logger.warning(f"[registry] get_backtest_run failed for {run_id}: {exc}")
@@ -527,10 +480,7 @@ def _get_recent_backtest_runs(strategy_name: str = None, limit: int = 10) -> lis
         List of backtest run summary dicts.
     """
     try:
-        from src.common.dao import BacktestDAO
-        dao = BacktestDAO()
-        result = dao.get_recent_runs(strategy_name=strategy_name, limit=limit)
-        dao.close()
+        result = get_backtest_dao().get_recent_runs(strategy_name=strategy_name, limit=limit)
         return _to_native(result) if result else []
     except Exception as exc:
         logger.warning(f"[registry] get_recent_backtest_runs failed: {exc}")
@@ -547,10 +497,7 @@ def _get_backtest_trades(run_id: str) -> list:
         List of trade dicts or empty list.
     """
     try:
-        from src.common.dao import BacktestDAO
-        dao = BacktestDAO()
-        df = dao.get_trades_for_run(run_id)
-        dao.close()
+        df = get_backtest_dao().get_trades_for_run(run_id)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_backtest_trades failed for {run_id}: {exc}")
@@ -567,10 +514,7 @@ def _get_backtest_performance(run_id: str) -> list:
         List of daily performance dicts (date, equity, returns, etc.).
     """
     try:
-        from src.common.dao import BacktestDAO
-        dao = BacktestDAO()
-        df = dao.get_performance_history(run_id)
-        dao.close()
+        df = get_backtest_dao().get_performance_history(run_id)
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_backtest_performance failed for {run_id}: {exc}")
@@ -592,12 +536,9 @@ def _get_portfolio_snapshot_history(start_date: str, end_date: str) -> list:
     """
     try:
         from datetime import date as _date
-        from src.common.dao import PortfolioDAO
-        dao = PortfolioDAO()
-        df = dao.get_snapshot_history(
+        df = get_portfolio_dao().get_snapshot_history(
             _date.fromisoformat(start_date), _date.fromisoformat(end_date)
         )
-        dao.close()
         return _df_to_records(df)
     except Exception as exc:
         logger.warning(f"[registry] get_portfolio_snapshot_history failed: {exc}")
@@ -611,10 +552,7 @@ def _get_risk_parameters() -> dict:
         Dict of risk parameter names to values.
     """
     try:
-        from src.common.dao import PortfolioDAO
-        dao = PortfolioDAO()
-        result = dao.get_risk_parameters()
-        dao.close()
+        result = get_portfolio_dao().get_risk_parameters()
         return _to_native(result) if result else {}
     except Exception as exc:
         logger.warning(f"[registry] get_risk_parameters failed: {exc}")

@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
-from src.common.dao.strategy_dao import StrategyDAO
+from src.common.dao.analysis_dao import AnalysisDAO
 from src.common.dao.orders_dao import OrdersDAO
 from src.common.dao.alpaca_dao import AlpacaDAO
 from src.common.utils import get_logger
@@ -38,18 +38,18 @@ class SignalAggregator:
 
     def __init__(
         self,
-        strategy_dao: Optional[StrategyDAO] = None,
+        analysis_dao: Optional[AnalysisDAO] = None,
         orders_dao: Optional[OrdersDAO] = None,
         portfolio_dao: Optional[AlpacaDAO] = None
     ):
         """Initialize SignalAggregator with DAO dependencies.
 
         Args:
-            strategy_dao: DAO for strategy results. Auto-created if None.
+            analysis_dao: DAO for strategy results. Auto-created if None.
             orders_dao: DAO for order history. Auto-created if None.
             portfolio_dao: DAO for portfolio data. Auto-created if None.
         """
-        self.strategy_dao = strategy_dao or StrategyDAO()
+        self.analysis_dao = analysis_dao or AnalysisDAO()
         self.orders_dao = orders_dao or OrdersDAO()
         self.portfolio_dao = portfolio_dao or AlpacaDAO()
 
@@ -69,7 +69,7 @@ class SignalAggregator:
         """
         try:
             raw_signals = await asyncio.to_thread(
-                self.strategy_dao.get_actionable_signals_by_time,
+                self.analysis_dao.get_actionable_signals_by_time,
                 min_confidence=min_confidence,
                 lookback_minutes=lookback_minutes,
             )

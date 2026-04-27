@@ -88,8 +88,8 @@ async def health_detailed():
 
     # Analysis database
     try:
-        from src.common.dao.analyst_dao import AnalystDAO
-        dao = AnalystDAO()
+        from src.common.dao.analysis_dao import AnalysisDAO
+        dao = AnalysisDAO()
         has_summaries = dao.table_exists("analyst_summaries")
         dao.close()
         components["analysis_db"] = {

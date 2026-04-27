@@ -30,6 +30,10 @@ sys.path.insert(0, str(_project_root))
 from src.common.utils import get_logger, config as app_config
 from src.server.state import make_initial_state
 
+# Agent process only reads from all databases; ETL/API own the write locks.
+from src.common.db_connections import configure_read_only
+configure_read_only(["market", "analysis", "portfolio", "backtest"])
+
 logger = get_logger(__name__)
 
 

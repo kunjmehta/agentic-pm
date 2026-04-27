@@ -21,14 +21,16 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# ETL owns all writes to market and analysis databases.
+# Other processes (API, Agent) open these files read-only.
+
 _project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_project_root))
 
 from src.common.utils import get_logger, config as app_config
-from src.common.data_gatherer.db_stream_handlers import (
+from src.common.ingestion import (
     start_background_flush_task,
     stop_background_flush_task,
-    set_strategy_registry,
 )
 from src.server.registry.register_strategies import ensure_strategies_registered
 
@@ -44,7 +46,7 @@ async def _run_periodic_archival() -> None:
 
     Runs every ``_ARCHIVAL_INTERVAL_MINUTES`` minutes.
     """
-    from src.common.dao.alpaca_dao import AlpacaDAO
+    from src.common.utils.container import get_alpaca_dao
 
     logger.info(
         f"[archival] periodic task started — interval={_ARCHIVAL_INTERVAL_MINUTES}m, "
@@ -54,28 +56,22 @@ async def _run_periodic_archival() -> None:
         while True:
             await asyncio.sleep(_ARCHIVAL_INTERVAL_MINUTES * 60)
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=_ARCHIVAL_CUTOFF_MINUTES)
-            dao = AlpacaDAO()
             try:
-                archived = dao.archive_live_trades(cutoff_time=cutoff)
+                archived = get_alpaca_dao().archive_live_trades(cutoff_time=cutoff)
                 if archived:
                     logger.info(f"[archival] archived {archived} live trade(s)")
                 else:
                     logger.debug("[archival] no eligible live trades")
             except Exception as exc:
                 logger.error(f"[archival] failed: {exc}", exc_info=True)
-            finally:
-                dao.close()
     except asyncio.CancelledError:
         logger.info("[archival] task cancelled — running final archival")
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=_ARCHIVAL_CUTOFF_MINUTES)
-        dao = AlpacaDAO()
         try:
-            archived = dao.archive_live_trades(cutoff_time=cutoff)
+            archived = get_alpaca_dao().archive_live_trades(cutoff_time=cutoff)
             logger.info(f"[archival] shutdown: archived {archived} trade(s)")
         except Exception as exc:
             logger.error(f"[archival] shutdown archival failed: {exc}", exc_info=True)
-        finally:
-            dao.close()
 
 
 async def _run_streams(watchlist: list) -> None:
@@ -85,7 +81,7 @@ async def _run_streams(watchlist: list) -> None:
 
     if use_redis:
         from src.common.cache.redis_stream_consumer import RedisStreamConsumer
-        from src.common.data_gatherer.db_stream_handlers import (
+        from src.common.ingestion import (
             combined_trade_handler,
             combined_bar_handler,
         )
@@ -104,7 +100,7 @@ async def _run_streams(watchlist: list) -> None:
             consumer.stop()
             await stop_background_flush_task()
     else:
-        from src.common.data_gatherer.data_coordinator import DataCoordinator
+        from src.common.ingestion import DataCoordinator
 
         logger.info(f"[streams] Direct Alpaca WebSocket — symbols: {watchlist}")
         coordinator = DataCoordinator(symbols=watchlist)
@@ -121,7 +117,56 @@ async def _run_streams(watchlist: list) -> None:
             if flush_task is not None:
                 await stop_background_flush_task()
             coordinator.stop_all_streaming()
-            coordinator.close()
+
+
+async def _ensure_historical_data_loaded(symbols: list[str], years: int = 3) -> None:
+    """Seed historical daily bars for *symbols* if not already present.
+
+    ETL owns the market write connection so this must run here, not in the API
+    process.
+
+    Args:
+        symbols: Watchlist symbols to check.
+        years: Years of daily bar history to fetch when data is missing.
+    """
+    from src.common.utils.container import get_alpaca_dao
+    from src.common.external.alpaca import fetch_historical_bars
+
+    logger.info("=" * 70)
+    logger.info(f"[historical] Checking {len(symbols)} symbol(s) for {years}y of daily bars...")
+    logger.info("=" * 70)
+
+    dao = get_alpaca_dao()
+    expected_bars = years * 252
+    for symbol in symbols:
+        try:
+            result = dao.fetch_one(
+                "SELECT MAX(timestamp) as latest_ts, COUNT(*) as bar_count "
+                "FROM market_bars WHERE symbol = ? AND timeframe = '1Day'",
+                (symbol,),
+            )
+            bar_count = result.get("bar_count", 0) if result else 0
+            latest_ts = result.get("latest_ts") if result else None
+
+            if latest_ts is not None and bar_count >= expected_bars * 0.8:
+                logger.info(f"[historical] {symbol} OK — {bar_count} bars, latest: {latest_ts}")
+                continue
+
+            logger.info(f"[historical] {symbol} insufficient ({bar_count} bars) — fetching...")
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=years * 365)
+            bars_df = await asyncio.to_thread(
+                fetch_historical_bars,
+                symbol=symbol,
+                start=start.isoformat(),
+                end=end.isoformat(),
+                timeframe="1Day",
+            )
+            logger.info(f"[historical] {symbol} seeded {len(bars_df)} daily bars")
+        except Exception as exc:
+            logger.error(f"[historical] {symbol} failed: {exc}", exc_info=True)
+
+    logger.info("[historical] Seed check complete")
 
 
 async def main() -> None:
@@ -130,28 +175,26 @@ async def main() -> None:
     logger.info("ETL Process starting...")
     logger.info("=" * 70)
 
-    # Wire strategy registry into db_stream_handlers for signal generation
-    from src.common.registry import strategy_registry as _strategy_registry_mod
-
     ensure_strategies_registered()
-    set_strategy_registry(_strategy_registry_mod)
-    logger.info("[OK] Strategy registry wired into stream handlers")
+    logger.info("[OK] Strategies registered")
 
     # Startup archival: clear stale rows from previous run
     try:
-        from src.common.dao.alpaca_dao import AlpacaDAO
+        from src.common.utils.container import get_alpaca_dao
 
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=_ARCHIVAL_CUTOFF_MINUTES)
-        dao = AlpacaDAO()
-        try:
-            archived = dao.archive_live_trades(cutoff_time=cutoff)
-            logger.info(f"[startup] archived {archived} stale live trade(s)")
-        finally:
-            dao.close()
+        archived = get_alpaca_dao().archive_live_trades(cutoff_time=cutoff)
+        logger.info(f"[startup] archived {archived} stale live trade(s)")
     except Exception as exc:
         logger.warning(f"[startup] archival skipped: {exc}")
 
     watchlist = app_config.get_watchlist_symbols() or app_config.get("watchlist", default=["AAPL"])
+
+    # Seed historical data before streaming begins (ETL owns market writes).
+    try:
+        await _ensure_historical_data_loaded(watchlist, years=3)
+    except Exception as exc:
+        logger.warning(f"[startup] Historical seeding failed: {exc}", exc_info=True)
 
     archival_task = asyncio.create_task(_run_periodic_archival(), name="live-trades-archival")
     stream_task = asyncio.create_task(_run_streams(watchlist), name="market-streams")

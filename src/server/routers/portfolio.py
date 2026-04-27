@@ -29,7 +29,7 @@ async def portfolio_status() -> Dict[str, Any]:
     Returns:
         Portfolio status dict from Alpaca.
     """
-    from src.agentic.agents.portfolio.skills.portfoliostatus.status import get_portfolio_status_core
+    from src.server.skills.portfolio.skills import get_portfolio_status_core
 
     return await run_in_thread(get_portfolio_status_core)
 

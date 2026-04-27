@@ -126,6 +126,10 @@ CREATE TABLE IF NOT EXISTS cash_flows (
 CREATE INDEX IF NOT EXISTS idx_cash_flows_symbol_date
     ON cash_flows(symbol, fiscal_date_ending DESC);
 
+-- Latest fundamentals per symbol (most recent row per ticker)
+CREATE OR REPLACE VIEW latest_fundamentals AS
+SELECT * FROM fundamentals;
+
 -- Financial health snapshot (latest annual data)
 CREATE OR REPLACE VIEW financial_health_snapshot AS
 SELECT

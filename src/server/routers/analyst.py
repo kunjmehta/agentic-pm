@@ -1,11 +1,11 @@
-"""Analyst router — read-only AnalystDAO endpoints at /v1/analyst/..."""
+"""Analyst router — read-only AnalysisDAO endpoints at /v1/analyst/..."""
 
 from datetime import date as _date
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Query
 
-from src.common.dao.analyst_dao import AnalystDAO
+from src.common.dao.analysis_dao import AnalysisDAO
 from src.common.utils import get_logger
 from src.server.models.endpoints import (
     AnalystSymbolsResponse,
@@ -29,7 +29,7 @@ async def get_all_symbols() -> Dict[str, Any]:
         Dict with ``symbols`` list and ``count``.
     """
     def _fetch() -> list:
-        with dao_context(AnalystDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_all_symbols()
 
     symbols = await run_in_thread(_fetch)
@@ -52,7 +52,7 @@ async def get_eod_summaries(
     end_date = _date.fromisoformat(end)
 
     def _fetch():
-        with dao_context(AnalystDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_eod_summaries(symbol.upper(), start_date, end_date)
 
     df = await run_in_thread(_fetch)
@@ -69,7 +69,7 @@ async def get_latest_eod(symbol: str) -> Dict[str, Any]:
         Dict with ``symbol`` and ``summary`` (dict or null).
     """
     def _fetch():
-        with dao_context(AnalystDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_latest_eod(symbol.upper())
 
     summary = await run_in_thread(_fetch)
@@ -88,7 +88,7 @@ async def get_recent_eods(
         Dict with ``summaries`` list and ``count``.
     """
     def _fetch():
-        with dao_context(AnalystDAO) as dao:
+        with dao_context(AnalysisDAO) as dao:
             return dao.get_recent_eods(symbol.upper(), count=count)
 
     summaries = await run_in_thread(_fetch)

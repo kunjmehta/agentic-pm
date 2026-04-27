@@ -71,10 +71,10 @@ class BaseDAO:
                 db_path = str(project_root / db_path)
 
             self.db_path = db_path
-            # Use the shared WAL connection when the path matches a known DB_FILE_MAP entry.
-            # This ensures all DAOs within a process share one R/W connection per file.
+            # Use the shared WAL connection only when the path matches a known DB_FILE_MAP
+            # entry. Custom paths (tests, temp files) get a private connection.
             abs_map = {str(project_root / v): k for k, v in self.DB_FILE_MAP.items()}
-            self._db_type_key: Optional[str] = abs_map.get(self.db_path) or db_type
+            self._db_type_key: Optional[str] = abs_map.get(self.db_path)
             self._use_shared_conn: bool = self._db_type_key is not None
 
             # Ensure database directory exists (only if not already there)

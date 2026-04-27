@@ -376,7 +376,7 @@ def _create_sandbox_sync(record: SandboxRecord, api_key: str, openai_key: str) -
 
         # ── Build DeepAgent ──
         safe_name = record.name.replace("-", "_")
-        scaffold_rel = f"src/server/skills/quant/new_strategy_{safe_name}.py"
+        scaffold_rel = f"/home/daytona/src/server/skills/quant/new_strategy_{safe_name}.py"
         scaffold_prompt = (
             f"\n\nYour PRIMARY task for this session is the scaffold strategy file at:\n"
             f"  {scaffold_rel}\n"
